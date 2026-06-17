@@ -34,9 +34,8 @@ public sealed class NfsV4Client : IAsyncDisposable
     private byte[] _savedFh = Array.Empty<byte>();
     private ulong _clientId;
     private byte[] _clientVerifier = new byte[8];
-    private NfsV4StateId? _currentStateId;
+    private NfsV4StateId? _currentStateId = NfsV4StateId.Anonymous;
     private ulong _sequenceId;
-    private uint _leaseTime;
 
     private NfsV4Client(IPAddress ip, NfsClientOptions options, uint minorVersion)
     {
@@ -703,7 +702,6 @@ public sealed class NfsV4Client : IAsyncDisposable
     {
         var entries = new List<NfsV4DirEntry>();
         reader.FixedBytes(8); // cookie verifier
-        var eof = false;
 
         while (reader.Bool()) // value_follows
         {

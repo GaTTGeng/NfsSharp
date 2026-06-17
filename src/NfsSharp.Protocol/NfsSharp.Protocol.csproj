@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Description>NFSv3 and NFSv4 protocol models, XDR primitives, status codes, and RPCSEC_GSS abstractions for .NET.</Description>
   </PropertyGroup>
 
   <ItemGroup>

@@ -112,7 +112,7 @@ public sealed record NfsSetAttributes
     public static NfsSetAttributes DirectoryDefault { get; } = new() { Mode = 0x1ED }; // 0755
 }
 
-/// <summary>Connection and protocol options for <see cref="NfsV3Client"/>.</summary>
+/// <summary>Connection and protocol options for the NFS clients.</summary>
 public sealed record NfsClientOptions
 {
     public static NfsClientOptions Default { get; } = new();

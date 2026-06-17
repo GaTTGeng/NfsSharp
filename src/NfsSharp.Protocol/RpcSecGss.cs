@@ -43,11 +43,13 @@ public interface IRpcSecGssMechanism : IDisposable
     /// <summary>Initiate a GSS security context. Returns the initial token to send to the server.</summary>
     /// <param name="targetName">Service principal name (e.g., "nfs/server.example.com@REALM").</param>
     /// <param name="credentials">Optional credentials (e.g., keytab path or password).</param>
+    /// <param name="ct">Cancellation token.</param>
     /// <returns>Initial GSS token to include in RPCSEC_GSS_CREATE request.</returns>
     Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct);
 
     /// <summary>Continue context establishment with a server token.</summary>
     /// <param name="serverToken">Token received from the server.</param>
+    /// <param name="ct">Cancellation token.</param>
     /// <returns>Next token to send, or empty if context is established.</returns>
     Task<byte[]> ContinueContextAsync(byte[] serverToken, CancellationToken ct);
 

@@ -1,13 +1,32 @@
 <Project>
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
     <IsPackable>true</IsPackable>
     <Version>1.0.0</Version>
-    <Authors>NfsSharp</Authors>
-    <Company>Chemical.AI</Company>
-    <Description>Managed NFSv3 client for .NET — file operations, directory listing, streaming reads/writes</Description>
-    <PackageTags>nfs;nfs-v3;storage;backup;network</PackageTags>
+    <Authors>NfsSharp Contributors</Authors>
+    <Company>NfsSharp</Company>
+    <Description>Managed NFS client SDK for .NET with NFSv3 and experimental NFSv4 APIs</Description>
+    <PackageTags>nfs;nfs-v3;rpc;xdr;storage;network</PackageTags>
     <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/MattGRP/NfsSharp</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/MattGRP/NfsSharp</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>See CHANGELOG.md for release notes and current scope.</PackageReleaseNotes>
+    <Copyright>Copyright (c) 2026 NfsSharp contributors</Copyright>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
 </Project>

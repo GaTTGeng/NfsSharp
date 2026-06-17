@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Description>Managed NFS client for .NET with a high-level NFSv3 API and experimental NFSv4 COMPOUND operations.</Description>
   </PropertyGroup>
 
   <ItemGroup>
