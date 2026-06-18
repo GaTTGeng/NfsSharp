@@ -1,9 +1,9 @@
 # NfsSharp
 
-[![CI](https://github.com/MattGRP/NfsSharp/actions/workflows/ci.yml/badge.svg)](https://github.com/MattGRP/NfsSharp/actions/workflows/ci.yml)
+[![CI](https://github.com/GaTTGeng/NfsSharp/actions/workflows/ci.yml/badge.svg)](https://github.com/GaTTGeng/NfsSharp/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/NfsSharp.Client.svg)](https://www.nuget.org/packages/NfsSharp.Client)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/NfsSharp.Client.svg)](https://www.nuget.org/packages/NfsSharp.Client)
-[![License](https://img.shields.io/github/license/MattGRP/NfsSharp.svg)](LICENSE)
+[![License](https://img.shields.io/github/license/GaTTGeng/NfsSharp.svg)](LICENSE)
 
 [简体中文](README.zh-CN.md)
 

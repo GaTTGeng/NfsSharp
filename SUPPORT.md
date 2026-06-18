@@ -1,6 +1,6 @@
 # Support
 
-Use [GitHub Issues](https://github.com/MattGRP/NfsSharp/issues) for reproducible bugs and focused feature requests.
+Use [GitHub Issues](https://github.com/GaTTGeng/NfsSharp/issues) for reproducible bugs and focused feature requests.
 
 Include the following information where relevant:
 
