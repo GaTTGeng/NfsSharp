@@ -1,0 +1,78 @@
+name: NFS Compatibility Gap
+description: Report behavior that differs from an NFS specification or server implementation
+labels: ["compatibility", "nfs"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for behavior that can be compared with an NFS RFC, another client, or a specific server implementation.
+
+  - type: input
+    id: nfs-version
+    attributes:
+      label: NFS protocol version
+      placeholder: "NFSv3"
+    validations:
+      required: true
+
+  - type: input
+    id: nfssharp-version
+    attributes:
+      label: NfsSharp version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: server
+    attributes:
+      label: NFS server implementation and version
+      placeholder: "Linux nfs-kernel-server 2.6.x"
+    validations:
+      required: true
+
+  - type: input
+    id: operation
+    attributes:
+      label: Operation
+      description: Identify the RPC procedure, COMPOUND operation, or high-level API.
+      placeholder: "READDIRPLUS / NfsClient.GetItemListAsync"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest server setup and code needed to reproduce the difference.
+      render: csharp
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected or reference behavior
+      description: Include output from another client or cite the relevant RFC section.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: NfsSharp behavior
+      description: Include return values, status codes, exceptions, or logs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Supporting evidence
+      description: Add sanitized packet traces, server logs, or links to protocol documentation when available.
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Include client OS, target framework, authentication mode, and transport details.

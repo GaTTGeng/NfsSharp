@@ -1,0 +1,99 @@
+name: Bug Report
+description: Report a bug in NfsSharp
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please provide enough detail for the issue to be reproduced.
+
+  - type: input
+    id: version
+    attributes:
+      label: NfsSharp version
+      description: Which NfsSharp package version are you using?
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - NfsSharp.Client
+        - NfsSharp.Protocol
+        - Both or unsure
+    validations:
+      required: true
+
+  - type: input
+    id: dotnet-version
+    attributes:
+      label: .NET version
+      description: Which target framework and SDK version are you using?
+      placeholder: "net8.0 with SDK 8.0.4xx"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: NFS protocol
+      options:
+        - NFSv3
+        - NFSv4.0 (experimental)
+        - NFSv4.1 (experimental)
+        - NFSv4.2 (experimental)
+        - Not protocol-specific or unsure
+    validations:
+      required: true
+
+  - type: input
+    id: server
+    attributes:
+      label: NFS server
+      description: Identify the server implementation and version when known.
+      placeholder: "Linux nfs-kernel-server 2.6.x"
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior clearly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest code sample and server setup that reproduce the issue.
+      placeholder: |
+        1. Connect to ...
+        2. Mount ...
+        3. Call ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error output
+      description: Remove credentials, hostnames, file contents, and other sensitive data.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include client OS, transport details, authentication mode, or packet captures when relevant.
