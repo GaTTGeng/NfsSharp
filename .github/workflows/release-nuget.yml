@@ -33,6 +33,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
@@ -41,6 +43,17 @@ jobs:
             8.0.x
             9.0.x
             10.0.x
+
+      - name: Verify release commit is on master
+        shell: bash
+        run: |
+          git fetch origin master:refs/remotes/origin/master
+          release_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+
+          if ! git merge-base --is-ancestor "$release_commit" refs/remotes/origin/master; then
+            echo "Release commit $release_commit is not reachable from master."
+            exit 1
+          fi
 
       - name: Resolve package version
         shell: bash
