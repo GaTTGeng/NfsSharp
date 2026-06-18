@@ -95,6 +95,11 @@ await client.UnMountDeviceAsync();
 - 端到端行为取决于服务端导出策略、身份映射、防火墙、rpcbind 和 mountd 配置。
 - 自动化测试目前主要覆盖协议编码和本地行为；针对多种 NFS 服务端的集成测试仍属于后续路线图。
 
+## 文档
+
+- [路线图](https://github.com/GaTTGeng/NfsSharp/blob/master/docs/roadmap.md)
+- [NFS 兼容性矩阵](https://github.com/GaTTGeng/NfsSharp/blob/master/docs/nfs-compatibility.md)
+
 ## 构建与测试
 
 ```powershell
