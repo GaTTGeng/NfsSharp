@@ -50,7 +50,7 @@ An implemented method without real-server verification remains partial or experi
 | Protocol area | NfsSharp API | Status | Track | Remaining work |
 | --- | --- | --- | --- | --- |
 | Export discovery | `NfsV3Client.ListExportsAsync`, `NfsClient.GetExportedDevicesAsync` | **Partial** | M1/M2 | Real-server coverage, group parsing, empty lists, denial, and portmapper variations. |
-| Mount and unmount | `NfsV3Client.ConnectAsync`, `UnmountAsync` | **Partial** | M1/M2/M3 | Lifecycle tests, cleanup after failures, reconnect behavior, and server restart cases. |
+| Mount and unmount | `NfsV3Client.ConnectAsync`, `NfsV3Client.UnmountAsync` | **Partial** | M1/M2/M3 | Lifecycle tests, cleanup after failures, reconnect behavior, and server restart cases. |
 | Path lookup and attributes | `LookupPathAsync`, `GetAttributesAsync` | **Partial** | M1/M2 | Path edge cases, stale handles, symlinks, permission failures, and attribute fidelity. |
 | Access checks and links | `AccessAsync`, `ReadLinkAsync`, link creation APIs | **Partial** | M1/M2 | Server policy differences, link limits, loops, and error mapping. |
 | Directory enumeration | `ReadDirAsync`, `ReadDirPlusAsync` | **Partial** | M1/M2/M3 | Cookie verifier handling, pagination, mutation during enumeration, and large directories. |

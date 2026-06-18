@@ -124,8 +124,8 @@ Console.WriteLine($"{attributes.Size} bytes");
 
 ## Documentation
 
-- [Roadmap](https://github.com/GaTTGeng/NfsSharp/blob/master/docs/roadmap.md)
-- [NFS compatibility matrix](https://github.com/GaTTGeng/NfsSharp/blob/master/docs/nfs-compatibility.md)
+- [Roadmap](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/roadmap.md)
+- [NFS compatibility matrix](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)
 
 ## Build
 

@@ -97,8 +97,8 @@ await client.UnMountDeviceAsync();
 
 ## 文档
 
-- [路线图](https://github.com/GaTTGeng/NfsSharp/blob/master/docs/roadmap.md)
-- [NFS 兼容性矩阵](https://github.com/GaTTGeng/NfsSharp/blob/master/docs/nfs-compatibility.md)
+- [路线图](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/roadmap.md)
+- [NFS 兼容性矩阵](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)
 
 ## 构建与测试
 
