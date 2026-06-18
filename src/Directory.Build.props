@@ -8,8 +8,8 @@
     <Description>Managed NFS client SDK for .NET with NFSv3 and experimental NFSv4 APIs</Description>
     <PackageTags>nfs;nfs-v3;rpc;xdr;storage;network</PackageTags>
     <RepositoryType>git</RepositoryType>
-    <RepositoryUrl>https://github.com/MattGRP/NfsSharp</RepositoryUrl>
-    <PackageProjectUrl>https://github.com/MattGRP/NfsSharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/GaTTGeng/NfsSharp</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/GaTTGeng/NfsSharp</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>See CHANGELOG.md for release notes and current scope.</PackageReleaseNotes>
