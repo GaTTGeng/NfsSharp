@@ -122,6 +122,11 @@ Console.WriteLine($"{attributes.Size} bytes");
 - End-to-end behavior depends on the server's export policy, identity mapping, firewall, rpcbind, and mountd configuration.
 - The automated test suite primarily covers protocol encoding and local behavior. Integration tests against multiple NFS server implementations remain a roadmap item.
 
+## Documentation
+
+- [Roadmap](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/roadmap.md)
+- [NFS compatibility matrix](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)
+
 ## Build
 
 ```powershell
