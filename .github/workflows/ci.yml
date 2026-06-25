@@ -90,7 +90,10 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
 
       - name: Start NFSv3 test server
         run: docker compose -f compose.integration.yml up --build --detach --wait --wait-timeout 90
