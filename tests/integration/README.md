@@ -16,6 +16,7 @@ Run the integration tests:
 $env:NFSSHARP_RUN_NFSV3_INTEGRATION = "1"
 $env:NFSSHARP_NFS_SERVER = "127.0.0.1"
 $env:NFSSHARP_NFS_EXPORT = "/export"
+$env:NFSSHARP_NFS_EXPECTED_EXPORT_GROUP = "*"
 dotnet test NfsSharp.sln --configuration Release --filter "Category=Integration"
 ```
 
@@ -35,6 +36,7 @@ Without `NFSSHARP_RUN_NFSV3_INTEGRATION=1`, the integration tests are skipped an
 | `NFSSHARP_RUN_NFSV3_INTEGRATION` | unset | Set to `1` to enable real-server tests. |
 | `NFSSHARP_NFS_SERVER` | `127.0.0.1` | NFS server address. |
 | `NFSSHARP_NFS_EXPORT` | `/export` | NFSv3 export path. |
+| `NFSSHARP_NFS_EXPECTED_EXPORT_GROUP` | `*` only when server and export use implicit defaults; otherwise unset | Optional access group to assert in mountd export-list results. Leave unset for external servers where the advertised group is server-specific or empty. |
 | `NFSSHARP_NFS_UID` | `0` | AUTH_SYS user ID. |
 | `NFSSHARP_NFS_GID` | `0` | AUTH_SYS primary group ID. |
 

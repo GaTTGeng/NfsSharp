@@ -23,9 +23,25 @@ internal static class NfsV3IntegrationEnvironment
     public static string ExportPath =>
         Environment.GetEnvironmentVariable("NFSSHARP_NFS_EXPORT") ?? "/export";
 
+    public static string? ExpectedExportGroup
+    {
+        get
+        {
+            var configured = Environment.GetEnvironmentVariable("NFSSHARP_NFS_EXPECTED_EXPORT_GROUP");
+            if (!string.IsNullOrWhiteSpace(configured))
+                return configured;
+
+            return UsesDefaultExportEndpoint ? "*" : null;
+        }
+    }
+
     public static uint UserId => ReadUInt32("NFSSHARP_NFS_UID");
 
     public static uint GroupId => ReadUInt32("NFSSHARP_NFS_GID");
+
+    private static bool UsesDefaultExportEndpoint =>
+        string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NFSSHARP_NFS_SERVER")) &&
+        string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NFSSHARP_NFS_EXPORT"));
 
     private static uint ReadUInt32(string name)
     {
