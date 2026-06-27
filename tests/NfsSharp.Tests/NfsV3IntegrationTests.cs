@@ -77,7 +77,8 @@ public sealed class NfsV3IntegrationTests
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var client = await ConnectV3ClientAsync(timeout.Token);
-        var directory = CreateUniquePath("metadata");
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+        var directory = fixture.GetRunPath(CreateUniquePath("metadata"));
 
         try
         {
@@ -97,10 +98,10 @@ public sealed class NfsV3IntegrationTests
             Assert.False(await client.FileExistsAsync($"{directory}/missing", timeout.Token));
 
             var entries = await client.ReadDirAsync(".", timeout.Token);
-            Assert.Contains(entries, entry => entry.Name == directory);
+            Assert.Contains(entries, entry => entry.Name == NfsV3IntegrationFixture.RootDirectory);
 
-            var plusEntries = await client.ReadDirPlusAsync(".", timeout.Token);
-            var plusEntry = Assert.Single(plusEntries, entry => entry.Name == directory);
+            var plusEntries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+            var plusEntry = Assert.Single(plusEntries, entry => entry.Name == Path.GetFileName(directory));
             Assert.Equal(NfsType.Dir, plusEntry.Attr?.Type);
             Assert.NotNull(plusEntry.Handle);
             Assert.NotEmpty(plusEntry.Handle);
@@ -112,6 +113,45 @@ public sealed class NfsV3IntegrationTests
         }
 
         Assert.False(await client.FileExistsAsync(directory, timeout.Token));
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_MaterializesDeterministicFixtureData()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        await AssertDirectoryAsync(client, NfsV3IntegrationFixture.RootDirectory, timeout.Token);
+        await AssertDirectoryAsync(client, NfsV3IntegrationFixture.EmptyDirectory, timeout.Token);
+        await AssertDirectoryAsync(client, NfsV3IntegrationFixture.NestedDirectory, timeout.Token);
+
+        await AssertFixtureFileAsync(client, NfsV3IntegrationFixture.EmptyFile, timeout.Token);
+        await AssertFixtureFileAsync(client, NfsV3IntegrationFixture.SmallFile, timeout.Token);
+        await AssertFixtureFileAsync(client, NfsV3IntegrationFixture.NestedFile, timeout.Token);
+        await AssertFixtureFileAsync(client, NfsV3IntegrationFixture.UnicodeFile, timeout.Token);
+        await AssertFixtureFileAsync(client, NfsV3IntegrationFixture.BoundaryFile, timeout.Token);
+
+        if (fixture.Capabilities.SupportsSymbolicLinks)
+        {
+            var target = await client.ReadLinkAsync(NfsV3IntegrationFixture.SymlinkPath, timeout.Token);
+            Assert.Equal(NfsV3IntegrationFixture.SymlinkTarget, target);
+        }
+
+        if (fixture.Capabilities.SupportsHardLinks)
+        {
+            var source = await client.GetAttributesAsync(NfsV3IntegrationFixture.SmallFilePath, timeout.Token);
+            var link = await client.GetAttributesAsync(NfsV3IntegrationFixture.HardLinkPath, timeout.Token);
+            Assert.Equal(source.FileId, link.FileId);
+            Assert.True(link.LinkCount >= 2);
+        }
+
+        if (fixture.Capabilities.AppliesRestrictedModeBits)
+        {
+            var restricted = await client.GetAttributesAsync(NfsV3IntegrationFixture.RestrictedDirectory, timeout.Token);
+            Assert.Equal(0u, restricted.Mode & 0x1FF);
+        }
     }
 
     [NfsV3IntegrationFact]
@@ -228,6 +268,30 @@ public sealed class NfsV3IntegrationTests
 
     private static string CreateUniquePath(string prefix) =>
         $"{prefix}-{Guid.NewGuid():N}";
+
+    private static async Task AssertDirectoryAsync(
+        NfsV3Client client,
+        string path,
+        CancellationToken ct)
+    {
+        var attributes = await client.GetAttributesAsync(path, ct);
+        Assert.Equal(NfsType.Dir, attributes.Type);
+    }
+
+    private static async Task AssertFixtureFileAsync(
+        NfsV3Client client,
+        NfsV3FixtureFile file,
+        CancellationToken ct)
+    {
+        var attributes = await client.GetAttributesAsync(file.Path, ct);
+        Assert.Equal(NfsType.Reg, attributes.Type);
+        Assert.Equal(file.Size, attributes.Size);
+        Assert.Equal(file.Mode, attributes.Mode & 0x1FF);
+
+        await using var output = new MemoryStream();
+        await client.ReadFileAsync(file.Path, output, ct);
+        Assert.Equal(file.Content, output.ToArray());
+    }
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]

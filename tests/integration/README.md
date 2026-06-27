@@ -29,6 +29,25 @@ docker compose -f compose.integration.yml down --volumes --remove-orphans
 
 Without `NFSSHARP_RUN_NFSV3_INTEGRATION=1`, the integration tests are skipped and the normal unit-test workflow does not require Docker.
 
+## Fixture layout
+
+When the integration tests connect, they create an idempotent fixture tree under `nfssharp-fixtures` in the export. Shared fixture paths are treated as read-only test data:
+
+| Path | Purpose |
+| --- | --- |
+| `nfssharp-fixtures/empty-dir` | Empty directory lookup and enumeration case. |
+| `nfssharp-fixtures/nested/child/data.bin` | Nested binary file with deterministic byte content. |
+| `nfssharp-fixtures/empty.txt` | Empty regular file. |
+| `nfssharp-fixtures/hello.txt` | Small text file and hard-link source. |
+| `nfssharp-fixtures/unicode-\u6d4b\u8bd5.txt` | Unicode path component case. |
+| `nfssharp-fixtures/boundary-...` | 255-character name boundary case. |
+| `nfssharp-fixtures/hello-link` | Symbolic link to `hello.txt`, when supported by the server. |
+| `nfssharp-fixtures/hello-hardlink` | Hard link to `hello.txt`, when supported by the server. |
+| `nfssharp-fixtures/no-access` | Permission-denied candidate with mode `000`, when mode bits are enforced by the server and AUTH_SYS identity. |
+| `nfssharp-fixtures/runs/run-*` | Per-test mutable workspace, removed by the fixture cleanup path. |
+
+The repository-owned Ganesha MEM server supports the common file, directory, symlink, hard-link, and mode-bit fixture cases. External servers may expose different behavior for symlink, hard-link, timestamp, or permission enforcement; tests discover those optional capabilities and only assert them when the server accepts the setup.
+
 ## Test environment
 
 | Variable | Default | Purpose |
