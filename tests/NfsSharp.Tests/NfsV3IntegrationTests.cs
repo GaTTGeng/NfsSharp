@@ -455,6 +455,55 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_VerifiesFileSystemStatInfoAndPathConfByHandleAndPath()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var lookup = await client.LookupPathAsync(NfsV3IntegrationFixture.BoundaryFile.Path, timeout.Token);
+
+        var statByPath = await client.GetFileSystemStatAsync(NfsV3IntegrationFixture.BoundaryFile.Path, timeout.Token);
+        var statByHandle = await client.GetFileSystemStatAsync(lookup.Handle, timeout.Token);
+        AssertFileSystemStat(statByPath);
+        AssertFileSystemStat(statByHandle);
+
+        var infoByPath = await client.GetFileSystemInfoAsync(NfsV3IntegrationFixture.BoundaryFile.Path, timeout.Token);
+        var infoByHandle = await client.GetFileSystemInfoAsync(lookup.Handle, timeout.Token);
+        Assert.Equal(infoByPath, infoByHandle);
+        AssertFileSystemInfo(infoByPath, fixture.Capabilities);
+
+        var pathConfByPath = await client.GetPathConfAsync(NfsV3IntegrationFixture.BoundaryFile.Path, timeout.Token);
+        var pathConfByHandle = await client.GetPathConfAsync(lookup.Handle, timeout.Token);
+        Assert.Equal(pathConfByPath, pathConfByHandle);
+        AssertPathConf(pathConfByPath, fixture.Capabilities);
+
+        await AssertPathConfCaseBehaviorAsync(client, fixture, pathConfByPath, timeout.Token);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsClient_ReportsFileSystemCapabilitiesThroughFacade()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+        await using var client = new NfsClient(NfsVersion.V3, CreateOptions());
+
+        await client.ConnectAsync(NfsV3IntegrationEnvironment.Server, timeout.Token);
+        await client.MountDeviceAsync(NfsV3IntegrationEnvironment.ExportPath, timeout.Token);
+
+        var stat = await client.GetFileSystemStatAsync(NfsV3IntegrationFixture.RootDirectory, timeout.Token);
+        var info = await client.GetFileSystemInfoAsync(NfsV3IntegrationFixture.RootDirectory, timeout.Token);
+        var pathConf = await client.GetPathConfAsync(NfsV3IntegrationFixture.RootDirectory, timeout.Token);
+
+        AssertFileSystemStat(stat);
+        AssertFileSystemInfo(info, fixture.Capabilities);
+        AssertPathConf(pathConf, fixture.Capabilities);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_CanceledExportListThrowsOperationCanceled()
     {
         using var canceled = new CancellationTokenSource();
@@ -700,6 +749,112 @@ public sealed class NfsV3IntegrationTests
     }
 
     private static bool IsSpecialDirectoryEntry(string name) => name is "." or "..";
+
+    private static void AssertFileSystemStat(NfsFileSystemStat stat)
+    {
+        if (stat.TotalBytes > 0)
+        {
+            Assert.True(stat.FreeBytes <= stat.TotalBytes);
+            Assert.True(stat.AvailableBytes <= stat.FreeBytes);
+        }
+        else
+        {
+            Assert.Equal(0ul, stat.FreeBytes);
+            Assert.Equal(0ul, stat.AvailableBytes);
+        }
+
+        if (stat.TotalFiles > 0)
+        {
+            Assert.True(stat.FreeFiles <= stat.TotalFiles);
+            Assert.True(stat.AvailableFiles <= stat.FreeFiles);
+        }
+        else
+        {
+            Assert.Equal(0ul, stat.FreeFiles);
+            Assert.Equal(0ul, stat.AvailableFiles);
+        }
+
+        Assert.True(stat.InvariantUntil >= TimeSpan.Zero);
+    }
+
+    private static void AssertFileSystemInfo(
+        NfsFileSystemInfo info,
+        NfsV3FixtureCapabilities capabilities)
+    {
+        const uint FsF3Link = 0x0001;
+        const uint FsF3Symlink = 0x0002;
+        const uint FsF3Homogeneous = 0x0008;
+        const uint FsF3CanSetTime = 0x0010;
+        const uint KnownFsInfoProperties = FsF3Link | FsF3Symlink | FsF3Homogeneous | FsF3CanSetTime;
+
+        Assert.True(info.MaxReadSize > 0);
+        Assert.True(info.PreferredReadSize > 0);
+        Assert.True(info.PreferredReadSize <= info.MaxReadSize);
+        Assert.True(info.ReadMultipleSize > 0);
+        Assert.True(info.ReadMultipleSize <= info.MaxReadSize);
+
+        Assert.True(info.MaxWriteSize > 0);
+        Assert.True(info.PreferredWriteSize > 0);
+        Assert.True(info.PreferredWriteSize <= info.MaxWriteSize);
+        Assert.True(info.WriteMultipleSize > 0);
+        Assert.True(info.WriteMultipleSize <= info.MaxWriteSize);
+
+        Assert.True(info.PreferredReaddirSize > 0);
+        Assert.True(info.MaxFileSize >= (ulong)NfsV3IntegrationFixture.BoundaryFile.Size);
+        Assert.True(info.TimeDelta >= TimeSpan.Zero);
+        Assert.Equal(0u, info.Properties & ~KnownFsInfoProperties);
+
+        if (capabilities.SupportsHardLinks)
+            Assert.NotEqual(0u, info.Properties & FsF3Link);
+
+        if (capabilities.SupportsSymbolicLinks)
+            Assert.NotEqual(0u, info.Properties & FsF3Symlink);
+
+        Assert.NotEqual(0u, info.Properties & FsF3CanSetTime);
+    }
+
+    private static void AssertPathConf(
+        NfsPathConf pathConf,
+        NfsV3FixtureCapabilities capabilities)
+    {
+        if (pathConf.LinkMax > 0 && capabilities.SupportsHardLinks)
+            Assert.True(pathConf.LinkMax >= 2);
+
+        Assert.True(pathConf.NameMax >= NfsV3IntegrationFixture.BoundaryFileName.Length);
+        Assert.True(pathConf.CaseInsensitive || pathConf.CasePreserving);
+    }
+
+    private static async Task AssertPathConfCaseBehaviorAsync(
+        NfsV3Client client,
+        NfsV3IntegrationFixture fixture,
+        NfsPathConf pathConf,
+        CancellationToken ct)
+    {
+        var name = "PathConf-MixedCase.txt";
+        var path = fixture.GetRunPath(name);
+        await using (var content = new MemoryStream([0x43], writable: false))
+        {
+            await client.WriteFileAsync(path, content, ct);
+        }
+
+        var entries = await client.ReadDirAsync(fixture.RunDirectory, ct);
+        if (pathConf.CasePreserving)
+            Assert.Contains(entries, entry => entry.Name == name);
+
+        var alternateCasePath = fixture.GetRunPath(name.ToLowerInvariant());
+        if (pathConf.CaseInsensitive)
+        {
+            var original = await client.GetAttributesAsync(path, ct);
+            var alternate = await client.GetAttributesAsync(alternateCasePath, ct);
+            Assert.Equal(original.FileId, alternate.FileId);
+        }
+        else
+        {
+            var missing = await Assert.ThrowsAsync<NfsException>(
+                () => client.LookupPathAsync(alternateCasePath, ct));
+            Assert.Equal(NfsV3Status.NoEnt, missing.Status);
+        }
+    }
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
