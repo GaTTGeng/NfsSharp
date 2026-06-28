@@ -53,7 +53,7 @@ An implemented method without real-server verification remains partial or experi
 | Mount and unmount | `NfsV3Client.ConnectAsync`, `NfsV3Client.UnmountAsync` | **Partial** | M1/M2/M3 | Lifecycle tests, cleanup after failures, reconnect behavior, and server restart cases. |
 | Path lookup and attributes | `LookupPathAsync`, `GetAttributesAsync` | **Partial** | M1/M2 | Path edge cases, stale handles, symlinks, permission failures, and attribute fidelity. |
 | Access checks and links | `AccessAsync`, `ReadLinkAsync`, link creation APIs | **Partial** | M1/M2 | Server policy differences, link limits, loops, and error mapping. |
-| Directory enumeration | `ReadDirAsync`, `ReadDirPlusAsync` | **Partial** | M1/M2/M3 | Cookie verifier handling, pagination, mutation during enumeration, and large directories. |
+| Directory enumeration | `ReadDirAsync`, `ReadDirPlusAsync` | **Partial** | M1/M2/M3 | Verified on the repository NFS-Ganesha server for empty, small, nested, and multi-page directories, including `READDIRPLUS` attributes and handles. Remaining work: mutation during enumeration, larger cross-server directories, and fault recovery. |
 | File reads | `ReadAtAsync`, `ReadFileAsync` | **Partial** | M1/M2/M3 | Short reads, EOF boundaries, negotiated sizes, cancellation, large files, and recovery. |
 | File writes and commit | `WriteAtAsync`, `WriteFileAsync`, `CommitAsync` | **Partial** | M1/M2/M3 | Partial writes, verifier changes, stability modes, retries, commit ranges, and recovery. |
 | Create and remove | `CreateFileAsync`, `CreateDirectoryAsync`, deletion APIs | **Partial** | M1/M2 | Create modes, attributes, non-empty directories, races, and server-specific failures. |

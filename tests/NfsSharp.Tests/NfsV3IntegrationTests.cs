@@ -156,6 +156,103 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ReadDirCoversEmptySmallAndNestedFixtureDirectories()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var emptyEntries = await client.ReadDirAsync(NfsV3IntegrationFixture.EmptyDirectory, timeout.Token);
+        Assert.DoesNotContain(emptyEntries, entry => !IsSpecialDirectoryEntry(entry.Name));
+
+        var rootEntries = await client.ReadDirAsync(NfsV3IntegrationFixture.RootDirectory, timeout.Token);
+        AssertContainsEntry(rootEntries, "empty-dir");
+        AssertContainsEntry(rootEntries, "nested");
+        AssertContainsEntry(rootEntries, "hello.txt");
+        AssertContainsEntry(rootEntries, Path.GetFileName(NfsV3IntegrationFixture.UnicodeFilePath));
+        AssertNoDuplicateEntryNames(rootEntries);
+
+        var nestedEntries = await client.ReadDirAsync(NfsV3IntegrationFixture.NestedDirectory, timeout.Token);
+        var nestedFile = AssertContainsEntry(nestedEntries, "data.bin");
+        var nestedAttributes = await client.GetAttributesAsync(NfsV3IntegrationFixture.NestedFilePath, timeout.Token);
+        Assert.Equal((ulong)nestedAttributes.FileId, nestedFile.FileId);
+        AssertNoDuplicateEntryNames(nestedEntries);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ReadDirPlusReturnsAttributesAndHandlesForFixtureDirectory()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var entries = await client.ReadDirPlusAsync(NfsV3IntegrationFixture.RootDirectory, timeout.Token);
+
+        var fileEntry = AssertContainsEntry(entries, "hello.txt");
+        Assert.NotNull(fileEntry.Attr);
+        Assert.Equal(NfsType.Reg, fileEntry.Attr.Type);
+        Assert.Equal((ulong)fileEntry.Attr.FileId, fileEntry.FileId);
+        Assert.NotNull(fileEntry.Handle);
+        Assert.NotEmpty(fileEntry.Handle);
+
+        var handleAttributes = await client.GetAttributesAsync(fileEntry.Handle, timeout.Token);
+        Assert.Equal(fileEntry.Attr.FileId, handleAttributes.FileId);
+        Assert.Equal(fileEntry.Attr.Type, handleAttributes.Type);
+
+        var directoryEntry = AssertContainsEntry(entries, "nested");
+        Assert.NotNull(directoryEntry.Attr);
+        Assert.Equal(NfsType.Dir, directoryEntry.Attr.Type);
+        Assert.Equal((ulong)directoryEntry.Attr.FileId, directoryEntry.FileId);
+
+        AssertNoDuplicateEntryNames(entries);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ReadDirAndReadDirPlusCompleteCookiePaginationWithoutDuplicates()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+
+        var directory = fixture.GetRunPath("paged-directory");
+        await setupClient.CreateDirectoryAsync(directory, timeout.Token);
+
+        var expectedNames = Enumerable
+            .Range(0, 40)
+            .Select(i => $"entry-{i:00}.txt")
+            .ToArray();
+
+        foreach (var name in expectedNames)
+        {
+            await using var content = new MemoryStream([(byte)name.Length], writable: false);
+            await setupClient.WriteFileAsync($"{directory}/{name}", content, timeout.Token);
+        }
+
+        await using var pagedClient = await ConnectV3ClientAsync(readdirCount: 1024, timeout.Token);
+
+        var readDirEntries = await pagedClient.ReadDirAsync(directory, timeout.Token);
+        AssertDirectoryEntries(readDirEntries.Select(entry => entry.Name), expectedNames);
+        AssertNoDuplicateEntryNames(readDirEntries);
+
+        var plusEntries = await pagedClient.ReadDirPlusAsync(directory, timeout.Token);
+        AssertDirectoryEntries(plusEntries.Select(entry => entry.Name), expectedNames);
+        AssertNoDuplicateEntryNames(plusEntries);
+
+        foreach (var entry in plusEntries.Where(entry => expectedNames.Contains(entry.Name)))
+        {
+            Assert.NotNull(entry.Attr);
+            Assert.Equal(NfsType.Reg, entry.Attr.Type);
+            Assert.Equal(1, entry.Attr.Size);
+            Assert.Equal((ulong)entry.Attr.FileId, entry.FileId);
+            Assert.NotNull(entry.Handle);
+            Assert.NotEmpty(entry.Handle);
+        }
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_CanceledExportListThrowsOperationCanceled()
     {
         using var canceled = new CancellationTokenSource();
@@ -249,14 +346,15 @@ public sealed class NfsV3IntegrationTests
             () => client.GetExportedDevicesAsync(canceled.Token));
     }
 
-    private static NfsClientOptions CreateOptions() =>
+    private static NfsClientOptions CreateOptions(int? readdirCount = null) =>
         new()
         {
             UserId = NfsV3IntegrationEnvironment.UserId,
             GroupId = NfsV3IntegrationEnvironment.GroupId,
             UsePrivilegedSourcePort = false,
             CommandTimeout = TimeSpan.FromSeconds(10),
-            MaxRetries = 0
+            MaxRetries = 0,
+            ReaddirCount = readdirCount ?? NfsClientOptions.Default.ReaddirCount
         };
 
     private static Task<NfsV3Client> ConnectV3ClientAsync(CancellationToken ct) =>
@@ -264,6 +362,13 @@ public sealed class NfsV3IntegrationTests
             NfsV3IntegrationEnvironment.Server,
             NfsV3IntegrationEnvironment.ExportPath,
             CreateOptions(),
+            ct);
+
+    private static Task<NfsV3Client> ConnectV3ClientAsync(int readdirCount, CancellationToken ct) =>
+        NfsV3Client.ConnectAsync(
+            NfsV3IntegrationEnvironment.Server,
+            NfsV3IntegrationEnvironment.ExportPath,
+            CreateOptions(readdirCount),
             ct);
 
     private static string CreateUniquePath(string prefix) =>
@@ -292,6 +397,38 @@ public sealed class NfsV3IntegrationTests
         await client.ReadFileAsync(file.Path, output, ct);
         Assert.Equal(file.Content, output.ToArray());
     }
+
+    private static NfsEntry AssertContainsEntry(IEnumerable<NfsEntry> entries, string name) =>
+        Assert.Single(entries, entry => entry.Name == name);
+
+    private static NfsEntryPlus AssertContainsEntry(IEnumerable<NfsEntryPlus> entries, string name) =>
+        Assert.Single(entries, entry => entry.Name == name);
+
+    private static void AssertDirectoryEntries(IEnumerable<string> actualNames, string[] expectedNames)
+    {
+        var actual = actualNames
+            .Where(name => !IsSpecialDirectoryEntry(name))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(expectedNames.OrderBy(name => name, StringComparer.Ordinal), actual);
+    }
+
+    private static void AssertNoDuplicateEntryNames(IEnumerable<NfsEntry> entries) =>
+        AssertNoDuplicateEntryNames(entries.Select(entry => entry.Name));
+
+    private static void AssertNoDuplicateEntryNames(IEnumerable<NfsEntryPlus> entries) =>
+        AssertNoDuplicateEntryNames(entries.Select(entry => entry.Name));
+
+    private static void AssertNoDuplicateEntryNames(IEnumerable<string> names)
+    {
+        var nonSpecialNames = names
+            .Where(name => !IsSpecialDirectoryEntry(name))
+            .ToArray();
+        Assert.Equal(nonSpecialNames.Length, nonSpecialNames.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    private static bool IsSpecialDirectoryEntry(string name) => name is "." or "..";
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
