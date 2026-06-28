@@ -359,6 +359,102 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ReadAtReportsCountsAndEofForFixtureOffsets()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        await AssertReadAtAsync(
+            client,
+            NfsV3IntegrationFixture.EmptyFile,
+            offset: 0,
+            count: 8,
+            expectedEof: true,
+            ct: timeout.Token);
+
+        await AssertReadAtAsync(
+            client,
+            NfsV3IntegrationFixture.SmallFile,
+            offset: 5,
+            count: 7,
+            expectedEof: false,
+            ct: timeout.Token);
+
+        await AssertReadAtAsync(
+            client,
+            NfsV3IntegrationFixture.SmallFile,
+            offset: (ulong)NfsV3IntegrationFixture.SmallFile.Size - 1,
+            count: 16,
+            expectedEof: true,
+            ct: timeout.Token);
+
+        await AssertReadAtAsync(
+            client,
+            NfsV3IntegrationFixture.BoundaryFile,
+            offset: (ulong)NfsV3IntegrationFixture.BoundaryFile.Size - 7,
+            count: 32,
+            expectedEof: true,
+            ct: timeout.Token);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ReadFileStreamsExactBytesWithConfiguredChunkSize()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+
+        var fsInfo = await setupClient.GetFileSystemInfoAsync(
+            NfsV3IntegrationFixture.BoundaryFile.Path,
+            timeout.Token);
+        Assert.True(fsInfo.MaxReadSize > 0);
+        Assert.True(fsInfo.PreferredReadSize > 0);
+
+        var configuredReadSize = (int)Math.Min(257u, fsInfo.MaxReadSize);
+        Assert.True(configuredReadSize > 0);
+        Assert.True(NfsV3IntegrationFixture.BoundaryFile.Content.Length > configuredReadSize);
+
+        await using var chunkedClient = await ConnectV3ClientAsync(
+            CreateOptions(maxReadSize: configuredReadSize),
+            timeout.Token);
+
+        await using var output = new MemoryStream();
+        await chunkedClient.ReadFileAsync(NfsV3IntegrationFixture.BoundaryFile.Path, output, timeout.Token);
+
+        Assert.Equal(NfsV3IntegrationFixture.BoundaryFile.Content, output.ToArray());
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ReadFailuresCoverCancellationInvalidHandleAndMissingPath()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var lookup = await client.LookupPathAsync(NfsV3IntegrationFixture.SmallFile.Path, timeout.Token);
+        var buffer = new byte[16];
+
+        using var canceled = new CancellationTokenSource();
+        await canceled.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.ReadAtAsync(lookup.Handle, 0, buffer, 0, buffer.Length, canceled.Token));
+
+        var invalidHandle = await Assert.ThrowsAsync<NfsException>(
+            () => client.ReadAtAsync(Array.Empty<byte>(), 0, buffer, 0, buffer.Length, timeout.Token));
+        Assert.Contains("file handle is empty", invalidHandle.Message);
+
+        await using var output = new MemoryStream();
+        var missingPath = await Assert.ThrowsAsync<NfsException>(
+            () => client.ReadFileAsync(fixture.GetRunPath("missing-read-source.bin"), output, timeout.Token));
+        Assert.Equal(NfsV3Status.NoEnt, missingPath.Status);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_CanceledExportListThrowsOperationCanceled()
     {
         using var canceled = new CancellationTokenSource();
@@ -454,6 +550,7 @@ public sealed class NfsV3IntegrationTests
 
     private static NfsClientOptions CreateOptions(
         int? readdirCount = null,
+        int? maxReadSize = null,
         uint? userId = null,
         uint? groupId = null) =>
         new()
@@ -463,6 +560,7 @@ public sealed class NfsV3IntegrationTests
             UsePrivilegedSourcePort = false,
             CommandTimeout = TimeSpan.FromSeconds(10),
             MaxRetries = 0,
+            MaxReadSize = maxReadSize ?? NfsClientOptions.Default.MaxReadSize,
             ReaddirCount = readdirCount ?? NfsClientOptions.Default.ReaddirCount
         };
 
@@ -471,6 +569,13 @@ public sealed class NfsV3IntegrationTests
             NfsV3IntegrationEnvironment.Server,
             NfsV3IntegrationEnvironment.ExportPath,
             CreateOptions(),
+            ct);
+
+    private static Task<NfsV3Client> ConnectV3ClientAsync(NfsClientOptions options, CancellationToken ct) =>
+        NfsV3Client.ConnectAsync(
+            NfsV3IntegrationEnvironment.Server,
+            NfsV3IntegrationEnvironment.ExportPath,
+            options,
             ct);
 
     private static Task<NfsV3Client> ConnectV3ClientAsync(int readdirCount, CancellationToken ct) =>
@@ -512,6 +617,38 @@ public sealed class NfsV3IntegrationTests
         await using var output = new MemoryStream();
         await client.ReadFileAsync(file.Path, output, ct);
         Assert.Equal(file.Content, output.ToArray());
+    }
+
+    private static async Task AssertReadAtAsync(
+        NfsV3Client client,
+        NfsV3FixtureFile file,
+        ulong offset,
+        int count,
+        bool expectedEof,
+        CancellationToken ct)
+    {
+        var lookup = await client.LookupPathAsync(file.Path, ct);
+        var buffer = Enumerable.Repeat((byte)0xCC, count + 4).ToArray();
+
+        var (bytesRead, eof) = await client.ReadAtAsync(
+            lookup.Handle,
+            offset,
+            buffer,
+            bufferOffset: 2,
+            count,
+            ct);
+
+        var available = Math.Max(0, file.Content.Length - (int)offset);
+        var expected = file.Content
+            .AsSpan((int)offset, Math.Min(count, available))
+            .ToArray();
+
+        Assert.Equal(expected.Length, bytesRead);
+        Assert.Equal(expectedEof, eof);
+        Assert.Equal(0xCC, buffer[0]);
+        Assert.Equal(0xCC, buffer[1]);
+        Assert.Equal(expected, buffer.AsSpan(2, bytesRead).ToArray());
+        Assert.All(buffer.Skip(2 + bytesRead), value => Assert.Equal(0xCC, value));
     }
 
     private static NfsEntry AssertContainsEntry(IEnumerable<NfsEntry> entries, string name) =>
