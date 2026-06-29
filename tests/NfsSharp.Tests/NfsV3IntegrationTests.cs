@@ -455,6 +455,162 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_VerifiesFileAndDirectoryCreateAndRemoveBehavior()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var parent = await client.LookupPathAsync(fixture.RunDirectory, timeout.Token);
+        var directory = fixture.GetRunPath("created-dir");
+        var file = $"{directory}/created-file.txt";
+        var emptyDirectory = fixture.GetRunPath("empty-delete");
+        var nonEmptyDirectory = fixture.GetRunPath("non-empty-delete");
+        var nestedFile = $"{nonEmptyDirectory}/child.txt";
+
+        var createdDirectory = await client.CreateDirectoryAsync(
+            parent.Handle,
+            "created-dir",
+            new NfsSetAttributes { Mode = 0x1C0 },
+            timeout.Token);
+        AssertLookupAttributes(createdDirectory, NfsType.Dir);
+
+        var directoryAttributes = await client.GetAttributesAsync(directory, timeout.Token);
+        Assert.Equal(NfsType.Dir, directoryAttributes.Type);
+        Assert.Equal(0x1C0u, directoryAttributes.Mode & 0x1FF);
+
+        var directoryLookup = await client.LookupPathAsync(directory, timeout.Token);
+        var createdFile = await client.CreateFileAsync(
+            directoryLookup.Handle,
+            "created-file.txt",
+            new NfsSetAttributes { Mode = 0x180 },
+            timeout.Token);
+        AssertLookupAttributes(createdFile, NfsType.Reg);
+
+        var fileAttributes = await client.GetAttributesAsync(file, timeout.Token);
+        Assert.Equal(NfsType.Reg, fileAttributes.Type);
+        Assert.Equal(0x180u, fileAttributes.Mode & 0x1FF);
+
+        await client.DeleteFileAsync(file, timeout.Token);
+        await AssertMissingPathAsync(client, file, timeout.Token);
+
+        await client.CreateDirectoryAsync(emptyDirectory, timeout.Token);
+        await client.DeleteDirectoryAsync(emptyDirectory, recursive: false, timeout.Token);
+        await AssertMissingPathAsync(client, emptyDirectory, timeout.Token);
+
+        await client.CreateDirectoryAsync(nonEmptyDirectory, timeout.Token);
+        await WriteBytesAsync(client, nestedFile, [0x4E], timeout.Token);
+
+        var notEmpty = await Assert.ThrowsAsync<NfsException>(
+            () => client.DeleteDirectoryAsync(nonEmptyDirectory, recursive: false, timeout.Token));
+        Assert.Equal(NfsV3Status.NotEmpty, notEmpty.Status);
+
+        await client.DeleteDirectoryAsync(nonEmptyDirectory, recursive: true, timeout.Token);
+        await AssertMissingPathAsync(client, nonEmptyDirectory, timeout.Token);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_VerifiesRenameSameDirectoryCrossDirectoryReplacementAndInvalidTargets()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var sameSource = fixture.GetRunPath("same-source.txt");
+        var sameTarget = fixture.GetRunPath("same-target.txt");
+        await WriteBytesAsync(client, sameSource, [0x01, 0x02], timeout.Token);
+
+        await client.MoveAsync(sameSource, sameTarget, timeout.Token);
+        await AssertMissingPathAsync(client, sameSource, timeout.Token);
+        Assert.Equal(new byte[] { 0x01, 0x02 }, await ReadBytesAsync(client, sameTarget, timeout.Token));
+
+        var leftDirectory = fixture.GetRunPath("rename-left");
+        var rightDirectory = fixture.GetRunPath("rename-right");
+        await client.CreateDirectoryAsync(leftDirectory, timeout.Token);
+        await client.CreateDirectoryAsync(rightDirectory, timeout.Token);
+
+        var crossSource = $"{leftDirectory}/cross-source.txt";
+        var crossTarget = $"{rightDirectory}/cross-target.txt";
+        await WriteBytesAsync(client, crossSource, [0x03], timeout.Token);
+
+        await client.MoveAsync(crossSource, crossTarget, timeout.Token);
+        await AssertMissingPathAsync(client, crossSource, timeout.Token);
+        Assert.Equal(new byte[] { 0x03 }, await ReadBytesAsync(client, crossTarget, timeout.Token));
+
+        var replacementSource = fixture.GetRunPath("replacement-source.txt");
+        var replacementTarget = fixture.GetRunPath("replacement-target.txt");
+        await WriteBytesAsync(client, replacementSource, [0xAA, 0xBB], timeout.Token);
+        await WriteBytesAsync(client, replacementTarget, [0xCC], timeout.Token);
+
+        try
+        {
+            await client.MoveAsync(replacementSource, replacementTarget, timeout.Token);
+            await AssertMissingPathAsync(client, replacementSource, timeout.Token);
+            Assert.Equal(new byte[] { 0xAA, 0xBB }, await ReadBytesAsync(client, replacementTarget, timeout.Token));
+        }
+        catch (NfsException ex) when (ex.Status == NfsV3Status.Io)
+        {
+            Assert.Equal(new byte[] { 0xAA, 0xBB }, await ReadBytesAsync(client, replacementSource, timeout.Token));
+            Assert.Equal(new byte[] { 0xCC }, await ReadBytesAsync(client, replacementTarget, timeout.Token));
+        }
+
+        var missingSource = await Assert.ThrowsAsync<NfsException>(
+            () => client.MoveAsync(fixture.GetRunPath("missing-source.txt"), fixture.GetRunPath("missing-target.txt"), timeout.Token));
+        Assert.Equal(NfsV3Status.NoEnt, missingSource.Status);
+
+        var invalidParentSource = fixture.GetRunPath("invalid-parent-source.txt");
+        var fileAsParent = fixture.GetRunPath("file-as-parent.txt");
+        await WriteBytesAsync(client, invalidParentSource, [0x11], timeout.Token);
+        await WriteBytesAsync(client, fileAsParent, [0x22], timeout.Token);
+
+        var notDirectory = await Assert.ThrowsAsync<NfsException>(
+            () => client.MoveAsync(invalidParentSource, $"{fileAsParent}/child.txt", timeout.Token));
+        Assert.Equal(NfsV3Status.NotDir, notDirectory.Status);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_VerifiesSymbolicAndHardLinkCreationBehavior()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var source = fixture.GetRunPath("link-source.txt");
+        await WriteBytesAsync(client, source, [0x48, 0x4C], timeout.Token);
+
+        if (fixture.Capabilities.SupportsSymbolicLinks)
+        {
+            var symlink = fixture.GetRunPath("link-source-symlink");
+            var created = await client.CreateSymLinkAsync(symlink, "link-source.txt", timeout.Token);
+            AssertLookupAttributes(created, NfsType.Lnk);
+
+            var target = await client.ReadLinkAsync(symlink, timeout.Token);
+            Assert.Equal("link-source.txt", target);
+
+            var lookup = await client.LookupPathAsync(symlink, timeout.Token);
+            AssertLookupAttributes(lookup, NfsType.Lnk);
+        }
+
+        if (fixture.Capabilities.SupportsHardLinks)
+        {
+            var hardLink = fixture.GetRunPath("link-source-hardlink.txt");
+            await client.CreateHardLinkAsync(source, hardLink, timeout.Token);
+
+            var sourceAttributes = await client.GetAttributesAsync(source, timeout.Token);
+            var linkAttributes = await client.GetAttributesAsync(hardLink, timeout.Token);
+            Assert.Equal(sourceAttributes.FileId, linkAttributes.FileId);
+            Assert.True(linkAttributes.LinkCount >= 2);
+
+            await client.DeleteFileAsync(source, timeout.Token);
+            await AssertMissingPathAsync(client, source, timeout.Token);
+            Assert.Equal(new byte[] { 0x48, 0x4C }, await ReadBytesAsync(client, hardLink, timeout.Token));
+        }
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_VerifiesFileSystemStatInfoAndPathConfByHandleAndPath()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -666,6 +822,36 @@ public sealed class NfsV3IntegrationTests
         await using var output = new MemoryStream();
         await client.ReadFileAsync(file.Path, output, ct);
         Assert.Equal(file.Content, output.ToArray());
+    }
+
+    private static async Task WriteBytesAsync(
+        NfsV3Client client,
+        string path,
+        byte[] content,
+        CancellationToken ct)
+    {
+        await using var input = new MemoryStream(content, writable: false);
+        await client.WriteFileAsync(path, input, ct);
+    }
+
+    private static async Task<byte[]> ReadBytesAsync(
+        NfsV3Client client,
+        string path,
+        CancellationToken ct)
+    {
+        await using var output = new MemoryStream();
+        await client.ReadFileAsync(path, output, ct);
+        return output.ToArray();
+    }
+
+    private static async Task AssertMissingPathAsync(
+        NfsV3Client client,
+        string path,
+        CancellationToken ct)
+    {
+        var missing = await Assert.ThrowsAsync<NfsException>(
+            () => client.LookupPathAsync(path, ct));
+        Assert.Equal(NfsV3Status.NoEnt, missing.Status);
     }
 
     private static async Task AssertReadAtAsync(
