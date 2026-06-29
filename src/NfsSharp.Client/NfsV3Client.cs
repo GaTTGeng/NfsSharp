@@ -1615,7 +1615,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         }
         catch
         {
-            machine = "chemical-ai";
+            machine = "nfssharp";
         }
 
         if (machine.Length > 255)
