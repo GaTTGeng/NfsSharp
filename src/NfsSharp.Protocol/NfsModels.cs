@@ -48,6 +48,7 @@ public sealed record NfsFattr(NfsType Type, long Size, DateTime? Mtime)
     public ulong FileId { get; init; }
     public DateTime? Atime { get; init; }
     public DateTime? Ctime { get; init; }
+    public NfsTimestamp? CtimeTimestamp { get; init; }
 }
 
 /// <summary>READDIR entry.</summary>
@@ -98,6 +99,26 @@ public sealed record NfsPathConf
     public bool CasePreserving { get; init; }
 }
 
+/// <summary>NFS timestamp preserving raw seconds and nanoseconds precision.</summary>
+public readonly record struct NfsTimestamp(uint Seconds, uint Nanoseconds)
+{
+    public DateTime ToDateTimeUtc() =>
+        DateTimeOffset.FromUnixTimeSeconds(Seconds)
+            .AddTicks(Nanoseconds / 100)
+            .UtcDateTime;
+
+    public static NfsTimestamp FromDateTime(DateTime value)
+    {
+        var utc = value.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
+            : value.ToUniversalTime();
+        var dto = new DateTimeOffset(utc);
+        return new NfsTimestamp(
+            checked((uint)dto.ToUnixTimeSeconds()),
+            checked((uint)((dto.Ticks % TimeSpan.TicksPerSecond) * 100)));
+    }
+}
+
 /// <summary>Optional attributes used by SETATTR/CREATE/MKDIR.</summary>
 public sealed record NfsSetAttributes
 {
@@ -146,12 +167,24 @@ public sealed record NfsClientOptions
             throw new NfsException("AuxiliaryGroups cannot be null.");
         if (PortmapPort is <= 0 or > 65535)
             throw new NfsException($"Invalid portmap port: {PortmapPort}.");
+        if (CommandTimeout < TimeSpan.Zero)
+            throw new NfsException("CommandTimeout cannot be negative.");
         if (MaxReadSize <= 0)
             throw new NfsException("MaxReadSize must be greater than zero.");
         if (MaxWriteSize <= 0)
             throw new NfsException("MaxWriteSize must be greater than zero.");
         if (ReaddirCount <= 0)
             throw new NfsException("ReaddirCount must be greater than zero.");
+        if (!Enum.IsDefined(typeof(NfsWriteStableHow), StableHow))
+            throw new NfsException($"Invalid write stability mode: {StableHow}.");
+        if (MaxRetries < 0)
+            throw new NfsException("MaxRetries cannot be negative.");
+        if (RetryDelay < TimeSpan.Zero)
+            throw new NfsException("RetryDelay cannot be negative.");
+        if (EnableDirectoryCache && DirectoryCacheTtl <= TimeSpan.Zero)
+            throw new NfsException("DirectoryCacheTtl must be greater than zero when directory caching is enabled.");
+        if (TcpKeepAlive && KeepAliveInterval < TimeSpan.Zero)
+            throw new NfsException("KeepAliveInterval cannot be negative.");
         if (AuxiliaryGroups.Count > 16)
             throw new NfsException("AUTH_SYS supports at most 16 auxiliary groups.");
     }
@@ -160,8 +193,49 @@ public sealed record NfsClientOptions
 /// <summary>Result of ACCESS procedure — granted access mask.</summary>
 public sealed record NfsAccessResult(NfsAccessMode Granted);
 
+/// <summary>Result of WRITE procedure — count, committed stability, and write verifier.</summary>
+public sealed record NfsWriteResult
+{
+    private readonly byte[] _writeVerifier;
+
+    public NfsWriteResult(int count, NfsWriteStableHow committed, byte[] writeVerifier)
+    {
+        if (count < 0)
+            throw new NfsException("WRITE count cannot be negative.");
+        if (!Enum.IsDefined(typeof(NfsWriteStableHow), committed))
+            throw new NfsException($"Invalid committed write stability mode: {committed}.");
+        ArgumentNullException.ThrowIfNull(writeVerifier);
+        if (writeVerifier.Length is not (0 or 8))
+            throw new NfsException("WRITE verifier must be empty for local no-op results or exactly 8 bytes.");
+
+        Count = count;
+        Committed = committed;
+        _writeVerifier = writeVerifier.ToArray();
+    }
+
+    public int Count { get; }
+
+    public NfsWriteStableHow Committed { get; }
+
+    public byte[] WriteVerifier => _writeVerifier.ToArray();
+}
+
 /// <summary>Result of COMMIT procedure — write verifier.</summary>
-public sealed record NfsCommitResult(byte[] WriteVerifier);
+public sealed record NfsCommitResult
+{
+    private readonly byte[] _writeVerifier;
+
+    public NfsCommitResult(byte[] writeVerifier)
+    {
+        ArgumentNullException.ThrowIfNull(writeVerifier);
+        if (writeVerifier.Length != 8)
+            throw new NfsException("COMMIT verifier must be exactly 8 bytes.");
+
+        _writeVerifier = writeVerifier.ToArray();
+    }
+
+    public byte[] WriteVerifier => _writeVerifier.ToArray();
+}
 
 /// <summary>NFS protocol exception with optional nfsstat3/mountstat3 status.</summary>
 public sealed class NfsException : Exception
