@@ -1347,6 +1347,7 @@ public sealed class NfsV3Client : IAsyncDisposable
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
             {
                 _logger?.LogError(ex, "RPC call timed out after {Timeout} (prog={Prog}, proc={Proc})", _options.CommandTimeout, prog, proc);
+                await RefreshTimedOutNfsConnectionAsync(conn, ct);
                 throw new NfsException($"RPC call timed out after {_options.CommandTimeout}.", ex);
             }
             finally
@@ -1488,9 +1489,30 @@ public sealed class NfsV3Client : IAsyncDisposable
             _nfs = null;
         }
 
-        _nfs = await OpenAsync(_nfsPort, ct);
+        using var timeoutCts = CreateCallTimeout(ct, out var token);
+        _nfs = await OpenAsync(_nfsPort, token);
         _logger?.LogInformation("Reconnected to NFS server");
         return _nfs;
+    }
+
+    private async Task RefreshTimedOutNfsConnectionAsync(Conn conn, CancellationToken ct)
+    {
+        if (!ReferenceEquals(conn, _nfs) || _nfsPort <= 0 || _unmounted)
+            return;
+
+        try
+        {
+            _logger?.LogWarning("Refreshing NFS connection after RPC command timeout");
+            await ReconnectAsync(ct);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger?.LogWarning("Timed out while refreshing NFS connection after RPC command timeout");
+        }
+        catch (Exception reconnectEx)
+        {
+            _logger?.LogWarning(reconnectEx, "Failed to refresh NFS connection after RPC command timeout");
+        }
     }
 
     private CancellationTokenSource? CreateCallTimeout(CancellationToken outer, out CancellationToken token)
