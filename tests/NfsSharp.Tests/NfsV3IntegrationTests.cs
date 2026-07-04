@@ -428,6 +428,36 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_DirectoryCacheExpiresForCrossClientMutations()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var cachedClient = await ConnectV3ClientAsync(
+            CreateOptions(
+                enableDirectoryCache: true,
+                directoryCacheTtl: TimeSpan.FromMilliseconds(500)),
+            timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(cachedClient, timeout.Token);
+        await using var writerClient = await ConnectV3ClientAsync(timeout.Token);
+
+        var externalName = "cache-external.txt";
+        var externalPath = fixture.GetRunPath(externalName);
+
+        var entries = await cachedClient.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        Assert.DoesNotContain(entries, entry => entry.Name == externalName);
+
+        await writerClient.CreateFileAsync(externalPath, timeout.Token);
+
+        entries = await cachedClient.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        Assert.DoesNotContain(entries, entry => entry.Name == externalName);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(700), timeout.Token);
+
+        entries = await cachedClient.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        AssertContainsEntry(entries, externalName);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_ReadAtReportsCountsAndEofForFixtureOffsets()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));

@@ -615,11 +615,13 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         ValidateHandle(dirFh);
 
-        if (_options.EnableDirectoryCache &&
-            _dirCache.TryGetValue(dirFh, out var cached) &&
-            DateTime.UtcNow < cached.Expiry)
+        if (_options.EnableDirectoryCache && _dirCache.TryGetValue(dirFh, out var cached))
         {
-            return CloneDirEntries(cached.Entries);
+            var now = DateTime.UtcNow;
+            if (now < cached.Expiry)
+                return CloneDirEntries(cached.Entries);
+
+            _dirCache.TryRemove(dirFh, out _);
         }
 
         var entries = new List<NfsEntryPlus>();
