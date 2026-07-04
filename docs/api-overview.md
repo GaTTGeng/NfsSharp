@@ -22,6 +22,8 @@ The recommended entry point for applications is `NfsSharp.Client.NfsClient`, con
 
 NFSv3 over TCP is the primary supported protocol. The NFSv4 surface is experimental and does not yet carry the same compatibility and integration guarantees.
 
+NFSv3 transient transport retries are conservative: automatic reconnect/retry is limited to retry-safe discovery, mount negotiation, read-only NFS procedures, and `COMMIT`. Mutating procedures such as `SETATTR`, `WRITE`, `CREATE`, `REMOVE`, `RENAME`, and link creation surface the transport failure to the caller instead of being replayed automatically.
+
 ## NFSv3 operation groups
 
 `NfsClient` and `NfsV3Client` expose the same core NFSv3 capabilities at different abstraction levels:

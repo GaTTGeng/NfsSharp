@@ -1,3 +1,4 @@
+using NfsSharp.Client;
 using NfsSharp.Protocol;
 using Xunit.Abstractions;
 
@@ -177,6 +178,26 @@ public class NfsModelsTests
 
         Assert.Throws<NfsException>(
             () => new NfsClientOptions { KeepAliveInterval = TimeSpan.FromMilliseconds(-1) }.Validate());
+    }
+
+    [Fact]
+    public void NfsV3Client_CanRetryTransient_AllowsOnlyRetrySafeProcedures()
+    {
+        Assert.True(NfsV3Client.CanRetryTransient(100000, 2, 3)); // PMAP GETPORT
+        Assert.True(NfsV3Client.CanRetryTransient(100005, 3, 1)); // MOUNT MNT
+        Assert.True(NfsV3Client.CanRetryTransient(100005, 3, 5)); // MOUNT EXPORT
+
+        uint[] retrySafeNfsProcedures = [1, 3, 4, 5, 6, 16, 17, 18, 19, 20, 21];
+        foreach (var proc in retrySafeNfsProcedures)
+            Assert.True(NfsV3Client.CanRetryTransient(100003, 3, proc));
+
+        uint[] mutationProcedures = [2, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        foreach (var proc in mutationProcedures)
+            Assert.False(NfsV3Client.CanRetryTransient(100003, 3, proc));
+
+        Assert.False(NfsV3Client.CanRetryTransient(100005, 3, 3)); // MOUNT UMNT
+        Assert.False(NfsV3Client.CanRetryTransient(100003, 4, 1));
+        Assert.False(NfsV3Client.CanRetryTransient(42, 1, 1));
     }
 
     [Fact]

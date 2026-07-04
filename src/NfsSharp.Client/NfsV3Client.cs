@@ -1324,7 +1324,7 @@ public sealed class NfsV3Client : IAsyncDisposable
 
                 return reader;
             }
-            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts && CanRetryTransient(prog, vers, proc))
             {
                 _logger?.LogWarning(ex, "RPC call failed transiently (attempt {Attempt}/{MaxAttempts}, prog={Prog}, proc={Proc})", attempt, maxAttempts, prog, proc);
                 var reconnected = await ReconnectAsync(ct);
@@ -1333,6 +1333,11 @@ public sealed class NfsV3Client : IAsyncDisposable
                 if (_options.RetryDelay > TimeSpan.Zero)
                     await Task.Delay(_options.RetryDelay, ct);
                 continue;
+            }
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+            {
+                _logger?.LogWarning(ex, "RPC call failed transiently without automatic retry because the procedure is not retry-safe (prog={Prog}, proc={Proc})", prog, proc);
+                throw;
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
             {
@@ -1455,6 +1460,16 @@ public sealed class NfsV3Client : IAsyncDisposable
 
     private static bool IsTransient(Exception ex) =>
         ex is SocketException or IOException or ObjectDisposedException;
+
+    internal static bool CanRetryTransient(uint prog, uint vers, uint proc) =>
+        (prog, vers, proc) switch
+        {
+            (ProgPortmap, VerPortmap, PmapGetPort) => true,
+            (ProgMount, VerMount, MountMnt or MountExport) => true,
+            (ProgNfs, VerNfs, NfsGetAttr or NfsLookup or NfsAccess or NfsReadlink or NfsRead or
+                NfsReadDir or NfsReadDirPlus or NfsFsstat or NfsFsinfo or NfsPathconf or NfsCommit) => true,
+            _ => false
+        };
 
     private async Task<Conn?> ReconnectAsync(CancellationToken ct)
     {
