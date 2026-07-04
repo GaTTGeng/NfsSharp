@@ -795,6 +795,9 @@ public sealed class NfsV3IntegrationTests
 
         await client.DeleteFileAsync(file, timeout.Token);
         await AssertMissingPathAsync(client, file, timeout.Token);
+        var deletedHandle = await Assert.ThrowsAsync<NfsException>(
+            () => client.GetAttributesAsync(createdFile.Handle, timeout.Token));
+        Assert.Equal(NfsV3Status.Stale, deletedHandle.Status);
 
         await client.CreateDirectoryAsync(emptyDirectory, timeout.Token);
         await client.DeleteDirectoryAsync(emptyDirectory, recursive: false, timeout.Token);
