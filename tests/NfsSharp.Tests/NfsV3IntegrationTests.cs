@@ -620,6 +620,8 @@ public sealed class NfsV3IntegrationTests
 
         var commit = await client.CommitWithResultAsync(created.Handle, 0, 0, timeout.Token);
         AssertCommitResult(commit);
+        commit = await client.CommitWithResultAsync(created.Handle, 2, 3, timeout.Token);
+        AssertCommitResult(commit);
         Assert.Equal(new byte[] { 0x10, 0x11, 0x20, 0x21, 0x22, 0x23 }, await ReadBytesAsync(client, offsetPath, timeout.Token));
 
         var streamPath = fixture.GetRunPath("stream-write.bin");
@@ -633,6 +635,8 @@ public sealed class NfsV3IntegrationTests
         Assert.NotNull(streamLookup.Attr);
         Assert.Equal(streamContent.Length, streamLookup.Attr.Size);
         commit = await client.CommitWithResultAsync(streamPath, 0, (uint)streamContent.Length, timeout.Token);
+        AssertCommitResult(commit);
+        commit = await client.CommitWithResultAsync(streamPath, 4, 7, timeout.Token);
         AssertCommitResult(commit);
         Assert.Equal(streamContent, await ReadBytesAsync(client, streamPath, timeout.Token));
 
