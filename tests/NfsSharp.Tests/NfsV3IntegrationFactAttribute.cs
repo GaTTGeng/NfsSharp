@@ -39,6 +39,8 @@ internal static class NfsV3IntegrationEnvironment
 
     public static uint GroupId => ReadUInt32("NFSSHARP_NFS_GID");
 
+    public static int PortmapPort => ReadInt32("NFSSHARP_NFS_PORTMAP_PORT", 111);
+
     private static bool UsesDefaultExportEndpoint =>
         string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NFSSHARP_NFS_SERVER")) &&
         string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NFSSHARP_NFS_EXPORT"));
@@ -52,5 +54,16 @@ internal static class NfsV3IntegrationEnvironment
         return uint.TryParse(value, out var parsed)
             ? parsed
             : throw new InvalidOperationException($"{name} must be an unsigned integer.");
+    }
+
+    private static int ReadInt32(string name, int defaultValue)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        if (string.IsNullOrWhiteSpace(value))
+            return defaultValue;
+
+        return int.TryParse(value, out var parsed) && parsed is > 0 and <= 65535
+            ? parsed
+            : throw new InvalidOperationException($"{name} must be a TCP port number.");
     }
 }

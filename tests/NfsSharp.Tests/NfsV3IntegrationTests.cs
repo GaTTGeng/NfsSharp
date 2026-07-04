@@ -201,6 +201,19 @@ public sealed class NfsV3IntegrationTests
             timeout.Token);
         AssertAccessGranted(directoryAccess, NfsAccessMode.Read | NfsAccessMode.Lookup);
 
+        var noAccessRequested = await client.AccessAsync(
+            fileLookup.Handle,
+            NfsAccessMode.None,
+            timeout.Token);
+        Assert.Equal(NfsAccessMode.None, noAccessRequested);
+
+        var invalidAccess = await Assert.ThrowsAsync<NfsException>(
+            () => client.AccessAsync(
+                fileLookup.Handle,
+                (NfsAccessMode)0x8000,
+                timeout.Token));
+        Assert.Contains("Invalid ACCESS mask", invalidAccess.Message);
+
         var missing = await Assert.ThrowsAsync<NfsException>(
             () => client.LookupPathAsync($"{NfsV3IntegrationFixture.RootDirectory}/missing", timeout.Token));
         Assert.True(missing.IsNotFound);
@@ -359,6 +372,62 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_DirectoryCacheKeepsReadDirPlusCoherentAfterSameClientMutations()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(
+            CreateOptions(
+                enableDirectoryCache: true,
+                directoryCacheTtl: TimeSpan.FromMinutes(5)),
+            timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var path = fixture.GetRunPath("cache-coherence.txt");
+        await WriteBytesAsync(client, path, [0x01], timeout.Token);
+
+        var entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        Assert.Equal(1L, AssertContainsEntry(entries, "cache-coherence.txt").Attr?.Size);
+
+        await client.SetFileSizeAsync(path, 4, timeout.Token);
+
+        entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        Assert.Equal(4L, AssertContainsEntry(entries, "cache-coherence.txt").Attr?.Size);
+
+        await WriteBytesAsync(client, path, [0x02, 0x03], timeout.Token);
+
+        entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        var cachedEntry = AssertContainsEntry(entries, "cache-coherence.txt");
+        Assert.Equal(2L, cachedEntry.Attr?.Size);
+        if (cachedEntry.Handle is { Length: > 0 })
+            cachedEntry.Handle[0] ^= 0xFF;
+        entries.Clear();
+
+        await client.SetFileSizeAsync(path, 5, timeout.Token);
+
+        entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        Assert.Equal(5L, AssertContainsEntry(entries, "cache-coherence.txt").Attr?.Size);
+
+        var createdPath = fixture.GetRunPath("cache-created.txt");
+        await client.CreateFileAsync(createdPath, timeout.Token);
+
+        entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        AssertContainsEntry(entries, "cache-created.txt");
+
+        var renamedPath = fixture.GetRunPath("cache-renamed.txt");
+        await client.MoveAsync(createdPath, renamedPath, timeout.Token);
+
+        entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        Assert.DoesNotContain(entries, entry => entry.Name == "cache-created.txt");
+        AssertContainsEntry(entries, "cache-renamed.txt");
+
+        await client.DeleteFileAsync(renamedPath, timeout.Token);
+
+        entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
+        Assert.DoesNotContain(entries, entry => entry.Name == "cache-renamed.txt");
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_ReadAtReportsCountsAndEofForFixtureOffsets()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -447,10 +516,162 @@ public sealed class NfsV3IntegrationTests
             () => client.ReadAtAsync(Array.Empty<byte>(), 0, buffer, 0, buffer.Length, timeout.Token));
         Assert.Contains("file handle is empty", invalidHandle.Message);
 
+        var negativeOffset = await Assert.ThrowsAsync<NfsException>(
+            () => client.ReadAtAsync(lookup.Handle, 0, buffer, -1, buffer.Length, timeout.Token));
+        Assert.Contains("Buffer offset", negativeOffset.Message);
+
+        var tooLargeRange = await Assert.ThrowsAsync<NfsException>(
+            () => client.ReadAtAsync(lookup.Handle, 0, buffer, 8, buffer.Length, timeout.Token));
+        Assert.Contains("exceed the buffer length", tooLargeRange.Message);
+
+        var zeroLengthRead = await client.ReadAtAsync(lookup.Handle, 0, buffer, 0, 0, timeout.Token);
+        Assert.Equal(0, zeroLengthRead.BytesRead);
+        Assert.False(zeroLengthRead.Eof);
+
         await using var output = new MemoryStream();
         var missingPath = await Assert.ThrowsAsync<NfsException>(
             () => client.ReadFileAsync(fixture.GetRunPath("missing-read-source.bin"), output, timeout.Token));
         Assert.Equal(NfsV3Status.NoEnt, missingPath.Status);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_WriteAtWriteFileAndCommitPersistExpectedBytes()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var offsetPath = fixture.GetRunPath("write-at.bin");
+        var created = await client.CreateFileAsync(offsetPath, timeout.Token);
+
+        var firstWrite = await client.WriteAtWithResultAsync(
+            created.Handle,
+            0,
+            new byte[] { 0x10, 0x11, 0x12, 0x13 },
+            timeout.Token);
+        Assert.Equal(4, firstWrite.Count);
+        AssertWriteResult(firstWrite);
+
+        var overwrite = await client.WriteAtAsync(
+            created.Handle,
+            2,
+            new byte[] { 0x20, 0x21, 0x22, 0x23 },
+            timeout.Token);
+        Assert.Equal(4, overwrite);
+
+        var commit = await client.CommitWithResultAsync(created.Handle, 0, 0, timeout.Token);
+        AssertCommitResult(commit);
+        Assert.Equal(new byte[] { 0x10, 0x11, 0x20, 0x21, 0x22, 0x23 }, await ReadBytesAsync(client, offsetPath, timeout.Token));
+
+        var streamPath = fixture.GetRunPath("stream-write.bin");
+        var streamContent = Enumerable.Range(0, 19).Select(i => (byte)(0x40 + i)).ToArray();
+        await using (var input = new MemoryStream(streamContent, writable: false))
+        {
+            await client.WriteFileAsync(streamPath, input, timeout.Token);
+        }
+
+        commit = await client.CommitWithResultAsync(streamPath, 0, (uint)streamContent.Length, timeout.Token);
+        AssertCommitResult(commit);
+        Assert.Equal(streamContent, await ReadBytesAsync(client, streamPath, timeout.Token));
+
+        await using var chunkedClient = await ConnectV3ClientAsync(
+            CreateOptions(maxWriteSize: 3),
+            timeout.Token);
+
+        var chunkedPath = fixture.GetRunPath("chunked-stream-write.bin");
+        var chunkedContent = Enumerable.Range(0, 17).Select(i => (byte)(0x70 + i)).ToArray();
+        await using (var input = new MemoryStream(chunkedContent, writable: false))
+        {
+            await chunkedClient.WriteFileAsync(chunkedPath, input, timeout.Token);
+        }
+
+        await chunkedClient.CommitAsync(chunkedPath, 0, 0, timeout.Token);
+        Assert.Equal(chunkedContent, await ReadBytesAsync(client, chunkedPath, timeout.Token));
+
+        var zeroLengthWrite = await client.WriteAtAsync(created.Handle, 0, ReadOnlyMemory<byte>.Empty, timeout.Token);
+        Assert.Equal(0, zeroLengthWrite);
+        var zeroLengthWriteResult = await client.WriteAtWithResultAsync(created.Handle, 0, ReadOnlyMemory<byte>.Empty, timeout.Token);
+        Assert.Equal(0, zeroLengthWriteResult.Count);
+        Assert.Empty(zeroLengthWriteResult.WriteVerifier);
+
+        await using var limitedClient = await ConnectV3ClientAsync(
+            CreateOptions(maxWriteSize: 2),
+            timeout.Token);
+        var tooLargeWrite = await Assert.ThrowsAsync<NfsException>(
+            () => limitedClient.WriteAtAsync(created.Handle, 0, new byte[] { 0x01, 0x02, 0x03 }, timeout.Token));
+        Assert.Contains("exceeds MaxWriteSize", tooLargeWrite.Message);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsClient_WritesAndCommitsThroughFacade()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+        await using var client = new NfsClient(NfsVersion.V3, CreateOptions(maxWriteSize: 2));
+
+        await client.ConnectAsync(NfsV3IntegrationEnvironment.Server, timeout.Token);
+        await client.MountDeviceAsync(NfsV3IntegrationEnvironment.ExportPath, timeout.Token);
+
+        var path = fixture.GetRunPath("facade-write.bin");
+        var created = await client.CreateAndOpenFileAsync(path, null, timeout.Token);
+        var written = await client.WriteAtAsync(created.Handle, 0, new byte[] { 0x01, 0x02 }, timeout.Token);
+        Assert.Equal(2, written);
+
+        written = await client.WriteAtAsync(created.Handle, 4, new byte[] { 0x05, 0x06 }, timeout.Token);
+        Assert.Equal(2, written);
+
+        var commit = await client.CommitWithResultAsync(path, 0, 0, timeout.Token);
+        AssertCommitResult(commit);
+
+        await using var sparseOutput = new MemoryStream();
+        await client.ReadAsync(path, sparseOutput, timeout.Token);
+        Assert.Equal(new byte[] { 0x01, 0x02, 0x00, 0x00, 0x05, 0x06 }, sparseOutput.ToArray());
+
+        var replacement = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
+        await using (var input = new MemoryStream(replacement, writable: false))
+        {
+            await client.WriteAsync(path, input, timeout.Token);
+        }
+
+        commit = await client.CommitWithResultAsync(path, 0, (uint)replacement.Length, timeout.Token);
+        AssertCommitResult(commit);
+
+        await using var output = new MemoryStream();
+        await client.ReadAsync(path, output, timeout.Token);
+        Assert.Equal(replacement, output.ToArray());
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_WriteAtWithResultReportsCommittedStabilityForConfiguredModes()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+
+        foreach (var requested in Enum.GetValues<NfsWriteStableHow>())
+        {
+            await using var client = await ConnectV3ClientAsync(
+                CreateOptions(stableHow: requested),
+                timeout.Token);
+
+            var path = fixture.GetRunPath($"stable-{requested}.bin");
+            var created = await client.CreateFileAsync(path, timeout.Token);
+            var content = new byte[] { 0x30, 0x31, (byte)requested };
+
+            var write = await client.WriteAtWithResultAsync(created.Handle, 0, content, timeout.Token);
+
+            Assert.Equal(content.Length, write.Count);
+            AssertWriteResult(write);
+            AssertCommittedAtLeast(requested, write.Committed);
+
+            var commit = await client.CommitWithResultAsync(created.Handle, 0, (uint)content.Length, timeout.Token);
+            AssertCommitResult(commit);
+            Assert.Equal(content, await ReadBytesAsync(setupClient, path, timeout.Token));
+        }
     }
 
     [NfsV3IntegrationFact]
@@ -611,6 +832,144 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_VerifiesAttributeMutationByPathAndHandle()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var path = fixture.GetRunPath("attribute-mutation.txt");
+        await WriteBytesAsync(client, path, [0x41, 0x42, 0x43, 0x44, 0x45], timeout.Token);
+
+        var pathMtime = new DateTime(2024, 02, 03, 05, 06, 07, DateTimeKind.Utc);
+        await client.SetAttributesAsync(
+            path,
+            new NfsSetAttributes
+            {
+                Mode = 0x180,
+                Size = 3,
+                Mtime = pathMtime
+            },
+            timeout.Token);
+
+        var pathAttributes = await client.GetAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x180u, pathAttributes.Mode & 0x1FF);
+        Assert.Equal(3, pathAttributes.Size);
+        AssertCloseTo(pathMtime, pathAttributes.Mtime);
+        Assert.Equal(new byte[] { 0x41, 0x42, 0x43 }, await ReadBytesAsync(client, path, timeout.Token));
+        Assert.NotNull(pathAttributes.CtimeTimestamp);
+
+        await client.SetAttributesGuardedAsync(
+            path,
+            new NfsSetAttributes { Mode = 0x1A0 },
+            pathAttributes.CtimeTimestamp.Value,
+            timeout.Token);
+
+        var guardedPathAttributes = await client.GetAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x1A0u, guardedPathAttributes.Mode & 0x1FF);
+
+        var staleGuard = await Assert.ThrowsAsync<NfsException>(
+            () => client.SetAttributesGuardedAsync(
+                path,
+                new NfsSetAttributes { Mode = 0x1FF },
+                DateTime.UnixEpoch,
+                timeout.Token));
+        Assert.Equal(NfsV3Status.NotSync, staleGuard.Status);
+
+        var lookup = await client.LookupPathAsync(path, timeout.Token);
+        var handleMtime = new DateTime(2024, 03, 04, 06, 07, 08, DateTimeKind.Utc);
+        await client.SetAttributesAsync(
+            lookup.Handle,
+            new NfsSetAttributes
+            {
+                Mode = 0x1A0,
+                Size = 6,
+                Mtime = handleMtime
+            },
+            timeout.Token);
+
+        var handleAttributes = await client.GetAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x1A0u, handleAttributes.Mode & 0x1FF);
+        Assert.Equal(6, handleAttributes.Size);
+        AssertCloseTo(handleMtime, handleAttributes.Mtime);
+        Assert.NotNull(handleAttributes.CtimeTimestamp);
+
+        await client.SetAttributesGuardedAsync(
+            lookup.Handle,
+            new NfsSetAttributes { Mode = 0x180 },
+            handleAttributes.CtimeTimestamp.Value,
+            timeout.Token);
+
+        handleAttributes = await client.GetAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x180u, handleAttributes.Mode & 0x1FF);
+
+        await client.ChmodAsync(path, 0x1A4, timeout.Token);
+        await client.SetFileSizeAsync(path, 2, timeout.Token);
+
+        var finalAttributes = await client.GetAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x1A4u, finalAttributes.Mode & 0x1FF);
+        Assert.Equal(2, finalAttributes.Size);
+        Assert.Equal(new byte[] { 0x41, 0x42 }, await ReadBytesAsync(client, path, timeout.Token));
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsClient_MutatesAttributesThroughFacade()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+        await using var client = new NfsClient(NfsVersion.V3, CreateOptions());
+
+        await client.ConnectAsync(NfsV3IntegrationEnvironment.Server, timeout.Token);
+        await client.MountDeviceAsync(NfsV3IntegrationEnvironment.ExportPath, timeout.Token);
+
+        var path = fixture.GetRunPath("facade-attribute-mutation.txt");
+        await using (var content = new MemoryStream([0x61, 0x62, 0x63, 0x64], writable: false))
+        {
+            await client.WriteAsync(path, content, timeout.Token);
+        }
+
+        var mtime = new DateTime(2024, 04, 05, 06, 07, 08, DateTimeKind.Utc);
+        await client.SetAttributesAsync(
+            path,
+            new NfsSetAttributes
+            {
+                Mode = 0x180,
+                Size = 3,
+                Mtime = mtime
+            },
+            timeout.Token);
+
+        var attributes = await client.GetItemAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x180u, attributes.Mode & 0x1FF);
+        Assert.Equal(3, attributes.Size);
+        AssertCloseTo(mtime, attributes.Mtime);
+        Assert.NotNull(attributes.CtimeTimestamp);
+
+        await client.SetAttributesGuardedAsync(
+            path,
+            new NfsSetAttributes { Mode = 0x1A0 },
+            attributes.CtimeTimestamp.Value,
+            timeout.Token);
+
+        attributes = await client.GetItemAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x1A0u, attributes.Mode & 0x1FF);
+
+        await client.ChmodAsync(path, 0x1A4, timeout.Token);
+        await client.SetFileSizeAsync(path, 2, timeout.Token);
+
+        attributes = await client.GetItemAttributesAsync(path, timeout.Token);
+        Assert.Equal(0x1A4u, attributes.Mode & 0x1FF);
+        Assert.Equal(2, attributes.Size);
+
+        await using var output = new MemoryStream();
+        await client.ReadAsync(path, output, timeout.Token);
+        Assert.Equal(new byte[] { 0x61, 0x62 }, output.ToArray());
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_VerifiesFileSystemStatInfoAndPathConfByHandleAndPath()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -656,6 +1015,25 @@ public sealed class NfsV3IntegrationTests
         AssertFileSystemStat(stat);
         AssertFileSystemInfo(info, fixture.Capabilities);
         AssertPathConf(pathConf, fixture.Capabilities);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ReconnectsAndRetriesAfterTransportFailure()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(
+            CreateOptions(maxRetries: 1, retryDelay: TimeSpan.Zero),
+            timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var before = await client.GetAttributesAsync(fixture.RunDirectory, timeout.Token);
+        await DisposeActiveNfsConnectionAsync(client);
+
+        var after = await client.GetAttributesAsync(fixture.RunDirectory, timeout.Token);
+
+        Assert.Equal(before.Type, after.Type);
+        Assert.Equal(before.FileId, after.FileId);
     }
 
     [NfsV3IntegrationFact]
@@ -737,6 +1115,10 @@ public sealed class NfsV3IntegrationTests
         Assert.False(client.IsMounted);
         await Assert.ThrowsAsync<NfsException>(
             () => client.GetItemAttributesAsync(".", timeout.Token));
+
+        await client.DisposeAsync();
+        await client.UnMountDeviceAsync(timeout.Token);
+        Assert.False(client.IsMounted);
     }
 
     [NfsV3IntegrationFact]
@@ -756,6 +1138,12 @@ public sealed class NfsV3IntegrationTests
     private static NfsClientOptions CreateOptions(
         int? readdirCount = null,
         int? maxReadSize = null,
+        int? maxWriteSize = null,
+        NfsWriteStableHow stableHow = NfsWriteStableHow.FileSync,
+        bool enableDirectoryCache = false,
+        TimeSpan? directoryCacheTtl = null,
+        int maxRetries = 0,
+        TimeSpan? retryDelay = null,
         uint? userId = null,
         uint? groupId = null) =>
         new()
@@ -763,10 +1151,16 @@ public sealed class NfsV3IntegrationTests
             UserId = userId ?? NfsV3IntegrationEnvironment.UserId,
             GroupId = groupId ?? NfsV3IntegrationEnvironment.GroupId,
             UsePrivilegedSourcePort = false,
+            PortmapPort = NfsV3IntegrationEnvironment.PortmapPort,
             CommandTimeout = TimeSpan.FromSeconds(10),
-            MaxRetries = 0,
+            MaxRetries = maxRetries,
+            RetryDelay = retryDelay ?? TimeSpan.Zero,
             MaxReadSize = maxReadSize ?? NfsClientOptions.Default.MaxReadSize,
-            ReaddirCount = readdirCount ?? NfsClientOptions.Default.ReaddirCount
+            MaxWriteSize = maxWriteSize ?? NfsClientOptions.Default.MaxWriteSize,
+            StableHow = stableHow,
+            ReaddirCount = readdirCount ?? NfsClientOptions.Default.ReaddirCount,
+            EnableDirectoryCache = enableDirectoryCache,
+            DirectoryCacheTtl = directoryCacheTtl ?? NfsClientOptions.Default.DirectoryCacheTtl
         };
 
     private static Task<NfsV3Client> ConnectV3ClientAsync(CancellationToken ct) =>
@@ -844,6 +1238,17 @@ public sealed class NfsV3IntegrationTests
         return output.ToArray();
     }
 
+    private static async ValueTask DisposeActiveNfsConnectionAsync(NfsV3Client client)
+    {
+        var field = typeof(NfsV3Client).GetField(
+            "_nfs",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(field);
+
+        var connection = Assert.IsAssignableFrom<IAsyncDisposable>(field.GetValue(client));
+        await connection.DisposeAsync();
+    }
+
     private static async Task AssertMissingPathAsync(
         NfsV3Client client,
         string path,
@@ -902,6 +1307,21 @@ public sealed class NfsV3IntegrationTests
 
     private static void AssertAccessGranted(NfsAccessMode actual, NfsAccessMode expected) =>
         Assert.Equal(expected, actual & expected);
+
+    private static void AssertWriteResult(NfsWriteResult result)
+    {
+        Assert.True(result.Count > 0);
+        Assert.Contains(result.Committed, Enum.GetValues<NfsWriteStableHow>());
+        Assert.Equal(8, result.WriteVerifier.Length);
+    }
+
+    private static void AssertCommittedAtLeast(NfsWriteStableHow requested, NfsWriteStableHow actual) =>
+        Assert.True(
+            (uint)actual >= (uint)requested,
+            $"Expected committed stability {actual} to be at least requested stability {requested}.");
+
+    private static void AssertCommitResult(NfsCommitResult result) =>
+        Assert.Equal(8, result.WriteVerifier.Length);
 
     private static void AssertCloseTo(DateTime expectedUtc, DateTime? actualUtc)
     {
