@@ -558,6 +558,13 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(0, zeroLengthRead.BytesRead);
         Assert.False(zeroLengthRead.Eof);
 
+        await using var limitedClient = await ConnectV3ClientAsync(
+            CreateOptions(maxReadSize: 4),
+            timeout.Token);
+        var tooLargeRead = await Assert.ThrowsAsync<NfsException>(
+            () => limitedClient.ReadAtAsync(lookup.Handle, 0, buffer, 0, 5, timeout.Token));
+        Assert.Contains("exceeds MaxReadSize", tooLargeRead.Message);
+
         await using var output = new MemoryStream();
         var missingPath = await Assert.ThrowsAsync<NfsException>(
             () => client.ReadFileAsync(fixture.GetRunPath("missing-read-source.bin"), output, timeout.Token));

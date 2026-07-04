@@ -771,6 +771,8 @@ public sealed class NfsV3Client : IAsyncDisposable
         ValidateBufferRange(buffer.Length, bufferOffset, count);
         if (count == 0)
             return (0, false);
+        if (count > _options.MaxReadSize)
+            throw new NfsException($"READ request length {count} exceeds MaxReadSize {_options.MaxReadSize}.");
 
         var writer = new XdrWriter();
         writer.Opaque(fileFh);
