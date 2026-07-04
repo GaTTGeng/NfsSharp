@@ -810,7 +810,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>READ a file handle into a stream until EOF.</summary>
     public async Task ReadFileAsync(byte[] fileFh, Stream output, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(output);
+        ValidateWritableStream(output);
         ValidateHandle(fileFh);
 
         ulong offset = 0;
@@ -846,6 +846,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>READ an export-relative path into a stream until EOF.</summary>
     public async Task ReadFileAsync(string remotePath, Stream output, CancellationToken ct)
     {
+        ValidateWritableStream(output);
         var lookup = await LookupPathAsync(remotePath, ct);
         if (lookup.Attr?.Type == NfsType.Dir)
             throw new NfsException($"Path is a directory: {remotePath}", NfsV3Status.IsDir);
@@ -869,7 +870,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>WRITE stream content to an existing file handle.</summary>
     public async Task WriteFileAsync(byte[] fileFh, Stream input, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(input);
+        ValidateReadableStream(input);
         ValidateHandle(fileFh);
 
         var buffer = new byte[_options.MaxWriteSize];
@@ -902,6 +903,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>Create or truncate a file, then write stream content to it.</summary>
     public async Task<NfsLookup> WriteFileAsync(string remotePath, Stream input, CancellationToken ct)
     {
+        ValidateReadableStream(input);
         var (parent, name) = await ResolveParentAsync(remotePath, ct);
         NfsLookup file;
         try
@@ -1803,6 +1805,20 @@ public sealed class NfsV3Client : IAsyncDisposable
             throw new NfsException("Count cannot be negative.");
         if (bufferOffset > bufferLength || count > bufferLength - bufferOffset)
             throw new NfsException("Buffer offset and count exceed the buffer length.");
+    }
+
+    private static void ValidateReadableStream(Stream input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (!input.CanRead)
+            throw new NfsException("Input stream must be readable.");
+    }
+
+    private static void ValidateWritableStream(Stream output)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        if (!output.CanWrite)
+            throw new NfsException("Output stream must be writable.");
     }
 
     private void InvalidateDirCache(byte[] dirHandle)

@@ -38,7 +38,7 @@ NFSv3 over TCP is the primary supported protocol. The NFSv4 surface is experimen
 
 `WriteAtWithResultAsync` returns `NfsWriteResult`, including the byte count accepted by the server, the committed stability mode reported by NFS, and the write verifier. `CommitWithResultAsync` returns `NfsCommitResult`, including the commit verifier. Result types validate verifier shape and return defensive copies of verifier bytes. The simpler `WriteAtAsync` and `CommitAsync` overloads remain available when callers do not need those protocol details.
 
-Path-based stream writes return an `NfsLookup` for the written file. Its attributes are refreshed after the stream write completes, so `Attr.Size` reflects the final server-side length when the server returns post-write attributes normally.
+Stream reads require a writable output stream, and stream writes require a readable input stream. Path-based stream writes validate the input stream before creating or truncating the remote file. They return an `NfsLookup` for the written file; its attributes are refreshed after the stream write completes, so `Attr.Size` reflects the final server-side length when the server returns post-write attributes normally.
 
 `SetAttributesGuardedAsync` uses the NFSv3 `ctime` guard so an attribute update only succeeds if the server-side file change time still matches the value previously observed by the caller. Prefer `NfsFattr.CtimeTimestamp` over `Ctime` for this guard because it preserves raw NFS nanosecond precision.
 

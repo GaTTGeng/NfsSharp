@@ -532,6 +532,11 @@ public sealed class NfsV3IntegrationTests
         var missingPath = await Assert.ThrowsAsync<NfsException>(
             () => client.ReadFileAsync(fixture.GetRunPath("missing-read-source.bin"), output, timeout.Token));
         Assert.Equal(NfsV3Status.NoEnt, missingPath.Status);
+
+        await using var readOnlyOutput = new MemoryStream(new byte[8], writable: false);
+        var notWritable = await Assert.ThrowsAsync<NfsException>(
+            () => client.ReadFileAsync(lookup.Handle, readOnlyOutput, timeout.Token));
+        Assert.Contains("writable", notWritable.Message);
     }
 
     [NfsV3IntegrationFact]
@@ -617,6 +622,13 @@ public sealed class NfsV3IntegrationTests
         var tooLargeWrite = await Assert.ThrowsAsync<NfsException>(
             () => limitedClient.WriteAtAsync(created.Handle, 0, new byte[] { 0x01, 0x02, 0x03 }, timeout.Token));
         Assert.Contains("exceeds MaxWriteSize", tooLargeWrite.Message);
+
+        var rejectedPath = fixture.GetRunPath("non-readable-stream.bin");
+        await using var nonReadableInput = new NonReadableStream();
+        var notReadable = await Assert.ThrowsAsync<NfsException>(
+            () => client.WriteFileAsync(rejectedPath, nonReadableInput, timeout.Token));
+        Assert.Contains("readable", notReadable.Message);
+        await AssertMissingPathAsync(client, rejectedPath, timeout.Token);
     }
 
     [NfsV3IntegrationFact]
@@ -1498,5 +1510,31 @@ public sealed class NfsV3IntegrationTests
         Assert.NotEmpty(client.RootHandle);
 
         await client.UnmountAsync(timeout.Token);
+    }
+
+    private sealed class NonReadableStream : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+        }
     }
 }
