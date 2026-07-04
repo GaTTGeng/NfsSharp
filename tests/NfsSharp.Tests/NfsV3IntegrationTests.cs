@@ -533,6 +533,22 @@ public sealed class NfsV3IntegrationTests
             () => client.ReadFileAsync(fixture.GetRunPath("missing-read-source.bin"), output, timeout.Token));
         Assert.Equal(NfsV3Status.NoEnt, missingPath.Status);
 
+        var localFailureDirectory = Path.Combine(Path.GetTempPath(), $"nfssharp-read-failure-{Guid.NewGuid():N}");
+        var localFailurePath = Path.Combine(localFailureDirectory, "missing.bin");
+        try
+        {
+            var missingLocalPath = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadFileAsync(fixture.GetRunPath("missing-read-source-local.bin"), localFailurePath, timeout.Token));
+            Assert.Equal(NfsV3Status.NoEnt, missingLocalPath.Status);
+            Assert.False(File.Exists(localFailurePath));
+            Assert.False(Directory.Exists(localFailureDirectory));
+        }
+        finally
+        {
+            if (Directory.Exists(localFailureDirectory))
+                Directory.Delete(localFailureDirectory, recursive: true);
+        }
+
         await using var readOnlyOutput = new MemoryStream(new byte[8], writable: false);
         var notWritable = await Assert.ThrowsAsync<NfsException>(
             () => client.ReadFileAsync(lookup.Handle, readOnlyOutput, timeout.Token));

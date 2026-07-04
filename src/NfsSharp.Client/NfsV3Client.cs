@@ -859,12 +859,17 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
 
-        var directory = Path.GetDirectoryName(Path.GetFullPath(localPath));
+        var fullLocalPath = Path.GetFullPath(localPath);
+        var lookup = await LookupPathAsync(remotePath, ct);
+        if (lookup.Attr?.Type == NfsType.Dir)
+            throw new NfsException($"Path is a directory: {remotePath}", NfsV3Status.IsDir);
+
+        var directory = Path.GetDirectoryName(fullLocalPath);
         if (!string.IsNullOrWhiteSpace(directory))
             Directory.CreateDirectory(directory);
 
-        await using var output = File.Create(localPath);
-        await ReadFileAsync(remotePath, output, ct);
+        await using var output = File.Create(fullLocalPath);
+        await ReadFileAsync(lookup.Handle, output, ct);
     }
 
     /// <summary>WRITE stream content to an existing file handle.</summary>
