@@ -915,7 +915,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         }
 
         await WriteFileAsync(file.Handle, input, ct);
-        return file;
+        return file with { Attr = await GetAttributesAsync(file.Handle, ct) };
     }
 
     /// <summary>WRITE a local file to an export-relative path, creating or truncating the remote file.</summary>

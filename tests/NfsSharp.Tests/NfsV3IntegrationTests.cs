@@ -566,14 +566,27 @@ public sealed class NfsV3IntegrationTests
 
         var streamPath = fixture.GetRunPath("stream-write.bin");
         var streamContent = Enumerable.Range(0, 19).Select(i => (byte)(0x40 + i)).ToArray();
+        NfsLookup streamLookup;
         await using (var input = new MemoryStream(streamContent, writable: false))
         {
-            await client.WriteFileAsync(streamPath, input, timeout.Token);
+            streamLookup = await client.WriteFileAsync(streamPath, input, timeout.Token);
         }
 
+        Assert.NotNull(streamLookup.Attr);
+        Assert.Equal(streamContent.Length, streamLookup.Attr.Size);
         commit = await client.CommitWithResultAsync(streamPath, 0, (uint)streamContent.Length, timeout.Token);
         AssertCommitResult(commit);
         Assert.Equal(streamContent, await ReadBytesAsync(client, streamPath, timeout.Token));
+
+        var replacementContent = new byte[] { 0x55, 0x56, 0x57 };
+        await using (var input = new MemoryStream(replacementContent, writable: false))
+        {
+            streamLookup = await client.WriteFileAsync(streamPath, input, timeout.Token);
+        }
+
+        Assert.NotNull(streamLookup.Attr);
+        Assert.Equal(replacementContent.Length, streamLookup.Attr.Size);
+        Assert.Equal(replacementContent, await ReadBytesAsync(client, streamPath, timeout.Token));
 
         await using var chunkedClient = await ConnectV3ClientAsync(
             CreateOptions(maxWriteSize: 3),
@@ -581,11 +594,14 @@ public sealed class NfsV3IntegrationTests
 
         var chunkedPath = fixture.GetRunPath("chunked-stream-write.bin");
         var chunkedContent = Enumerable.Range(0, 17).Select(i => (byte)(0x70 + i)).ToArray();
+        NfsLookup chunkedLookup;
         await using (var input = new MemoryStream(chunkedContent, writable: false))
         {
-            await chunkedClient.WriteFileAsync(chunkedPath, input, timeout.Token);
+            chunkedLookup = await chunkedClient.WriteFileAsync(chunkedPath, input, timeout.Token);
         }
 
+        Assert.NotNull(chunkedLookup.Attr);
+        Assert.Equal(chunkedContent.Length, chunkedLookup.Attr.Size);
         await chunkedClient.CommitAsync(chunkedPath, 0, 0, timeout.Token);
         Assert.Equal(chunkedContent, await ReadBytesAsync(client, chunkedPath, timeout.Token));
 
