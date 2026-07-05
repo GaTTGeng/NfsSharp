@@ -1116,7 +1116,7 @@ public sealed class NfsV3IntegrationTests
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
         var before = await client.GetAttributesAsync(fixture.RunDirectory, timeout.Token);
-        await DisposeActiveNfsConnectionAsync(client);
+        await client.DisposeActiveNfsConnectionForTestingAsync();
 
         var after = await client.GetAttributesAsync(fixture.RunDirectory, timeout.Token);
 
@@ -1324,17 +1324,6 @@ public sealed class NfsV3IntegrationTests
         await using var output = new MemoryStream();
         await client.ReadFileAsync(path, output, ct);
         return output.ToArray();
-    }
-
-    private static async ValueTask DisposeActiveNfsConnectionAsync(NfsV3Client client)
-    {
-        var field = typeof(NfsV3Client).GetField(
-            "_nfs",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        Assert.NotNull(field);
-
-        var connection = Assert.IsAssignableFrom<IAsyncDisposable>(field.GetValue(client));
-        await connection.DisposeAsync();
     }
 
     private static async Task AssertMissingPathAsync(

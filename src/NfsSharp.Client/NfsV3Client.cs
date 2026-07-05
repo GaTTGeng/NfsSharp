@@ -1207,6 +1207,12 @@ public sealed class NfsV3Client : IAsyncDisposable
 
     private Conn RequireNfs() => _nfs ?? throw new NfsException("NFS connection is not established.");
 
+    internal async ValueTask DisposeActiveNfsConnectionForTestingAsync()
+    {
+        var conn = _nfs ?? throw new NfsException("NFS connection is not established.");
+        await conn.DisposeAsync();
+    }
+
     private async Task<int> GetPortAsync(Conn conn, uint prog, uint vers, CancellationToken ct)
     {
         var writer = new XdrWriter();
@@ -1855,11 +1861,14 @@ public sealed class NfsV3Client : IAsyncDisposable
 
     private void InvalidateDirCacheForMutation(byte[] handle)
     {
-        if (!_options.EnableDirectoryCache)
+        if (!_options.EnableDirectoryCache || _dirCache.IsEmpty)
             return;
 
         _dirCache.TryRemove(handle, out _);
-        foreach (var cached in _dirCache.ToArray())
+        if (_dirCache.IsEmpty)
+            return;
+
+        foreach (var cached in _dirCache)
         {
             if (cached.Value.Entries.Any(entry => entry.Handle is not null && entry.Handle.AsSpan().SequenceEqual(handle)))
                 _dirCache.TryRemove(cached.Key, out _);
