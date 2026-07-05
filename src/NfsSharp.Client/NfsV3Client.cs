@@ -1021,16 +1021,6 @@ public sealed class NfsV3Client : IAsyncDisposable
     public async Task SetAttributesGuardedAsync(
         byte[] fileFh,
         NfsSetAttributes attributes,
-        DateTime guardCtime,
-        CancellationToken ct)
-    {
-        await SetAttributesGuardedAsync(fileFh, attributes, NfsTimestamp.FromDateTime(guardCtime), ct);
-    }
-
-    /// <summary>SETATTR for an existing file handle only when the server-side ctime still matches.</summary>
-    public async Task SetAttributesGuardedAsync(
-        byte[] fileFh,
-        NfsSetAttributes attributes,
         NfsTimestamp guardCtime,
         CancellationToken ct)
     {
@@ -1063,16 +1053,6 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         var lookup = await LookupPathAsync(path, ct);
         await SetAttributesAsync(lookup.Handle, attributes, ct);
-    }
-
-    /// <summary>SETATTR for an export-relative path only when the server-side ctime still matches.</summary>
-    public async Task SetAttributesGuardedAsync(
-        string path,
-        NfsSetAttributes attributes,
-        DateTime guardCtime,
-        CancellationToken ct)
-    {
-        await SetAttributesGuardedAsync(path, attributes, NfsTimestamp.FromDateTime(guardCtime), ct);
     }
 
     /// <summary>SETATTR for an export-relative path only when the server-side ctime still matches.</summary>

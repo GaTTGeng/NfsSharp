@@ -960,7 +960,7 @@ public sealed class NfsV3IntegrationTests
             () => client.SetAttributesGuardedAsync(
                 path,
                 new NfsSetAttributes { Mode = 0x1FF },
-                DateTime.UnixEpoch,
+                new NfsTimestamp(0, 0),
                 timeout.Token));
         Assert.Equal(NfsV3Status.NotSync, staleGuard.Status);
 

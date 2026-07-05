@@ -166,9 +166,6 @@ public sealed class NfsClient : IAsyncDisposable
     public Task SetAttributesAsync(string path, NfsSetAttributes attributes, CancellationToken ct = default) =>
         RequireMounted().SetAttributesAsync(path, attributes, ct);
 
-    public Task SetAttributesGuardedAsync(string path, NfsSetAttributes attributes, DateTime guardCtime, CancellationToken ct = default) =>
-        RequireMounted().SetAttributesGuardedAsync(path, attributes, guardCtime, ct);
-
     public Task SetAttributesGuardedAsync(string path, NfsSetAttributes attributes, NfsTimestamp guardCtime, CancellationToken ct = default) =>
         RequireMounted().SetAttributesGuardedAsync(path, attributes, guardCtime, ct);
 
