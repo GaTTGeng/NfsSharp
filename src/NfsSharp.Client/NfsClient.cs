@@ -72,9 +72,17 @@ public sealed class NfsClient : IAsyncDisposable
         if (_mounted is null)
             return;
 
-        await _mounted.UnmountAsync(ct);
-        await _mounted.DisposeAsync();
+        var mounted = _mounted;
         _mounted = null;
+
+        try
+        {
+            await mounted.UnmountAsync(ct);
+        }
+        finally
+        {
+            await mounted.DisposeAsync();
+        }
     }
 
     public Task<NfsLookup> LookupAsync(string path, CancellationToken ct = default) =>
@@ -91,6 +99,9 @@ public sealed class NfsClient : IAsyncDisposable
 
     public Task<int> WriteAtAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default) =>
         RequireMounted().WriteAtAsync(fileHandle, offset, data, ct);
+
+    public Task<NfsWriteResult> WriteAtWithResultAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default) =>
+        RequireMounted().WriteAtWithResultAsync(fileHandle, offset, data, ct);
 
     public Task<List<NfsEntry>> GetItemListAsync(string path, CancellationToken ct = default) =>
         RequireMounted().GetItemListAsync(path, ct);
@@ -152,6 +163,12 @@ public sealed class NfsClient : IAsyncDisposable
     public Task SetFileSizeAsync(string path, ulong size, CancellationToken ct = default) =>
         RequireMounted().SetFileSizeAsync(path, size, ct);
 
+    public Task SetAttributesAsync(string path, NfsSetAttributes attributes, CancellationToken ct = default) =>
+        RequireMounted().SetAttributesAsync(path, attributes, ct);
+
+    public Task SetAttributesGuardedAsync(string path, NfsSetAttributes attributes, NfsTimestamp guardCtime, CancellationToken ct = default) =>
+        RequireMounted().SetAttributesGuardedAsync(path, attributes, guardCtime, ct);
+
     public Task<NfsAccessMode> AccessAsync(string path, NfsAccessMode desired, CancellationToken ct = default) =>
         RequireMounted().AccessAsync(path, desired, ct);
 
@@ -160,6 +177,9 @@ public sealed class NfsClient : IAsyncDisposable
 
     public Task CommitAsync(string path, ulong offset, uint count, CancellationToken ct = default) =>
         RequireMounted().CommitAsync(path, offset, count, ct);
+
+    public Task<NfsCommitResult> CommitWithResultAsync(string path, ulong offset, uint count, CancellationToken ct = default) =>
+        RequireMounted().CommitWithResultAsync(path, offset, count, ct);
 
     public Task<NfsFileSystemStat> GetFileSystemStatAsync(string path = ".", CancellationToken ct = default) =>
         RequireMounted().GetFileSystemStatAsync(path, ct);
@@ -172,11 +192,11 @@ public sealed class NfsClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_mounted is not null)
-        {
-            await _mounted.DisposeAsync();
-            _mounted = null;
-        }
+        var mounted = _mounted;
+        _mounted = null;
+
+        if (mounted is not null)
+            await mounted.DisposeAsync();
     }
 
     private string RequireServer() =>

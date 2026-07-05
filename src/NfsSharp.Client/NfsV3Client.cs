@@ -49,6 +49,13 @@ public sealed class NfsV3Client : IAsyncDisposable
     private const uint IpprotoTcp = 6;
     private const int DefaultNfsPort = 2049;
     private const int MaxRpcRecordLength = 64 * 1024 * 1024;
+    private const NfsAccessMode ValidAccessMask =
+        NfsAccessMode.Read |
+        NfsAccessMode.Lookup |
+        NfsAccessMode.Modify |
+        NfsAccessMode.Extend |
+        NfsAccessMode.Delete |
+        NfsAccessMode.Execute;
 
     private readonly IPAddress _ip;
     private readonly NfsClientOptions _options;
@@ -408,6 +415,9 @@ public sealed class NfsV3Client : IAsyncDisposable
     public async Task<NfsAccessMode> AccessAsync(byte[] fileHandle, NfsAccessMode desired, CancellationToken ct)
     {
         ValidateHandle(fileHandle);
+        ValidateAccessMode(desired);
+        if (desired == NfsAccessMode.None)
+            return NfsAccessMode.None;
 
         var writer = new XdrWriter();
         writer.Opaque(fileHandle);
@@ -468,6 +478,12 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>COMMIT — flush cached data to stable storage for a file handle.</summary>
     public async Task CommitAsync(byte[] fileFh, ulong offset, uint count, CancellationToken ct)
     {
+        await CommitWithResultAsync(fileFh, offset, count, ct);
+    }
+
+    /// <summary>COMMIT — flush cached data to stable storage and return the server write verifier.</summary>
+    public async Task<NfsCommitResult> CommitWithResultAsync(byte[] fileFh, ulong offset, uint count, CancellationToken ct)
+    {
         ValidateHandle(fileFh);
 
         var writer = new XdrWriter();
@@ -479,7 +495,8 @@ public sealed class NfsV3Client : IAsyncDisposable
         var status = reader.UInt();
         EnsureOk(status, "COMMIT failed");
         ReadWccData(reader);
-        reader.FixedBytes(8); // write verifier
+        var writeVerifier = reader.FixedBytes(8);
+        return new NfsCommitResult(writeVerifier);
     }
 
     /// <summary>COMMIT — flush cached data to stable storage for an export-relative file path.</summary>
@@ -487,6 +504,13 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         var lookup = await LookupPathAsync(path, ct);
         await CommitAsync(lookup.Handle, offset, count, ct);
+    }
+
+    /// <summary>COMMIT — flush cached data to stable storage for an export-relative path and return the server write verifier.</summary>
+    public async Task<NfsCommitResult> CommitWithResultAsync(string path, ulong offset, uint count, CancellationToken ct)
+    {
+        var lookup = await LookupPathAsync(path, ct);
+        return await CommitWithResultAsync(lookup.Handle, offset, count, ct);
     }
 
     /// <summary>SYMLINK — create a symbolic link in a directory handle.</summary>
@@ -591,11 +615,13 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         ValidateHandle(dirFh);
 
-        if (_options.EnableDirectoryCache &&
-            _dirCache.TryGetValue(dirFh, out var cached) &&
-            DateTime.UtcNow < cached.Expiry)
+        if (_options.EnableDirectoryCache && _dirCache.TryGetValue(dirFh, out var cached))
         {
-            return cached.Entries;
+            var now = DateTime.UtcNow;
+            if (now < cached.Expiry)
+                return CloneDirEntries(cached.Entries);
+
+            _dirCache.TryRemove(dirFh, out _);
         }
 
         var entries = new List<NfsEntryPlus>();
@@ -642,7 +668,7 @@ public sealed class NfsV3Client : IAsyncDisposable
 
         if (_options.EnableDirectoryCache)
         {
-            _dirCache[dirFh] = new DirCacheEntry(entries, DateTime.UtcNow.Add(_options.DirectoryCacheTtl));
+            _dirCache[dirFh] = new DirCacheEntry(CloneDirEntries(entries), DateTime.UtcNow.Add(_options.DirectoryCacheTtl));
         }
 
         return entries;
@@ -742,6 +768,11 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         ValidateHandle(fileFh);
         ArgumentNullException.ThrowIfNull(buffer);
+        ValidateBufferRange(buffer.Length, bufferOffset, count);
+        if (count == 0)
+            return (0, false);
+        if (count > _options.MaxReadSize)
+            throw new NfsException($"READ request length {count} exceeds MaxReadSize {_options.MaxReadSize}.");
 
         var writer = new XdrWriter();
         writer.Opaque(fileFh);
@@ -766,14 +797,24 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>WRITE to a file handle at a specific offset. Returns bytes written.</summary>
     public async Task<int> WriteAtAsync(byte[] fileFh, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
+        var result = await WriteAtWithResultAsync(fileFh, offset, data, ct);
+        return result.Count;
+    }
+
+    /// <summary>WRITE to a file handle at a specific offset. Returns count, committed stability, and verifier.</summary>
+    public async Task<NfsWriteResult> WriteAtWithResultAsync(byte[] fileFh, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct)
+    {
         ValidateHandle(fileFh);
+        if (data.Length == 0)
+            return new NfsWriteResult(0, _options.StableHow, Array.Empty<byte>());
+
         return await WriteChunkAsync(fileFh, offset, data, ct);
     }
 
     /// <summary>READ a file handle into a stream until EOF.</summary>
     public async Task ReadFileAsync(byte[] fileFh, Stream output, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(output);
+        ValidateWritableStream(output);
         ValidateHandle(fileFh);
 
         ulong offset = 0;
@@ -809,6 +850,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>READ an export-relative path into a stream until EOF.</summary>
     public async Task ReadFileAsync(string remotePath, Stream output, CancellationToken ct)
     {
+        ValidateWritableStream(output);
         var lookup = await LookupPathAsync(remotePath, ct);
         if (lookup.Attr?.Type == NfsType.Dir)
             throw new NfsException($"Path is a directory: {remotePath}", NfsV3Status.IsDir);
@@ -821,18 +863,23 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
 
-        var directory = Path.GetDirectoryName(Path.GetFullPath(localPath));
+        var fullLocalPath = Path.GetFullPath(localPath);
+        var lookup = await LookupPathAsync(remotePath, ct);
+        if (lookup.Attr?.Type == NfsType.Dir)
+            throw new NfsException($"Path is a directory: {remotePath}", NfsV3Status.IsDir);
+
+        var directory = Path.GetDirectoryName(fullLocalPath);
         if (!string.IsNullOrWhiteSpace(directory))
             Directory.CreateDirectory(directory);
 
-        await using var output = File.Create(localPath);
-        await ReadFileAsync(remotePath, output, ct);
+        await using var output = File.Create(fullLocalPath);
+        await ReadFileAsync(lookup.Handle, output, ct);
     }
 
     /// <summary>WRITE stream content to an existing file handle.</summary>
     public async Task WriteFileAsync(byte[] fileFh, Stream input, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(input);
+        ValidateReadableStream(input);
         ValidateHandle(fileFh);
 
         var buffer = new byte[_options.MaxWriteSize];
@@ -853,11 +900,11 @@ public sealed class NfsV3Client : IAsyncDisposable
                     buffer.AsMemory(written, count),
                     ct);
 
-                if (committed <= 0)
+                if (committed.Count <= 0)
                     throw new NfsException("WRITE made no progress.");
 
-                written += committed;
-                offset += (ulong)committed;
+                written += committed.Count;
+                offset += (ulong)committed.Count;
             }
         }
     }
@@ -865,6 +912,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>Create or truncate a file, then write stream content to it.</summary>
     public async Task<NfsLookup> WriteFileAsync(string remotePath, Stream input, CancellationToken ct)
     {
+        ValidateReadableStream(input);
         var (parent, name) = await ResolveParentAsync(remotePath, ct);
         NfsLookup file;
         try
@@ -878,7 +926,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         }
 
         await WriteFileAsync(file.Handle, input, ct);
-        return file;
+        return file with { Attr = await GetAttributesAsync(file.Handle, ct) };
     }
 
     /// <summary>WRITE a local file to an export-relative path, creating or truncating the remote file.</summary>
@@ -966,18 +1014,56 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>SETATTR for an existing file handle.</summary>
     public async Task SetAttributesAsync(byte[] fileFh, NfsSetAttributes attributes, CancellationToken ct)
     {
+        await SetAttributesAsync(fileFh, attributes, guardCtime: null, ct);
+    }
+
+    /// <summary>SETATTR for an existing file handle only when the server-side ctime still matches.</summary>
+    public async Task SetAttributesGuardedAsync(
+        byte[] fileFh,
+        NfsSetAttributes attributes,
+        NfsTimestamp guardCtime,
+        CancellationToken ct)
+    {
+        await SetAttributesAsync(fileFh, attributes, guardCtime, ct);
+    }
+
+    private async Task SetAttributesAsync(
+        byte[] fileFh,
+        NfsSetAttributes attributes,
+        NfsTimestamp? guardCtime,
+        CancellationToken ct)
+    {
         ValidateHandle(fileFh);
         ArgumentNullException.ThrowIfNull(attributes);
 
         var writer = new XdrWriter();
         writer.Opaque(fileFh);
         WriteSattr3(writer, attributes);
-        writer.Bool(false); // sattrguard3: no guard
+        WriteSattrGuard3(writer, guardCtime);
 
         var reader = await CallAsync(RequireNfs(), ProgNfs, VerNfs, NfsSetAttr, writer.ToArray(), ct);
         var status = reader.UInt();
         EnsureOk(status, "SETATTR failed");
         ReadWccData(reader);
+        InvalidateDirCacheForMutation(fileFh);
+    }
+
+    /// <summary>SETATTR for an export-relative path.</summary>
+    public async Task SetAttributesAsync(string path, NfsSetAttributes attributes, CancellationToken ct)
+    {
+        var lookup = await LookupPathAsync(path, ct);
+        await SetAttributesAsync(lookup.Handle, attributes, ct);
+    }
+
+    /// <summary>SETATTR for an export-relative path only when the server-side ctime still matches.</summary>
+    public async Task SetAttributesGuardedAsync(
+        string path,
+        NfsSetAttributes attributes,
+        NfsTimestamp guardCtime,
+        CancellationToken ct)
+    {
+        var lookup = await LookupPathAsync(path, ct);
+        await SetAttributesGuardedAsync(lookup.Handle, attributes, guardCtime, ct);
     }
 
     /// <summary>REMOVE an export-relative file.</summary>
@@ -1074,8 +1160,11 @@ public sealed class NfsV3Client : IAsyncDisposable
         InvalidateDirCache(parentHandle);
     }
 
-    private async Task<int> WriteChunkAsync(byte[] fileFh, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct)
+    private async Task<NfsWriteResult> WriteChunkAsync(byte[] fileFh, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
+        if (data.Length > _options.MaxWriteSize)
+            throw new NfsException($"WRITE request length {data.Length} exceeds MaxWriteSize {_options.MaxWriteSize}.");
+
         var writer = new XdrWriter();
         writer.Opaque(fileFh);
         writer.ULong(offset);
@@ -1088,12 +1177,13 @@ public sealed class NfsV3Client : IAsyncDisposable
         EnsureOk(status, "WRITE failed");
         ReadWccData(reader);
         var count = reader.UInt();
-        reader.UInt(); // committed stable_how
-        reader.FixedBytes(8); // write verifier
+        var committed = (NfsWriteStableHow)reader.UInt();
+        var writeVerifier = reader.FixedBytes(8);
         if (count > data.Length)
             throw new NfsException($"WRITE returned invalid count {count} for {data.Length} byte request.");
 
-        return (int)count;
+        InvalidateDirCacheForMutation(fileFh);
+        return new NfsWriteResult((int)count, committed, writeVerifier);
     }
 
     private async Task<(byte[] ParentHandle, string Name)> ResolveParentAsync(string path, CancellationToken ct)
@@ -1116,6 +1206,12 @@ public sealed class NfsV3Client : IAsyncDisposable
     }
 
     private Conn RequireNfs() => _nfs ?? throw new NfsException("NFS connection is not established.");
+
+    internal async ValueTask DisposeActiveNfsConnectionForTestingAsync()
+    {
+        var conn = _nfs ?? throw new NfsException("NFS connection is not established.");
+        await conn.DisposeAsync();
+    }
 
     private async Task<int> GetPortAsync(Conn conn, uint prog, uint vers, CancellationToken ct)
     {
@@ -1154,6 +1250,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             await _rpcLock.WaitAsync(ct);
+            var lockHeld = true;
             try
             {
                 using var timeoutCts = CreateCallTimeout(ct, out var token);
@@ -1222,24 +1319,34 @@ public sealed class NfsV3Client : IAsyncDisposable
 
                 return reader;
             }
-            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts && CanRetryTransient(prog, vers, proc))
             {
                 _logger?.LogWarning(ex, "RPC call failed transiently (attempt {Attempt}/{MaxAttempts}, prog={Prog}, proc={Proc})", attempt, maxAttempts, prog, proc);
-                _rpcLock.Release();
-                await ReconnectAsync(ct);
+                var reconnected = await ReconnectAsync(ct);
+                if (reconnected is not null)
+                    conn = reconnected;
                 if (_options.RetryDelay > TimeSpan.Zero)
                     await Task.Delay(_options.RetryDelay, ct);
                 continue;
             }
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+            {
+                _logger?.LogWarning(ex, "RPC call failed transiently without automatic retry because the procedure is not retry-safe (prog={Prog}, proc={Proc})", prog, proc);
+                throw;
+            }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
             {
                 _logger?.LogError(ex, "RPC call timed out after {Timeout} (prog={Prog}, proc={Proc})", _options.CommandTimeout, prog, proc);
+                await RefreshTimedOutNfsConnectionAsync(conn, ct);
                 throw new NfsException($"RPC call timed out after {_options.CommandTimeout}.", ex);
             }
             finally
             {
-                if (_rpcLock.CurrentCount == 0)
+                if (lockHeld)
+                {
                     _rpcLock.Release();
+                    lockHeld = false;
+                }
             }
         }
 
@@ -1350,10 +1457,20 @@ public sealed class NfsV3Client : IAsyncDisposable
     private static bool IsTransient(Exception ex) =>
         ex is SocketException or IOException or ObjectDisposedException;
 
-    private async Task ReconnectAsync(CancellationToken ct)
+    internal static bool CanRetryTransient(uint prog, uint vers, uint proc) =>
+        (prog, vers, proc) switch
+        {
+            (ProgPortmap, VerPortmap, PmapGetPort) => true,
+            (ProgMount, VerMount, MountMnt or MountExport) => true,
+            (ProgNfs, VerNfs, NfsGetAttr or NfsLookup or NfsAccess or NfsReadlink or NfsRead or
+                NfsReadDir or NfsReadDirPlus or NfsFsstat or NfsFsinfo or NfsPathconf or NfsCommit) => true,
+            _ => false
+        };
+
+    private async Task<Conn?> ReconnectAsync(CancellationToken ct)
     {
         if (_nfsPort <= 0 || _unmounted)
-            return;
+            return null;
 
         _logger?.LogInformation("Reconnecting to NFS server (port={Port})", _nfsPort);
         if (_nfs is not null)
@@ -1362,8 +1479,30 @@ public sealed class NfsV3Client : IAsyncDisposable
             _nfs = null;
         }
 
-        _nfs = await OpenAsync(_nfsPort, ct);
+        using var timeoutCts = CreateCallTimeout(ct, out var token);
+        _nfs = await OpenAsync(_nfsPort, token);
         _logger?.LogInformation("Reconnected to NFS server");
+        return _nfs;
+    }
+
+    private async Task RefreshTimedOutNfsConnectionAsync(Conn conn, CancellationToken ct)
+    {
+        if (!ReferenceEquals(conn, _nfs) || _nfsPort <= 0 || _unmounted)
+            return;
+
+        try
+        {
+            _logger?.LogWarning("Refreshing NFS connection after RPC command timeout");
+            await ReconnectAsync(ct);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger?.LogWarning("Timed out while refreshing NFS connection after RPC command timeout");
+        }
+        catch (Exception reconnectEx)
+        {
+            _logger?.LogWarning(reconnectEx, "Failed to refresh NFS connection after RPC command timeout");
+        }
     }
 
     private CancellationTokenSource? CreateCallTimeout(CancellationToken outer, out CancellationToken token)
@@ -1437,11 +1576,11 @@ public sealed class NfsV3Client : IAsyncDisposable
         reader.UInt();
         var fsid = reader.ULong();
         var fileId = reader.ULong();
-        var atime = ReadNfsTime(reader);
-        var mtime = ReadNfsTime(reader);
-        var ctime = ReadNfsTime(reader);
+        var atime = ReadNfsTimestamp(reader);
+        var mtime = ReadNfsTimestamp(reader);
+        var ctime = ReadNfsTimestamp(reader);
 
-        return new NfsFattr(type, checked((long)size), mtime)
+        return new NfsFattr(type, checked((long)size), mtime?.ToDateTimeUtc())
         {
             Mode = mode,
             LinkCount = nlink,
@@ -1450,8 +1589,9 @@ public sealed class NfsV3Client : IAsyncDisposable
             Used = used,
             FileSystemId = fsid,
             FileId = fileId,
-            Atime = atime,
-            Ctime = ctime
+            Atime = atime?.ToDateTimeUtc(),
+            Ctime = ctime?.ToDateTimeUtc(),
+            CtimeTimestamp = ctime
         };
     }
 
@@ -1460,23 +1600,21 @@ public sealed class NfsV3Client : IAsyncDisposable
         if (reader.Bool())
         {
             reader.ULong(); // size
-            ReadNfsTime(reader);
-            ReadNfsTime(reader);
+            ReadNfsTimestamp(reader);
+            ReadNfsTimestamp(reader);
         }
 
         ReadPostOpAttr(reader);
     }
 
-    private static DateTime? ReadNfsTime(XdrReader reader)
+    private static NfsTimestamp? ReadNfsTimestamp(XdrReader reader)
     {
         var seconds = reader.UInt();
         var nanos = reader.UInt();
         if (seconds == 0 && nanos == 0)
             return null;
 
-        return DateTimeOffset.FromUnixTimeSeconds(seconds)
-            .AddTicks(nanos / 100)
-            .UtcDateTime;
+        return new NfsTimestamp(seconds, nanos);
     }
 
     private static void WriteSattr3(XdrWriter writer, NfsSetAttributes attributes)
@@ -1487,6 +1625,13 @@ public sealed class NfsV3Client : IAsyncDisposable
         WriteOptionalULong(writer, attributes.Size);
         WriteOptionalTime(writer, attributes.Atime);
         WriteOptionalTime(writer, attributes.Mtime);
+    }
+
+    private static void WriteSattrGuard3(XdrWriter writer, NfsTimestamp? guardCtime)
+    {
+        writer.Bool(guardCtime.HasValue);
+        if (guardCtime.HasValue)
+            WriteNfsTimestamp(writer, guardCtime.Value);
     }
 
     private static void WriteOptionalUInt(XdrWriter writer, uint? value)
@@ -1514,10 +1659,14 @@ public sealed class NfsV3Client : IAsyncDisposable
         var utc = value.Value.Kind == DateTimeKind.Unspecified
             ? DateTime.SpecifyKind(value.Value, DateTimeKind.Utc)
             : value.Value.ToUniversalTime();
-        var dto = new DateTimeOffset(utc);
         writer.UInt(2); // SET_TO_CLIENT_TIME
-        writer.UInt((uint)dto.ToUnixTimeSeconds());
-        writer.UInt((uint)((dto.Ticks % TimeSpan.TicksPerSecond) * 100));
+        WriteNfsTimestamp(writer, NfsTimestamp.FromDateTime(utc));
+    }
+
+    private static void WriteNfsTimestamp(XdrWriter writer, NfsTimestamp value)
+    {
+        writer.UInt(value.Seconds);
+        writer.UInt(value.Nanoseconds);
     }
 
     private async Task<Conn> OpenAsync(int port, CancellationToken ct)
@@ -1673,11 +1822,63 @@ public sealed class NfsV3Client : IAsyncDisposable
             throw new NfsException($"NFS path component is too long: {name}");
     }
 
+    private static void ValidateAccessMode(NfsAccessMode desired)
+    {
+        var invalid = desired & ~ValidAccessMask;
+        if (invalid != NfsAccessMode.None)
+            throw new NfsException($"Invalid ACCESS mask: 0x{(uint)desired:X}.");
+    }
+
+    private static void ValidateBufferRange(int bufferLength, int bufferOffset, int count)
+    {
+        if (bufferOffset < 0)
+            throw new NfsException("Buffer offset cannot be negative.");
+        if (count < 0)
+            throw new NfsException("Count cannot be negative.");
+        if (bufferOffset > bufferLength || count > bufferLength - bufferOffset)
+            throw new NfsException("Buffer offset and count exceed the buffer length.");
+    }
+
+    private static void ValidateReadableStream(Stream input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (!input.CanRead)
+            throw new NfsException("Input stream must be readable.");
+    }
+
+    private static void ValidateWritableStream(Stream output)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        if (!output.CanWrite)
+            throw new NfsException("Output stream must be writable.");
+    }
+
     private void InvalidateDirCache(byte[] dirHandle)
     {
         if (_options.EnableDirectoryCache)
             _dirCache.TryRemove(dirHandle, out _);
     }
+
+    private void InvalidateDirCacheForMutation(byte[] handle)
+    {
+        if (!_options.EnableDirectoryCache || _dirCache.IsEmpty)
+            return;
+
+        _dirCache.TryRemove(handle, out _);
+        if (_dirCache.IsEmpty)
+            return;
+
+        foreach (var cached in _dirCache)
+        {
+            if (cached.Value.Entries.Any(entry => entry.Handle is not null && entry.Handle.AsSpan().SequenceEqual(handle)))
+                _dirCache.TryRemove(cached.Key, out _);
+        }
+    }
+
+    private static List<NfsEntryPlus> CloneDirEntries(IEnumerable<NfsEntryPlus> entries) =>
+        entries
+            .Select(entry => entry with { Handle = entry.Handle?.ToArray() })
+            .ToList();
 
     private sealed class Conn : IAsyncDisposable
     {

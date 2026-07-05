@@ -105,10 +105,10 @@ Console.WriteLine($"{attributes.Size} bytes");
 - Export discovery and mount/unmount.
 - Path lookup and attribute queries.
 - Directory listing through READDIR and READDIRPLUS.
-- Streaming and offset-based file reads and writes.
+- Streaming and offset-based file reads and writes, including result-returning write and commit APIs for stability and verifier inspection.
 - File and directory creation and deletion.
 - Rename, symbolic links, and hard links.
-- Permission, ownership, timestamp, and file-size updates.
+- Permission, ownership, timestamp, file-size, and guarded attribute updates.
 - ACCESS, READLINK, COMMIT, FSSTAT, FSINFO, and PATHCONF.
 - Configurable retries, timeouts, socket options, directory caching, logging, and AUTH_SYS identity.
 - RPCSEC_GSS extension points, including a managed negotiation abstraction.
