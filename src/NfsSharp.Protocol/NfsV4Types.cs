@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+
 namespace NfsSharp.Protocol;
 
 /// <summary>NFSv4 operation opcodes (RFC 7530).</summary>
@@ -170,7 +172,11 @@ public sealed class NfsV4Bitmap
 {
     private readonly uint[] _masks;
 
-    public NfsV4Bitmap(params uint[] masks) => _masks = masks;
+    public NfsV4Bitmap(params uint[] masks)
+    {
+        ArgumentNullException.ThrowIfNull(masks);
+        _masks = masks.ToArray();
+    }
 
     public bool HasAttr(uint attrNum)
     {
@@ -179,7 +185,7 @@ public sealed class NfsV4Bitmap
         return word < _masks.Length && (_masks[word] & (1u << (int)bit)) != 0;
     }
 
-    public uint[] Masks => _masks;
+    public uint[] Masks => _masks.ToArray();
 
     public void Encode(XdrWriter writer)
     {
@@ -197,7 +203,22 @@ public sealed class NfsV4Bitmap
         return new NfsV4Bitmap(masks);
     }
 
-    public static NfsV4Bitmap Of(params uint[] attrs) => new(attrs);
+    public static NfsV4Bitmap Of(params uint[] attrs)
+    {
+        ArgumentNullException.ThrowIfNull(attrs);
+        if (attrs.Length == 0)
+            return new NfsV4Bitmap();
+
+        var masks = new uint[checked((int)(attrs.Max() / 32) + 1)];
+        foreach (var attr in attrs)
+        {
+            var word = checked((int)(attr / 32));
+            var bit = attr % 32;
+            masks[word] |= 1u << (int)bit;
+        }
+
+        return new NfsV4Bitmap(masks);
+    }
 }
 
 /// <summary>NFSv4 common attribute numbers (RFC 7530 §5.6).</summary>
@@ -384,25 +405,30 @@ public sealed class NfsV4StateId
     public static readonly NfsV4StateId Anonymous = new(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     public static readonly NfsV4StateId Special = new(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0 });
 
-    public byte[] Data { get; }
+    private readonly byte[] _data;
+
+    public byte[] Data => _data.ToArray();
 
     public NfsV4StateId(byte[] data)
     {
-        Data = data ?? throw new ArgumentNullException(nameof(data));
+        ArgumentNullException.ThrowIfNull(data);
         if (data.Length != 16)
             throw new ArgumentException("StateId must be exactly 16 bytes.");
+        _data = data.ToArray();
     }
 
     public void Encode(XdrWriter writer)
     {
-        writer.UInt(BitConverter.ToUInt32(Data, 0));
-        writer.Opaque(Data);
+        writer.UInt(BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(0, 4)));
+        writer.FixedBytes(_data.AsSpan(4, 12));
     }
 
     public static NfsV4StateId Decode(XdrReader reader)
     {
-        reader.UInt(); // seqid
-        return new NfsV4StateId(reader.Opaque());
+        var data = new byte[16];
+        BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(0, 4), reader.UInt());
+        reader.FixedBytes(12).CopyTo(data.AsSpan(4, 12));
+        return new NfsV4StateId(data);
     }
 }
 

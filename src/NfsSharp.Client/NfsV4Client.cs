@@ -477,7 +477,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         MakeOp(NfsV4Op.Lookup, w => w.Str(name));
 
     private static NfsV4Operation MakeGetAttrOp(params uint[] attrs) =>
-        MakeOp(NfsV4Op.GetAttr, w => { w.UInt((uint)attrs.Length); foreach (var a in attrs) w.UInt(a); });
+        MakeOp(NfsV4Op.GetAttr, w => NfsV4Bitmap.Of(attrs).Encode(w));
 
     private NfsV4Operation MakeReadOp(ulong offset, uint count, NfsV4StateId stateId) =>
         MakeOp(NfsV4Op.Read, w => { stateId.Encode(w); w.ULong(offset); w.UInt(count); });
@@ -513,14 +513,13 @@ public sealed class NfsV4Client : IAsyncDisposable
             w.Str(name);
             if (attrs?.Mode.HasValue == true)
             {
-                w.UInt(1); // bitmap count
-                w.UInt(1u << (int)NfsV4Attr.Mode);
+                NfsV4Bitmap.Of(NfsV4Attr.Mode).Encode(w);
                 w.UInt(4); // attr data length
                 w.UInt(attrs.Mode.Value);
             }
             else
             {
-                w.UInt(0); // empty bitmap
+                NfsV4Bitmap.Of().Encode(w);
                 w.UInt(0); // empty attr data
             }
         });
@@ -538,8 +537,7 @@ public sealed class NfsV4Client : IAsyncDisposable
             w.ULong(0); // cookieverf (8 bytes zero)
             w.UInt(0);
             w.UInt(0xffffffff); // max count
-            w.UInt(1); // bitmap count
-            w.UInt((1u << (int)NfsV4Attr.Type) | (1u << (int)NfsV4Attr.Fileid));
+            NfsV4Bitmap.Of(NfsV4Attr.Type, NfsV4Attr.Fileid).Encode(w);
         });
 
     private NfsV4Operation MakeSetClientIdOp() =>

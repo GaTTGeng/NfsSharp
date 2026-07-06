@@ -251,6 +251,68 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV4Bitmap_Of_EncodesAttributeNumbersIntoMaskWords()
+    {
+        var bitmap = NfsV4Bitmap.Of(
+            NfsV4Attr.Type,
+            NfsV4Attr.Mode,
+            NfsV4Attr.OwnerGroup);
+
+        Assert.True(bitmap.HasAttr(NfsV4Attr.Type));
+        Assert.True(bitmap.HasAttr(NfsV4Attr.Mode));
+        Assert.True(bitmap.HasAttr(NfsV4Attr.OwnerGroup));
+        Assert.False(bitmap.HasAttr(NfsV4Attr.Size));
+        Assert.Equal([1u << 1, (1u << 1) | (1u << 5)], bitmap.Masks);
+
+        var masks = bitmap.Masks;
+        masks[0] = 0;
+        Assert.True(bitmap.HasAttr(NfsV4Attr.Type));
+
+        var writer = new XdrWriter();
+        bitmap.Encode(writer);
+        var reader = new XdrReader(writer.ToArray());
+
+        Assert.Equal(2u, reader.UInt());
+        Assert.Equal(1u << 1, reader.UInt());
+        Assert.Equal((1u << 1) | (1u << 5), reader.UInt());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4StateId_EncodesAndDecodesFixedStateIdFields()
+    {
+        var data = new byte[]
+        {
+            0x01, 0x02, 0x03, 0x04,
+            0x10, 0x11, 0x12, 0x13,
+            0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B
+        };
+        var expected = data.ToArray();
+        var stateId = new NfsV4StateId(data);
+        data[0] = 0xFF;
+
+        var writer = new XdrWriter();
+        stateId.Encode(writer);
+        var reader = new XdrReader(writer.ToArray());
+
+        Assert.Equal(0x01020304u, reader.UInt());
+        Assert.Equal(expected[4..], reader.FixedBytes(12));
+        Assert.Equal(0, reader.Remaining);
+
+        writer = new XdrWriter();
+        writer.UInt(0x01020304u);
+        writer.FixedBytes(expected[4..]);
+
+        var decoded = NfsV4StateId.Decode(new XdrReader(writer.ToArray()));
+        Assert.Equal(expected, decoded.Data);
+
+        var returned = decoded.Data;
+        returned[4] = 0xFF;
+        Assert.Equal(expected, decoded.Data);
+    }
+
+    [Fact]
     public void NfsWriteAndCommitResults_CarryVerifierData()
     {
         var verifier = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
