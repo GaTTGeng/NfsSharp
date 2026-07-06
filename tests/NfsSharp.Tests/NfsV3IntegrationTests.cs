@@ -291,6 +291,11 @@ public sealed class NfsV3IntegrationTests
             isNotFound: false,
             "GETATTR",
             () => client.GetAttributesAsync(created.Handle, timeout.Token));
+        await AssertNfsStatusAsync(
+            NfsV3Status.Stale,
+            isNotFound: false,
+            "ACCESS",
+            () => client.AccessAsync(created.Handle, NfsAccessMode.None, timeout.Token));
 
         var tooLongName = new string('x', 256);
         var tooLong = await Assert.ThrowsAsync<NfsException>(

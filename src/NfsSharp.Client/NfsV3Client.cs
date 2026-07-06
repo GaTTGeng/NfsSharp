@@ -106,13 +106,8 @@ public sealed class NfsV3Client : IAsyncDisposable
         var ip = await ResolveAddressAsync(server, ct);
         var client = new NfsV3Client(ip, options) { _exportPath = exportPath };
 
-        int mountPort;
-        int nfsPort;
-        await using (var pm = await client.OpenAsync(options.PortmapPort, ct))
-        {
-            mountPort = await client.GetPortAsync(pm, ProgMount, VerMount, ct);
-            nfsPort = await client.GetPortAsync(pm, ProgNfs, VerNfs, ct);
-        }
+        var mountPort = await client.GetPortAsync(ProgMount, VerMount, ct);
+        var nfsPort = await client.GetPortAsync(ProgNfs, VerNfs, ct);
 
         if (mountPort <= 0)
             throw new NfsException("mountd port was not found in portmap.");
@@ -120,10 +115,7 @@ public sealed class NfsV3Client : IAsyncDisposable
             nfsPort = DefaultNfsPort;
         client._mountPort = mountPort;
 
-        await using (var mount = await client.OpenAsync(mountPort, ct))
-        {
-            client._rootFh = await client.MountAsync(mount, exportPath, ct);
-        }
+        client._rootFh = await client.MountAsync(exportPath, ct);
 
         client._nfs = await client.OpenAsync(nfsPort, ct);
         client._nfsPort = nfsPort;
@@ -156,17 +148,19 @@ public sealed class NfsV3Client : IAsyncDisposable
         var ip = await ResolveAddressAsync(server, ct);
         await using var client = new NfsV3Client(ip, options);
 
-        int mountPort;
-        await using (var pm = await client.OpenAsync(options.PortmapPort, ct))
-        {
-            mountPort = await client.GetPortAsync(pm, ProgMount, VerMount, ct);
-        }
+        var mountPort = await client.GetPortAsync(ProgMount, VerMount, ct);
 
         if (mountPort <= 0)
             throw new NfsException("mountd port was not found in portmap.");
 
-        await using var mount = await client.OpenAsync(mountPort, ct);
-        var reader = await client.CallAsync(mount, ProgMount, VerMount, MountExport, Array.Empty<byte>(), ct);
+        client._mountPort = mountPort;
+        var reader = await client.CallWithOwnedConnectionAsync(
+            mountPort,
+            ProgMount,
+            VerMount,
+            MountExport,
+            Array.Empty<byte>(),
+            ct);
         var exports = new List<NfsExport>();
 
         while (reader.Bool())
@@ -416,8 +410,6 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         ValidateHandle(fileHandle);
         ValidateAccessMode(desired);
-        if (desired == NfsAccessMode.None)
-            return NfsAccessMode.None;
 
         var writer = new XdrWriter();
         writer.Opaque(fileHandle);
@@ -1213,7 +1205,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         await conn.DisposeAsync();
     }
 
-    private async Task<int> GetPortAsync(Conn conn, uint prog, uint vers, CancellationToken ct)
+    private async Task<int> GetPortAsync(uint prog, uint vers, CancellationToken ct)
     {
         var writer = new XdrWriter();
         writer.UInt(prog);
@@ -1221,16 +1213,28 @@ public sealed class NfsV3Client : IAsyncDisposable
         writer.UInt(IpprotoTcp);
         writer.UInt(0);
 
-        var reader = await CallAsync(conn, ProgPortmap, VerPortmap, PmapGetPort, writer.ToArray(), ct);
+        var reader = await CallWithOwnedConnectionAsync(
+            _options.PortmapPort,
+            ProgPortmap,
+            VerPortmap,
+            PmapGetPort,
+            writer.ToArray(),
+            ct);
         return (int)reader.UInt();
     }
 
-    private async Task<byte[]> MountAsync(Conn conn, string exportPath, CancellationToken ct)
+    private async Task<byte[]> MountAsync(string exportPath, CancellationToken ct)
     {
         var writer = new XdrWriter();
         writer.Str(exportPath);
 
-        var reader = await CallAsync(conn, ProgMount, VerMount, MountMnt, writer.ToArray(), ct);
+        var reader = await CallWithOwnedConnectionAsync(
+            _mountPort,
+            ProgMount,
+            VerMount,
+            MountMnt,
+            writer.ToArray(),
+            ct);
         var status = reader.UInt();
         if (status != 0)
             throw new NfsException($"MOUNT \"{exportPath}\" failed (mountstat3={status}).", status);
@@ -1249,77 +1253,15 @@ public sealed class NfsV3Client : IAsyncDisposable
         var maxAttempts = Math.Max(1, _options.MaxRetries + 1);
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            await _rpcLock.WaitAsync(ct);
-            var lockHeld = true;
             try
             {
-                using var timeoutCts = CreateCallTimeout(ct, out var token);
-                var xid = unchecked(++_xid);
-
-                var writer = new XdrWriter();
-                writer.UInt(xid);
-                writer.UInt(0); // CALL
-                writer.UInt(2); // RPC version
-                writer.UInt(prog);
-                writer.UInt(vers);
-                writer.UInt(proc);
-
-                if (_gssContext is not null && _gssContext.Mechanism.IsEstablished)
-                {
-                    // RPCSEC_GSS credential
-                    writer.UInt((uint)RpcSecGssFlavor.Gss);
-                    EncodeGssCredential(writer, proc, args);
-
-                    // RPCSEC_GSS verifier
-                    writer.UInt((uint)RpcSecGssFlavor.Gss);
-                    EncodeGssVerifier(writer, xid, args);
-                }
-                else
-                {
-                    // AUTH_SYS
-                    writer.UInt(1); // AUTH_SYS
-                    writer.Opaque(_credBody);
-                    writer.UInt(0); // AUTH_NONE verifier
-                    writer.UInt(0);
-                }
-
-                writer.Raw(args);
-
-                await SendRecordAsync(conn.Stream, writer.ToArray(), token);
-                var reply = await RecvRecordAsync(conn.Stream, token);
-
-                var reader = new XdrReader(reply);
-                var rxid = reader.UInt();
-                if (rxid != xid)
-                    throw new NfsException($"RPC xid mismatch. Expected {xid}, got {rxid}.");
-
-                var messageType = reader.UInt();
-                if (messageType != 1)
-                    throw new NfsException($"Unexpected RPC message type: {messageType}.");
-
-                var replyStat = reader.UInt();
-                if (replyStat != 0)
-                    throw new NfsException($"RPC message denied (reply_stat={replyStat}).");
-
-                var verifierFlavor = reader.UInt();
-                reader.SkipOpaque();
-                var acceptStat = reader.UInt();
-                if (acceptStat != 0)
-                {
-                    _logger?.LogWarning("RPC call rejected (prog={Prog}, proc={Proc}, accept_stat={AcceptStat})", prog, proc, acceptStat);
-                    throw new NfsException($"RPC call failed (accept_stat={acceptStat}).");
-                }
-
-                // Verify GSS response verifier if applicable
-                if (_gssContext is not null && verifierFlavor == (uint)RpcSecGssFlavor.Gss)
-                {
-                    var replyVerifier = reader.Opaque();
-                    // In a full implementation, we'd verify the MIC here
-                }
-
-                return reader;
+                return await CallOnceAsync(conn, prog, vers, proc, args, ct);
             }
-            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts && CanRetryTransient(prog, vers, proc))
+            catch (Exception ex) when (IsTransient(ex) &&
+                                       attempt < maxAttempts &&
+                                       CanRetryTransient(prog, vers, proc) &&
+                                       prog == ProgNfs &&
+                                       vers == VerNfs)
             {
                 _logger?.LogWarning(ex, "RPC call failed transiently (attempt {Attempt}/{MaxAttempts}, prog={Prog}, proc={Proc})", attempt, maxAttempts, prog, proc);
                 var reconnected = await ReconnectAsync(ct);
@@ -1340,17 +1282,135 @@ public sealed class NfsV3Client : IAsyncDisposable
                 await RefreshTimedOutNfsConnectionAsync(conn, ct);
                 throw new NfsException($"RPC call timed out after {_options.CommandTimeout}.", ex);
             }
+        }
+
+        throw new NfsException("RPC call failed after all retry attempts.");
+    }
+
+    private async Task<XdrReader> CallWithOwnedConnectionAsync(
+        int port,
+        uint prog,
+        uint vers,
+        uint proc,
+        byte[] args,
+        CancellationToken ct)
+    {
+        var maxAttempts = Math.Max(1, _options.MaxRetries + 1);
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            Conn? conn = null;
+            try
+            {
+                conn = await OpenAsync(port, ct);
+                return await CallOnceAsync(conn, prog, vers, proc, args, ct);
+            }
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts && CanRetryTransient(prog, vers, proc))
+            {
+                _logger?.LogWarning(ex, "RPC call failed transiently (attempt {Attempt}/{MaxAttempts}, prog={Prog}, proc={Proc})", attempt, maxAttempts, prog, proc);
+                if (_options.RetryDelay > TimeSpan.Zero)
+                    await Task.Delay(_options.RetryDelay, ct);
+            }
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+            {
+                _logger?.LogWarning(ex, "RPC call failed transiently without automatic retry because the procedure is not retry-safe (prog={Prog}, proc={Proc})", prog, proc);
+                throw;
+            }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
+            {
+                _logger?.LogError(ex, "RPC call timed out after {Timeout} (prog={Prog}, proc={Proc})", _options.CommandTimeout, prog, proc);
+                throw new NfsException($"RPC call timed out after {_options.CommandTimeout}.", ex);
+            }
             finally
             {
-                if (lockHeld)
-                {
-                    _rpcLock.Release();
-                    lockHeld = false;
-                }
+                if (conn is not null)
+                    await conn.DisposeAsync();
             }
         }
 
         throw new NfsException("RPC call failed after all retry attempts.");
+    }
+
+    private async Task<XdrReader> CallOnceAsync(
+        Conn conn,
+        uint prog,
+        uint vers,
+        uint proc,
+        byte[] args,
+        CancellationToken ct)
+    {
+        await _rpcLock.WaitAsync(ct);
+        try
+        {
+            using var timeoutCts = CreateCallTimeout(ct, out var token);
+            var xid = unchecked(++_xid);
+
+            var writer = new XdrWriter();
+            writer.UInt(xid);
+            writer.UInt(0); // CALL
+            writer.UInt(2); // RPC version
+            writer.UInt(prog);
+            writer.UInt(vers);
+            writer.UInt(proc);
+
+            if (_gssContext is not null && _gssContext.Mechanism.IsEstablished)
+            {
+                // RPCSEC_GSS credential
+                writer.UInt((uint)RpcSecGssFlavor.Gss);
+                EncodeGssCredential(writer, proc, args);
+
+                // RPCSEC_GSS verifier
+                writer.UInt((uint)RpcSecGssFlavor.Gss);
+                EncodeGssVerifier(writer, xid, args);
+            }
+            else
+            {
+                // AUTH_SYS
+                writer.UInt(1); // AUTH_SYS
+                writer.Opaque(_credBody);
+                writer.UInt(0); // AUTH_NONE verifier
+                writer.UInt(0);
+            }
+
+            writer.Raw(args);
+
+            await SendRecordAsync(conn.Stream, writer.ToArray(), token);
+            var reply = await RecvRecordAsync(conn.Stream, token);
+
+            var reader = new XdrReader(reply);
+            var rxid = reader.UInt();
+            if (rxid != xid)
+                throw new NfsException($"RPC xid mismatch. Expected {xid}, got {rxid}.");
+
+            var messageType = reader.UInt();
+            if (messageType != 1)
+                throw new NfsException($"Unexpected RPC message type: {messageType}.");
+
+            var replyStat = reader.UInt();
+            if (replyStat != 0)
+                throw new NfsException($"RPC message denied (reply_stat={replyStat}).");
+
+            var verifierFlavor = reader.UInt();
+            reader.SkipOpaque();
+            var acceptStat = reader.UInt();
+            if (acceptStat != 0)
+            {
+                _logger?.LogWarning("RPC call rejected (prog={Prog}, proc={Proc}, accept_stat={AcceptStat})", prog, proc, acceptStat);
+                throw new NfsException($"RPC call failed (accept_stat={acceptStat}).");
+            }
+
+            // Verify GSS response verifier if applicable
+            if (_gssContext is not null && verifierFlavor == (uint)RpcSecGssFlavor.Gss)
+            {
+                var replyVerifier = reader.Opaque();
+                // In a full implementation, we'd verify the MIC here
+            }
+
+            return reader;
+        }
+        finally
+        {
+            _rpcLock.Release();
+        }
     }
 
     private void EncodeGssCredential(XdrWriter writer, uint proc, byte[] args)
