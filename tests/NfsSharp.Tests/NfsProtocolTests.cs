@@ -313,6 +313,27 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV4StateId_StaticSpecialValues_UseProtocolDefinedWireValues()
+    {
+        var anonymousReader = EncodeStateId(NfsV4StateId.Anonymous);
+        Assert.Equal(0u, anonymousReader.UInt());
+        Assert.Equal(new byte[12], anonymousReader.FixedBytes(12));
+        Assert.Equal(0, anonymousReader.Remaining);
+
+        var specialReader = EncodeStateId(NfsV4StateId.Special);
+        Assert.Equal(uint.MaxValue, specialReader.UInt());
+        Assert.Equal(Enumerable.Repeat((byte)0xFF, 12).ToArray(), specialReader.FixedBytes(12));
+        Assert.Equal(0, specialReader.Remaining);
+
+        static XdrReader EncodeStateId(NfsV4StateId stateId)
+        {
+            var writer = new XdrWriter();
+            stateId.Encode(writer);
+            return new XdrReader(writer.ToArray());
+        }
+    }
+
+    [Fact]
     public void NfsWriteAndCommitResults_CarryVerifierData()
     {
         var verifier = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };

@@ -402,8 +402,8 @@ public enum NfsV4CreateMode : uint
 public sealed class NfsV4StateId
 {
     public static readonly NfsV4StateId Zero = new(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
-    public static readonly NfsV4StateId Anonymous = new(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
-    public static readonly NfsV4StateId Special = new(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0 });
+    public static readonly NfsV4StateId Anonymous = new(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    public static readonly NfsV4StateId Special = new(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
 
     private readonly byte[] _data;
 
