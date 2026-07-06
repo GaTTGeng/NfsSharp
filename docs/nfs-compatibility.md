@@ -67,6 +67,8 @@ An implemented method without real-server verification remains partial or experi
 
 `NfsV4Client` exposes direct COMPOUND-oriented APIs and selected convenience operations. These APIs are experimental because the current automated suite does not validate server interoperability, state recovery, lease behavior, replay handling, callbacks, or a broad security matrix.
 
+The protocol test suite covers selected local NFSv4 encoding primitives, including `bitmap4` mask-word construction and `stateid4` fixed-field encoding. This coverage prevents malformed request construction but is not a server compatibility guarantee.
+
 The high-level `NfsClient` facade intentionally remains NFSv3-only until NFSv4 lifecycle and recovery guarantees are strong enough to define a stable abstraction.
 
 ## Protocol References
@@ -90,6 +92,12 @@ Compatibility work should use the smallest useful test:
 5. A documented server matrix for behavior known to vary across implementations.
 
 Packet normalization may remove transport identifiers or other non-semantic values. It must not hide procedure arguments, status codes, attributes, verifier changes, or ordering that callers can observe.
+
+## Current Integration Evidence
+
+The repository NFSv3 integration job uses the Docker fixture documented in [tests/integration/README.md](../tests/integration/README.md): NFS-Ganesha with the in-memory FSAL on Ubuntu 24.04, portmapper v2, mount protocol v3, NFS protocol v3 over TCP, and AUTH_SYS credentials. CI uploads `.trx` results, `docker compose ps --all`, and server logs as the `nfs-v3-integration-results` artifact.
+
+Only behaviors covered by those real-server tests are described as verified in the NFSv3 matrix. Behaviors that depend on other server implementations, identity mapping, transport failures, unsupported-operation status production, or broader security policy remain partial, experimental, planned, or research items.
 
 ## Reporting a Gap
 

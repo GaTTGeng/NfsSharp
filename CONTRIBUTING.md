@@ -12,6 +12,8 @@ dotnet build NfsSharp.sln --configuration Release --no-restore
 dotnet test NfsSharp.sln --configuration Release --no-build --no-restore
 ```
 
+The default test command runs protocol and local behavior tests. Real-server NFSv3 coverage is separated into the `NFSv3 integration` CI job and can be run locally with the repository Docker fixture described in [tests/integration/README.md](tests/integration/README.md). Run it when changing NFSv3 wire behavior, mount/export handling, file or directory operations, status mapping, retries, caching, or compatibility documentation.
+
 ## GitHub Flow
 
 `master` is the only long-lived branch and must remain releasable.
@@ -32,6 +34,7 @@ Do not create a `develop` branch or keep long-lived release branches. Releases a
 - Keep changes focused and include tests for behavioral fixes.
 - Preserve nullable annotations and asynchronous cancellation support.
 - Update the README or changelog when public behavior changes.
+- Update the compatibility matrix only when the corresponding unit, integration, or interoperability evidence exists.
 - Do not commit `bin`, `obj`, IDE metadata, test results, or package artifacts.
 
 ## Naming Conventions

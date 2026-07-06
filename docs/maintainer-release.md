@@ -22,11 +22,19 @@ No `NUGET_API_KEY` repository secret is required.
 
 ## Release a version
 
+Before tagging, prepare and review a release PR that:
+
+- updates `src/Directory.Build.props` to the intended package version;
+- moves completed entries from `Unreleased` into a dated `CHANGELOG.md` section;
+- keeps README, compatibility, and release documentation aligned with the version and support scope;
+- passes `dotnet test NfsSharp.sln --configuration Release`;
+- passes `dotnet pack NfsSharp.sln --configuration Release --no-build --output artifacts/packages`.
+
 Use NuGet SemVer tags without a leading `v`:
 
 ```powershell
-git tag 1.0.1
-git push origin 1.0.1
+git tag 1.1.0
+git push origin 1.1.0
 ```
 
 The release workflow strips a leading `v` if one is used, but plain SemVer tags match the NuGet package version directly.
