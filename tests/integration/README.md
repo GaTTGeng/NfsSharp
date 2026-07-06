@@ -20,6 +20,17 @@ $env:NFSSHARP_NFS_EXPECTED_EXPORT_GROUP = "*"
 dotnet test NfsSharp.sln --configuration Release --filter "Category=Integration"
 ```
 
+If host port `111/tcp` is already in use, map the container portmapper to an alternate host port and pass the same port to the tests:
+
+```powershell
+$env:NFSSHARP_INTEGRATION_PORTMAP_PORT = "11111"
+docker compose -f compose.integration.yml up --build --detach --wait
+
+$env:NFSSHARP_RUN_NFSV3_INTEGRATION = "1"
+$env:NFSSHARP_NFS_PORTMAP_PORT = "11111"
+dotnet test NfsSharp.sln --configuration Release --filter "Category=Integration"
+```
+
 Inspect logs and stop the server:
 
 ```powershell
@@ -55,6 +66,7 @@ The repository-owned Ganesha MEM server supports the common file, directory, sym
 | `NFSSHARP_RUN_NFSV3_INTEGRATION` | unset | Set to `1` to enable real-server tests. |
 | `NFSSHARP_NFS_SERVER` | `127.0.0.1` | NFS server address. |
 | `NFSSHARP_NFS_EXPORT` | `/export` | NFSv3 export path. |
+| `NFSSHARP_NFS_PORTMAP_PORT` | `111` | Host TCP port used to reach portmapper/rpcbind. Set this when `NFSSHARP_INTEGRATION_PORTMAP_PORT` maps the repository container to a non-default host port. |
 | `NFSSHARP_NFS_EXPECTED_EXPORT_GROUP` | `*` only when server and export use implicit defaults; otherwise unset | Optional access group to assert in mountd export-list results. Leave unset for external servers where the advertised group is server-specific or empty. |
 | `NFSSHARP_NFS_UID` | `0` | AUTH_SYS user ID. |
 | `NFSSHARP_NFS_GID` | `0` | AUTH_SYS primary group ID. |

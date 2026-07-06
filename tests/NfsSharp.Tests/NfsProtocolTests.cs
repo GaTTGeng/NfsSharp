@@ -1,3 +1,4 @@
+using NfsSharp.Client;
 using NfsSharp.Protocol;
 using Xunit.Abstractions;
 
@@ -154,6 +155,52 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsClientOptions_RejectsInvalidRetryAndCacheOptions()
+    {
+        Assert.Throws<NfsException>(
+            () => new NfsClientOptions { CommandTimeout = TimeSpan.FromMilliseconds(-1) }.Validate());
+
+        Assert.Throws<NfsException>(
+            () => new NfsClientOptions { StableHow = (NfsWriteStableHow)99 }.Validate());
+
+        Assert.Throws<NfsException>(
+            () => new NfsClientOptions { MaxRetries = -1 }.Validate());
+
+        Assert.Throws<NfsException>(
+            () => new NfsClientOptions { RetryDelay = TimeSpan.FromMilliseconds(-1) }.Validate());
+
+        Assert.Throws<NfsException>(
+            () => new NfsClientOptions
+            {
+                EnableDirectoryCache = true,
+                DirectoryCacheTtl = TimeSpan.Zero
+            }.Validate());
+
+        Assert.Throws<NfsException>(
+            () => new NfsClientOptions { KeepAliveInterval = TimeSpan.FromMilliseconds(-1) }.Validate());
+    }
+
+    [Fact]
+    public void NfsV3Client_CanRetryTransient_AllowsOnlyRetrySafeProcedures()
+    {
+        Assert.True(NfsV3Client.CanRetryTransient(100000, 2, 3)); // PMAP GETPORT
+        Assert.True(NfsV3Client.CanRetryTransient(100005, 3, 1)); // MOUNT MNT
+        Assert.True(NfsV3Client.CanRetryTransient(100005, 3, 5)); // MOUNT EXPORT
+
+        uint[] retrySafeNfsProcedures = [1, 3, 4, 5, 6, 16, 17, 18, 19, 20, 21];
+        foreach (var proc in retrySafeNfsProcedures)
+            Assert.True(NfsV3Client.CanRetryTransient(100003, 3, proc));
+
+        uint[] mutationProcedures = [2, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        foreach (var proc in mutationProcedures)
+            Assert.False(NfsV3Client.CanRetryTransient(100003, 3, proc));
+
+        Assert.False(NfsV3Client.CanRetryTransient(100005, 3, 3)); // MOUNT UMNT
+        Assert.False(NfsV3Client.CanRetryTransient(100003, 4, 1));
+        Assert.False(NfsV3Client.CanRetryTransient(42, 1, 1));
+    }
+
+    [Fact]
     public void NfsException_IsNotFound()
     {
         var ex = new NfsException("not found", NfsV3Status.NoEnt);
@@ -177,11 +224,74 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsTimestamp_PreservesRawNanosecondsAndConvertsToUtcDateTime()
+    {
+        var timestamp = new NfsTimestamp(1_704_158_645, 123_456_789);
+
+        Assert.Equal(1_704_158_645u, timestamp.Seconds);
+        Assert.Equal(123_456_789u, timestamp.Nanoseconds);
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeSeconds(timestamp.Seconds)
+                .AddTicks(timestamp.Nanoseconds / 100)
+                .UtcDateTime,
+            timestamp.ToDateTimeUtc());
+
+        var roundtrip = NfsTimestamp.FromDateTime(timestamp.ToDateTimeUtc());
+        Assert.Equal(timestamp.Seconds, roundtrip.Seconds);
+        Assert.Equal(123_456_700u, roundtrip.Nanoseconds);
+    }
+
+    [Fact]
     public void NfsAccessMode_Flags()
     {
         var mode = NfsAccessMode.Read | NfsAccessMode.Modify;
         Assert.True(mode.HasFlag(NfsAccessMode.Read));
         Assert.True(mode.HasFlag(NfsAccessMode.Modify));
         Assert.False(mode.HasFlag(NfsAccessMode.Execute));
+    }
+
+    [Fact]
+    public void NfsWriteAndCommitResults_CarryVerifierData()
+    {
+        var verifier = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+
+        var write = new NfsWriteResult(4, NfsWriteStableHow.FileSync, verifier);
+        verifier[0] = 9;
+        Assert.Equal(4, write.Count);
+        Assert.Equal(NfsWriteStableHow.FileSync, write.Committed);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, write.WriteVerifier);
+        var returnedWriteVerifier = write.WriteVerifier;
+        returnedWriteVerifier[1] = 9;
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, write.WriteVerifier);
+
+        var commitVerifier = new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 };
+        var commit = new NfsCommitResult(commitVerifier);
+        commitVerifier[0] = 9;
+        Assert.Equal(new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 }, commit.WriteVerifier);
+        var returnedCommitVerifier = commit.WriteVerifier;
+        returnedCommitVerifier[1] = 9;
+        Assert.Equal(new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 }, commit.WriteVerifier);
+    }
+
+    [Fact]
+    public void NfsWriteAndCommitResults_RejectInvalidValues()
+    {
+        Assert.Throws<NfsException>(
+            () => new NfsWriteResult(-1, NfsWriteStableHow.FileSync, Array.Empty<byte>()));
+
+        Assert.Throws<NfsException>(
+            () => new NfsWriteResult(1, (NfsWriteStableHow)99, new byte[8]));
+
+        Assert.Throws<ArgumentNullException>(
+            () => new NfsWriteResult(1, NfsWriteStableHow.FileSync, null!));
+
+        Assert.Throws<NfsException>(
+            () => new NfsWriteResult(1, NfsWriteStableHow.FileSync, new byte[7]));
+
+        Assert.Throws<ArgumentNullException>(
+            () => new NfsCommitResult(null!));
+
+        Assert.Throws<NfsException>(
+            () => new NfsCommitResult(new byte[7]));
     }
 }

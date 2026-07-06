@@ -86,6 +86,69 @@ var attributes = await client.GetAttributesAsync("documents/report.pdf", Cancell
 Console.WriteLine($"{attributes.Size} bytes");
 ```
 
+## Inspect write and commit results
+
+Use result-returning APIs when your application needs NFSv3 persistence details such as the committed stability mode or write verifier:
+
+```csharp
+using NfsSharp.Client;
+using NfsSharp.Protocol;
+
+var options = new NfsClientOptions
+{
+    UserId = 1000,
+    GroupId = 1000,
+    UsePrivilegedSourcePort = false,
+    StableHow = NfsWriteStableHow.FileSync
+};
+
+await using var client = await NfsV3Client.ConnectAsync(
+    "nfs.example.internal",
+    "/srv/data",
+    options,
+    CancellationToken.None);
+
+var file = await client.CreateAndOpenFileAsync(
+    "uploads/report.bin",
+    null,
+    CancellationToken.None);
+
+var write = await client.WriteAtWithResultAsync(
+    file.Handle,
+    offset: 0,
+    "hello"u8.ToArray(),
+    CancellationToken.None);
+
+Console.WriteLine($"Wrote {write.Count} bytes with {write.Committed} stability.");
+
+var commit = await client.CommitWithResultAsync(
+    file.Handle,
+    offset: 0,
+    count: (uint)write.Count,
+    CancellationToken.None);
+
+Console.WriteLine(Convert.ToHexString(commit.WriteVerifier));
+```
+
+## Guard attribute updates
+
+For optimistic metadata updates, read the current `CtimeTimestamp` and pass it to `SetAttributesGuardedAsync`. The server rejects the update with `NOT_SYNC` if the file changed after the attributes were read. `CtimeTimestamp` preserves the raw NFS nanosecond precision required by the guard.
+
+```csharp
+using NfsSharp.Client;
+using NfsSharp.Protocol;
+
+var attributes = await client.GetAttributesAsync("uploads/report.bin", CancellationToken.None);
+if (attributes.CtimeTimestamp is not null)
+{
+    await client.SetAttributesGuardedAsync(
+        "uploads/report.bin",
+        new NfsSetAttributes { Mode = 0x180 },
+        attributes.CtimeTimestamp.Value,
+        CancellationToken.None);
+}
+```
+
 ## Verify compatibility
 
 NFS behavior depends on the server implementation, export policy, identity mapping, firewall, rpcbind, and mountd configuration. Review the [NFS compatibility matrix](nfs-compatibility.md) before relying on a behavior in production.

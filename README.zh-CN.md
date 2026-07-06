@@ -78,10 +78,10 @@ await client.UnMountDeviceAsync();
 - 导出目录发现、挂载和卸载。
 - 路径查询和属性查询。
 - READDIR 和 READDIRPLUS 目录读取。
-- 流式与偏移量文件读写。
+- 流式与偏移量文件读写，包括可返回写入稳定性和 verifier 的写入与提交 API。
 - 文件和目录创建、删除与重命名。
 - 符号链接和硬链接。
-- 权限、所有者、时间戳和文件大小更新。
+- 权限、所有者、时间戳、文件大小和 guarded 属性更新。
 - ACCESS、READLINK、COMMIT、FSSTAT、FSINFO 和 PATHCONF。
 - 重试、超时、Socket 参数、目录缓存、日志和 AUTH_SYS 身份配置。
 - RPCSEC_GSS 扩展点和托管协商抽象。
