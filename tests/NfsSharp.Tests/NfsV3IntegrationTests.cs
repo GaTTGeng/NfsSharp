@@ -226,6 +226,99 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_VerifiesCommonFailureStatusSemantics()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var existingFile = fixture.GetRunPath("existing-file.txt");
+        var existingDirectory = fixture.GetRunPath("existing-dir");
+        var nonEmptyDirectory = fixture.GetRunPath("non-empty-dir");
+        var staleFile = fixture.GetRunPath("stale-file.txt");
+
+        await WriteBytesAsync(client, existingFile, [0x01], timeout.Token);
+        await client.CreateDirectoryAsync(existingDirectory, timeout.Token);
+        await client.CreateDirectoryAsync(nonEmptyDirectory, timeout.Token);
+        await WriteBytesAsync(client, $"{nonEmptyDirectory}/child.txt", [0x02], timeout.Token);
+
+        await AssertNfsStatusAsync(
+            NfsV3Status.NoEnt,
+            isNotFound: true,
+            "LOOKUP",
+            () => client.LookupPathAsync(fixture.GetRunPath("missing.txt"), timeout.Token));
+
+        await AssertNfsStatusAsync(
+            NfsV3Status.Exist,
+            isNotFound: false,
+            "CREATE",
+            () => client.CreateFileAsync(existingFile, timeout.Token));
+
+        await AssertNfsStatusAsync(
+            NfsV3Status.Exist,
+            isNotFound: false,
+            "MKDIR",
+            () => client.CreateDirectoryAsync(existingDirectory, timeout.Token));
+
+        await AssertNfsStatusAsync(
+            NfsV3Status.NotDir,
+            isNotFound: false,
+            "LOOKUP",
+            () => client.LookupPathAsync($"{existingFile}/child", timeout.Token));
+
+        await AssertNfsStatusAsync(
+            NfsV3Status.IsDir,
+            isNotFound: false,
+            "REMOVE",
+            () => client.DeleteFileAsync(existingDirectory, timeout.Token));
+
+        await AssertNfsStatusAsync(
+            NfsV3Status.NotDir,
+            isNotFound: false,
+            "RMDIR",
+            () => client.DeleteDirectoryAsync(existingFile, recursive: false, timeout.Token));
+
+        await AssertNfsStatusAsync(
+            NfsV3Status.NotEmpty,
+            isNotFound: false,
+            "RMDIR",
+            () => client.DeleteDirectoryAsync(nonEmptyDirectory, recursive: false, timeout.Token));
+
+        var created = await client.CreateFileAsync(staleFile, timeout.Token);
+        await client.DeleteFileAsync(staleFile, timeout.Token);
+        await AssertNfsStatusAsync(
+            NfsV3Status.Stale,
+            isNotFound: false,
+            "GETATTR",
+            () => client.GetAttributesAsync(created.Handle, timeout.Token));
+        await AssertNfsStatusAsync(
+            NfsV3Status.Stale,
+            isNotFound: false,
+            "ACCESS",
+            () => client.AccessAsync(created.Handle, NfsAccessMode.None, timeout.Token));
+
+        var tooLongName = new string('x', 256);
+        var tooLong = await Assert.ThrowsAsync<NfsException>(
+            () => client.CreateFileAsync($"{fixture.RunDirectory}/{tooLongName}", timeout.Token));
+        Assert.Null(tooLong.Status);
+        Assert.False(tooLong.IsNotFound);
+        Assert.Contains("too long", tooLong.Message);
+
+        if (!fixture.Capabilities.AppliesRestrictedModeBits)
+            return;
+
+        await using var deniedClient = await ConnectV3ClientAsync(userId: 65534, groupId: 65534, timeout.Token);
+        var denied = await Assert.ThrowsAsync<NfsException>(
+            () => deniedClient.GetAttributesAsync(NfsV3IntegrationFixture.RestrictedFilePath, timeout.Token));
+
+        Assert.Contains(denied.Status, new uint?[] { NfsV3Status.Access, NfsV3Status.Perm });
+        Assert.False(denied.IsNotFound);
+        Assert.NotNull(denied.Status);
+        Assert.Contains(NfsV3Status.Describe(denied.Status.Value), denied.Message);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsV3Client_VerifiesSymbolicLinkLookupAndTraversalBoundaries()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1331,9 +1424,26 @@ public sealed class NfsV3IntegrationTests
         string path,
         CancellationToken ct)
     {
-        var missing = await Assert.ThrowsAsync<NfsException>(
+        await AssertNfsStatusAsync(
+            NfsV3Status.NoEnt,
+            isNotFound: true,
+            "LOOKUP",
             () => client.LookupPathAsync(path, ct));
-        Assert.Equal(NfsV3Status.NoEnt, missing.Status);
+    }
+
+    private static async Task<NfsException> AssertNfsStatusAsync(
+        uint expectedStatus,
+        bool isNotFound,
+        string messageFragment,
+        Func<Task> action)
+    {
+        var exception = await Assert.ThrowsAsync<NfsException>(action);
+        Assert.Equal(expectedStatus, exception.Status);
+        Assert.Equal(isNotFound, exception.IsNotFound);
+        Assert.Contains(messageFragment, exception.Message);
+        Assert.Contains(NfsV3Status.Describe(expectedStatus), exception.Message);
+        Assert.Null(exception.InnerException);
+        return exception;
     }
 
     private static async Task AssertReadAtAsync(

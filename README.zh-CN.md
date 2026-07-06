@@ -101,6 +101,7 @@ await client.UnMountDeviceAsync();
 - [API 概览](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/api-overview.md)
 - [路线图](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/roadmap.md)
 - [NFS 兼容性矩阵](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)
+- [NFSv3 集成测试](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/tests/integration/README.md)
 - [维护者发布指南](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/maintainer-release.md)
 
 ## 构建与测试
@@ -115,7 +116,7 @@ dotnet test NfsSharp.sln --configuration Release --no-build --no-restore
 
 - `.github/workflows/ci.yml` 在 push 和 pull request 时执行 restore、build、test、pack，并上传包产物。
 - `.github/workflows/release-nuget.yml` 使用 NuGet Trusted Publishing 发布包。
-- `v1.0.0` 这样的 Git tag 会生成版本为 `1.0.0` 的 NuGet 包。
+- `1.1.0` 或 `v1.1.0` 这样的 Git tag 会生成版本为 `1.1.0` 的 NuGet 包。
 
 ## 参与贡献
 

@@ -128,6 +128,7 @@ Console.WriteLine($"{attributes.Size} bytes");
 - [API overview](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/api-overview.md)
 - [Roadmap](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/roadmap.md)
 - [NFS compatibility matrix](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)
+- [NFSv3 integration tests](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/tests/integration/README.md)
 - [Maintainer release guide](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/maintainer-release.md)
 
 ## Build
@@ -150,7 +151,7 @@ NuGet metadata is defined in `src/Directory.Build.props`. Package artifacts incl
 
 - `.github/workflows/ci.yml` restores, builds, tests, packs, and uploads package artifacts for pushes and pull requests.
 - `.github/workflows/release-nuget.yml` builds versioned packages and publishes them to NuGet.org using Trusted Publishing.
-- A tag such as `v1.0.0` resolves to NuGet package version `1.0.0`.
+- A tag such as `1.1.0` or `v1.1.0` resolves to NuGet package version `1.1.0`.
 
 ## Contributing
 

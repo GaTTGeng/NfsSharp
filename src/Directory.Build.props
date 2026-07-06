@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
     <IsPackable>true</IsPackable>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>NfsSharp Contributors</Authors>
     <Company>NfsSharp</Company>
     <Description>Managed NFS client SDK for .NET with NFSv3 and experimental NFSv4 APIs</Description>

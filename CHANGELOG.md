@@ -6,12 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-06
+
 ### Added
 
-- Open-source repository documentation and contribution guidance.
-- CI workflow for build, test, and package validation.
-- NuGet Trusted Publishing workflow.
-- Multi-target NuGet packages for .NET 8, .NET 9, and .NET 10.
+- Repeatable NFSv3 integration harness backed by an NFS-Ganesha test server.
+- Deterministic NFSv3 fixture materialization for directory, file, link, permission, and boundary-file scenarios.
+- Real-server coverage for NFSv3 export discovery, mount/unmount lifecycle, metadata lookup, ACCESS, READLINK, READDIR, READDIRPLUS, file reads, file writes, COMMIT, create/remove, rename, links, attribute mutation, FSSTAT, FSINFO, PATHCONF, directory caching, reconnect, timeout, and facade workflows.
+- NFSv3 APIs for write and commit verifier inspection, file-system capability queries, guarded attribute updates, directory cache configuration, socket keepalive/no-delay options, and RPCSEC_GSS extension points.
+- Compatibility matrix, roadmap, integration test evidence guide, pull-request checklist, and maintainer release guide.
+
+### Changed
+
+- Hardened NFSv3 stream validation, remote-read validation before local file creation, direct read-size guarding, directory cache invalidation/expiry, timeout recovery, and transient retry policy.
+- Limited automatic retries to retry-safe discovery, mount negotiation, read-only NFS procedures, and `COMMIT` so mutating procedures are not replayed after transient transport failures.
+- Updated repository CI to build, test, pack, run NFSv3 integration coverage, and upload NuGet/test artifacts.
+- Updated NuGet packaging for .NET 8, .NET 9, and .NET 10 with SourceLink, symbols, package README, and Trusted Publishing release workflow.
+
+### Fixed
+
+- Corrected the default RPC machine-name fallback to `nfssharp`.
+- Corrected NFSv4 `bitmap4` construction from attribute numbers and `stateid4` encoding/decoding as fixed `seqid + other` fields.
+
+### Dependencies
+
+- Updated GitHub Actions, xUnit runner, coverlet collector, and Microsoft.NET.Test.Sdk dependencies used by the test and CI toolchain.
 
 ## [1.0.0] - 2026-06-18
 

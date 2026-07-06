@@ -2,6 +2,17 @@
 
 The integration suite uses a repository-owned NFS-Ganesha container with the in-memory FSAL. It exposes only NFSv3 over TCP and does not mount an NFS file system on the host.
 
+## CI evidence
+
+The `CI` workflow publishes NFSv3 evidence separately from the normal build, unit-test, and pack job:
+
+| CI job | Purpose | Artifacts |
+| --- | --- | --- |
+| `Build, test, and pack` | Restores, builds, runs non-Docker test coverage, packs NuGet artifacts, and uploads `.trx` test results. | `test-results`, `nuget-packages` |
+| `NFSv3 integration` | Starts the repository NFS-Ganesha server and runs tests marked `Category=Integration`. | `nfs-v3-integration-results` |
+
+The integration artifact includes test results plus `docker compose ps --all` output and NFS server logs captured even when tests fail. A pull request that changes verified NFSv3 behavior should have both CI jobs passing, or the PR should explain why integration coverage is not relevant.
+
 ## Run locally
 
 Start the server:
@@ -71,4 +82,17 @@ The repository-owned Ganesha MEM server supports the common file, directory, sym
 | `NFSSHARP_NFS_UID` | `0` | AUTH_SYS user ID. |
 | `NFSSHARP_NFS_GID` | `0` | AUTH_SYS primary group ID. |
 
-The image uses Ubuntu 24.04 pinned by OCI digest and installs the Ubuntu package versions of NFS-Ganesha, its in-memory FSAL, and rpcbind. The container health check verifies portmapper v2, mount protocol v3, and NFS protocol v3 before tests run.
+The image uses Ubuntu 24.04 pinned by OCI digest and installs the Ubuntu package versions of NFS-Ganesha, its in-memory FSAL, and rpcbind. The exported fixture is reached through portmapper v2, mount protocol v3, and NFS protocol v3 over TCP. Tests use AUTH_SYS credentials from `NFSSHARP_NFS_UID` and `NFSSHARP_NFS_GID`; the CI defaults are UID `0` and GID `0`. The container health check verifies portmapper v2, mount protocol v3, and NFS protocol v3 before tests run.
+
+## M1 completion evidence
+
+M1 is ready to evaluate when milestone issues and CI show evidence for:
+
+| Area | Evidence source |
+| --- | --- |
+| Export, mount, metadata, and lifecycle | M1 issues, `NfsV3Client_ListsAdvertisedExportAndAccessGroups`, mount/unmount integration tests, and `NFSv3 integration` CI. |
+| Directory enumeration | READDIR/READDIRPLUS integration tests for empty, small, nested, and paginated directories. |
+| File I/O and persistence | Read, write, stability mode, verifier, and COMMIT integration tests. |
+| Mutations and links | Create/remove, rename, symlink, hard-link, and attribute mutation integration tests. |
+| Failure semantics | Status-preserving integration tests for reproducible NFSv3 errors and documented gaps for statuses the repository server cannot produce reliably. |
+| Documentation sync | `docs/nfs-compatibility.md`, this integration guide, README links, and PR checklist entries updated with matching test evidence. |

@@ -51,6 +51,7 @@ An implemented method without real-server verification remains partial or experi
 | --- | --- | --- | --- | --- |
 | Export discovery | `NfsV3Client.ListExportsAsync`, `NfsClient.GetExportedDevicesAsync` | **Partial** | M1/M2 | Real-server coverage, group parsing, empty lists, denial, and portmapper variations. |
 | Mount and unmount | `NfsV3Client.ConnectAsync`, `NfsV3Client.UnmountAsync`, `NfsClient.MountDeviceAsync`, `NfsClient.UnMountDeviceAsync` | **Partial** | M1/M2/M3 | Covered by repository NFS-Ganesha integration tests for repeated mount/unmount, remount replacement, invalid mount failure state, idempotent facade cleanup, and direct-client unmount idempotence. Remaining work: cleanup after transport failures, reconnect behavior, and server restart cases. |
+| Failure semantics | `NfsException`, NFSv3 status-preserving APIs | **Partial** | M1/M2/M3 | Verified on the repository NFS-Ganesha server for deterministic `NOENT`, `ACCESS`/`PERM` when mode bits are enforced, `EXIST`, `NOTDIR`, `ISDIR`, `NOTEMPTY`, `STALE`, and `NOT_SYNC` status preservation, including `IsNotFound` behavior and status names in exception messages. Client-side `NAMETOOLONG` validation is deterministic before an RPC is sent. Remaining work: real-server `NAMETOOLONG`, unsupported-operation statuses, mount/RPC denial variants, transport failure taxonomy, and cross-server error mapping. |
 | Path lookup and attributes | `LookupPathAsync`, `GetAttributesAsync` | **Partial** | M1/M2 | Verified on the repository NFS-Ganesha server for root, nested, missing, file, directory, and symbolic-link paths, including handle/path attribute consistency, mode, size, file identifiers, timestamps, traversal rejection, deleted file-handle `STALE`, and `NOENT`/`NOTDIR` status preservation. Remaining work: broader stale-handle scenarios, timestamp precision behavior, and cross-server attribute fidelity. |
 | Access checks and links | `AccessAsync`, `ReadLinkAsync`, link creation APIs | **Partial** | M1/M2 | Verified on the repository NFS-Ganesha server for file and directory ACCESS masks, zero-mask handling, invalid mask rejection, symbolic-link target reads, hard-link identity, and restricted-directory denial when mode bits are enforced. Remaining work: server policy differences, link limits, symlink loops, and broader error mapping. |
 | Directory enumeration | `ReadDirAsync`, `ReadDirPlusAsync` | **Partial** | M1/M2/M3 | Verified on the repository NFS-Ganesha server for empty, small, nested, and multi-page directories, including `READDIRPLUS` attributes and handles. Remaining work: mutation during enumeration, larger cross-server directories, and fault recovery. |
@@ -66,6 +67,8 @@ An implemented method without real-server verification remains partial or experi
 ## NFSv4 Boundary
 
 `NfsV4Client` exposes direct COMPOUND-oriented APIs and selected convenience operations. These APIs are experimental because the current automated suite does not validate server interoperability, state recovery, lease behavior, replay handling, callbacks, or a broad security matrix.
+
+The protocol test suite covers selected local NFSv4 encoding primitives, including `bitmap4` mask-word construction and `stateid4` fixed-field encoding. This coverage prevents malformed request construction but is not a server compatibility guarantee.
 
 The high-level `NfsClient` facade intentionally remains NFSv3-only until NFSv4 lifecycle and recovery guarantees are strong enough to define a stable abstraction.
 
@@ -90,6 +93,12 @@ Compatibility work should use the smallest useful test:
 5. A documented server matrix for behavior known to vary across implementations.
 
 Packet normalization may remove transport identifiers or other non-semantic values. It must not hide procedure arguments, status codes, attributes, verifier changes, or ordering that callers can observe.
+
+## Current Integration Evidence
+
+The repository NFSv3 integration job uses the Docker fixture documented in [tests/integration/README.md](../tests/integration/README.md): NFS-Ganesha with the in-memory FSAL on Ubuntu 24.04, portmapper v2, mount protocol v3, NFS protocol v3 over TCP, and AUTH_SYS credentials. CI uploads `.trx` results, `docker compose ps --all`, and server logs as the `nfs-v3-integration-results` artifact.
+
+Only behaviors covered by those real-server tests are described as verified in the NFSv3 matrix. Behaviors that depend on other server implementations, identity mapping, transport failures, unsupported-operation status production, or broader security policy remain partial, experimental, planned, or research items.
 
 ## Reporting a Gap
 
