@@ -359,6 +359,50 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV4CompoundResponse_DecodesStatusFirstAndConsumesOperationPayloads()
+    {
+        var stateIdData = new byte[]
+        {
+            0x01, 0x02, 0x03, 0x04,
+            0x10, 0x11, 0x12, 0x13,
+            0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B
+        };
+        var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
+
+        var writer = new XdrWriter();
+        writer.UInt(NfsV4Status.Ok);
+        writer.Str("open-getfh");
+        writer.UInt(3);
+        writer.UInt((uint)NfsV4Op.PutRootFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.UInt((uint)NfsV4Op.Open);
+        writer.UInt(NfsV4Status.Ok);
+        new NfsV4StateId(stateIdData).Encode(writer);
+        writer.Bool(true); // cinfo.atomic
+        writer.ULong(10); // cinfo.before
+        writer.ULong(11); // cinfo.after
+        writer.UInt(0); // rflags
+        NfsV4Bitmap.Of(NfsV4Attr.Size).Encode(writer);
+        writer.UInt(0); // OPEN_DELEGATE_NONE
+        writer.UInt((uint)NfsV4Op.GetFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Opaque(fileHandle);
+
+        var response = NfsV4CompoundResponse.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(NfsV4Status.Ok, response.Status);
+        Assert.Equal("open-getfh", response.Tag);
+        Assert.Equal(3, response.Results.Count);
+        Assert.Equal(NfsV4Op.PutRootFh, response.Results[0].Op);
+        Assert.Equal(NfsV4Op.Open, response.Results[1].Op);
+        Assert.Equal(NfsV4Op.GetFh, response.Results[2].Op);
+        Assert.Equal(stateIdData, NfsV4StateId.Decode(response.Results[1].Data!).Data);
+        Assert.Equal(fileHandle, response.Results[2].Data!.Opaque());
+        Assert.Equal(0, response.Results[2].Data!.Remaining);
+    }
+
+    [Fact]
     public void NfsWriteAndCommitResults_CarryVerifierData()
     {
         var verifier = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
