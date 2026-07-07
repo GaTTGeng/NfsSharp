@@ -217,6 +217,31 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV4Status_UsesProtocolErrorCodesAndNames()
+    {
+        Assert.Equal(10008u, NfsV4Status.Delay);
+        Assert.Equal("DELAY", NfsV4Status.Describe(NfsV4Status.Delay));
+
+        Assert.Equal(10022u, NfsV4Status.StaleClientId);
+        Assert.Equal("STALE_CLIENTID", NfsV4Status.Describe(NfsV4Status.StaleClientId));
+
+        Assert.Equal(10023u, NfsV4Status.StaleStateId);
+        Assert.Equal("STALE_STATEID", NfsV4Status.Describe(NfsV4Status.StaleStateId));
+
+        Assert.Equal(10025u, NfsV4Status.BadStateId);
+        Assert.Equal("BADSTATEID", NfsV4Status.Describe(NfsV4Status.BadStateId));
+
+        Assert.Equal(10028u, NfsV4Status.LockRange);
+        Assert.Equal("LOCK_RANGE", NfsV4Status.Describe(NfsV4Status.LockRange));
+
+        Assert.Equal(10029u, NfsV4Status.SymLink);
+        Assert.Equal("SYMLINK", NfsV4Status.Describe(NfsV4Status.SymLink));
+
+        Assert.Equal(10044u, NfsV4Status.OpIllegal);
+        Assert.Equal("OP_ILLEGAL", NfsV4Status.Describe(NfsV4Status.OpIllegal));
+    }
+
+    [Fact]
     public void NfsSetAttributes_Defaults()
     {
         Assert.Equal(0x1A4u, NfsSetAttributes.FileDefault.Mode);
