@@ -484,6 +484,22 @@ public class NfsModelsTests
         Assert.Equal(0, reader.Remaining);
     }
 
+    [Fact]
+    public void NfsV4Client_SecInfo_ResolvesParentDirectoryBeforeName()
+    {
+        var method = typeof(NfsV4Client).GetMethod("MakeParentLookupOps", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        object?[] args = ["/exports/project/file.txt", null];
+        var ops = (List<NfsV4Operation>)method.Invoke(null, args)!;
+
+        Assert.Equal("file.txt", args[1]);
+        Assert.Equal([NfsV4Op.PutRootFh, NfsV4Op.Lookup, NfsV4Op.Lookup], ops.Select(op => op.Op));
+        Assert.Null(ops[0].Args);
+        Assert.Equal("exports", new XdrReader(ops[1].Args!).Str());
+        Assert.Equal("project", new XdrReader(ops[2].Args!).Str());
+    }
+
     private static NfsV4Client CreateNfsV4Client(uint minorVersion = 0)
     {
         var ctor = typeof(NfsV4Client).GetConstructor(

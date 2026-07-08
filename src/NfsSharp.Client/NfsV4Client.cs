@@ -296,11 +296,8 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>SECINFO — discover security flavors for a path.</summary>
     public async Task<List<uint>> SecInfoAsync(string path, CancellationToken ct)
     {
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(path))
-            ops.Add(MakeLookupOp(part));
-        ops.Add(MakeOp(NfsV4Op.SecInfo, w => { w.Str(path.Split('/').LastOrDefault() ?? ""); }));
+        var ops = MakeParentLookupOps(path, out var name);
+        ops.Add(MakeOp(NfsV4Op.SecInfo, w => { w.Str(name); }));
 
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "secinfo", Operations = ops }, ct);
         EnsureCompoundOk(resp, "SECINFO");
@@ -478,6 +475,19 @@ public sealed class NfsV4Client : IAsyncDisposable
 
     private static NfsV4Operation MakeLookupOp(string name) =>
         MakeOp(NfsV4Op.Lookup, w => w.Str(name));
+
+    private static List<NfsV4Operation> MakeParentLookupOps(string path, out string name)
+    {
+        var parts = SplitPath(path).ToArray();
+        if (parts.Length == 0)
+            throw new NfsException("Path must include an object name.");
+
+        name = parts[^1];
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
+        for (var i = 0; i < parts.Length - 1; i++)
+            ops.Add(MakeLookupOp(parts[i]));
+        return ops;
+    }
 
     private static NfsV4Operation MakeGetAttrOp(params uint[] attrs) =>
         MakeOp(NfsV4Op.GetAttr, w => NfsV4Bitmap.Of(attrs).Encode(w));
