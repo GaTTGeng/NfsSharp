@@ -407,14 +407,7 @@ public class NfsModelsTests
     [Fact]
     public void NfsV4Client_OpenNoCreate_EncodesClaimImmediatelyAfterOpenType()
     {
-        var ctor = typeof(NfsV4Client).GetConstructor(
-            BindingFlags.Instance | BindingFlags.NonPublic,
-            binder: null,
-            [typeof(IPAddress), typeof(NfsClientOptions), typeof(uint)],
-            modifiers: null);
-        Assert.NotNull(ctor);
-
-        var client = (NfsV4Client)ctor.Invoke([IPAddress.Loopback, NfsClientOptions.Default, 0u]);
+        var client = CreateNfsV4Client();
         var method = typeof(NfsV4Client).GetMethod("MakeOpenOp", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
 
@@ -433,6 +426,64 @@ public class NfsModelsTests
         Assert.Equal((uint)NfsV4OpenClaimType.Null, reader.UInt());
         Assert.Equal("file.txt", reader.Str());
         Assert.Equal(0, reader.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4Client_Copy_EncodesNfsV42CopyArgumentsInWireOrder()
+    {
+        var client = CreateNfsV4Client(minorVersion: 2);
+        var method = typeof(NfsV4Client).GetMethod("MakeCopyOp", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var op = (NfsV4Operation)method.Invoke(client, [3UL, 5UL, 7UL])!;
+
+        Assert.Equal(NfsV4Op.Copy, op.Op);
+        var reader = new XdrReader(op.Args!);
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(3UL, reader.ULong());
+        Assert.Equal(5UL, reader.ULong());
+        Assert.Equal(7UL, reader.ULong());
+        Assert.False(reader.Bool());
+        Assert.True(reader.Bool());
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4Client_Clone_UsesCloneOpcodeAndArgumentLayout()
+    {
+        var client = CreateNfsV4Client(minorVersion: 2);
+        var method = typeof(NfsV4Client).GetMethod("MakeCloneOp", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var op = (NfsV4Operation)method.Invoke(client, [11UL, 13UL, 17UL])!;
+
+        Assert.Equal(NfsV4Op.Clone, op.Op);
+        Assert.Equal(71u, (uint)op.Op);
+        var reader = new XdrReader(op.Args!);
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(11UL, reader.ULong());
+        Assert.Equal(13UL, reader.ULong());
+        Assert.Equal(17UL, reader.ULong());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    private static NfsV4Client CreateNfsV4Client(uint minorVersion = 0)
+    {
+        var ctor = typeof(NfsV4Client).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(IPAddress), typeof(NfsClientOptions), typeof(uint)],
+            modifiers: null);
+        Assert.NotNull(ctor);
+
+        return (NfsV4Client)ctor.Invoke([IPAddress.Loopback, NfsClientOptions.Default, minorVersion]);
     }
 
     [Fact]

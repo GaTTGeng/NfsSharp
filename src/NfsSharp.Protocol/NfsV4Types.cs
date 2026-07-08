@@ -75,6 +75,7 @@ public enum NfsV4Op : uint
     ReadPlus = 68,
     Seek = 69,
     WriteSame = 70,
+    Clone = 71,
     Illegal = 10044,
 }
 
@@ -431,6 +432,11 @@ public sealed class NfsV4CompoundResponse
             case NfsV4Op.Commit:
                 CaptureFixedBytes(writer, reader, 8);
                 break;
+            case NfsV4Op.Clone:
+                break;
+            case NfsV4Op.Copy:
+                CaptureCopyResult(writer, reader);
+                break;
             case NfsV4Op.Create:
                 CaptureChangeInfo(writer, reader);
                 CaptureBitmap(writer, reader);
@@ -615,6 +621,19 @@ public sealed class NfsV4CompoundResponse
                 CaptureUInt(writer, reader);
             }
         }
+    }
+
+    private static void CaptureCopyResult(XdrWriter writer, XdrReader reader)
+    {
+        var callbackCount = CaptureUInt(writer, reader);
+        for (var i = 0; i < callbackCount; i++)
+            CaptureStateId(writer, reader);
+
+        CaptureULong(writer, reader);
+        CaptureUInt(writer, reader);
+        CaptureFixedBytes(writer, reader, 8);
+        CaptureBool(writer, reader);
+        CaptureBool(writer, reader);
     }
 }
 

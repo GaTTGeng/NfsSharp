@@ -426,11 +426,11 @@ public sealed class NfsV4Client : IAsyncDisposable
 
         var ops = new List<NfsV4Operation>();
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(dstPath))
+        foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeOp(NfsV4Op.SaveFh));
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(srcPath))
+        foreach (var part in SplitPath(dstPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeCopyOp(srcOffset, dstOffset, count));
 
@@ -438,6 +438,9 @@ public sealed class NfsV4Client : IAsyncDisposable
         EnsureCompoundOk(resp, "COPY");
 
         var result = resp.Results[^1].Data!;
+        var callbackCount = result.UInt();
+        for (var i = 0; i < callbackCount; i++)
+            NfsV4StateId.Decode(result);
         return result.ULong(); // count written
     }
 
@@ -449,13 +452,13 @@ public sealed class NfsV4Client : IAsyncDisposable
 
         var ops = new List<NfsV4Operation>();
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(dstPath))
+        foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeOp(NfsV4Op.SaveFh));
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(srcPath))
+        foreach (var part in SplitPath(dstPath))
             ops.Add(MakeLookupOp(part));
-        ops.Add(MakeOp(NfsV4Op.Copy, w => { /* src stateid + clone flag */ w.UInt(0); w.FixedBytes(new byte[12]); }));
+        ops.Add(MakeCloneOp(0, 0, 0));
 
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "clone", Operations = ops }, ct);
         EnsureCompoundOk(resp, "CLONE");
@@ -599,10 +602,23 @@ public sealed class NfsV4Client : IAsyncDisposable
         MakeOp(NfsV4Op.Copy, w =>
         {
             w.UInt(0); w.FixedBytes(new byte[12]); // src stateid
-            w.ULong(srcOffset);
-            w.ULong(count);
             w.UInt(0); w.FixedBytes(new byte[12]); // dst stateid
+            w.ULong(srcOffset);
             w.ULong(dstOffset);
+            w.ULong(count);
+            w.Bool(false); // consecutive not required
+            w.Bool(true); // request synchronous copy
+            w.UInt(0); // source_server count for intra-server copy
+        });
+
+    private NfsV4Operation MakeCloneOp(ulong srcOffset, ulong dstOffset, ulong count) =>
+        MakeOp(NfsV4Op.Clone, w =>
+        {
+            NfsV4StateId.Anonymous.Encode(w);
+            NfsV4StateId.Anonymous.Encode(w);
+            w.ULong(srcOffset);
+            w.ULong(dstOffset);
+            w.ULong(count);
         });
 
     // --- Encoding / Decoding ---
