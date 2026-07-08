@@ -51,6 +51,16 @@ public class XdrTests
     }
 
     [Fact]
+    public void XdrReader_Bool_RejectsInvalidWireValues()
+    {
+        var writer = new XdrWriter();
+        writer.UInt(2);
+
+        var ex = Assert.Throws<NfsException>(() => new XdrReader(writer.ToArray()).Bool());
+        Assert.Contains("Malformed XDR boolean", ex.Message);
+    }
+
+    [Fact]
     public void XdrWriterReader_Opaque_Roundtrip()
     {
         var data = new byte[] { 1, 2, 3, 4, 5 };

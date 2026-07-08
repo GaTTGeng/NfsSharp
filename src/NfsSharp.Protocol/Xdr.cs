@@ -79,7 +79,16 @@ public sealed class XdrReader
         return value;
     }
 
-    public bool Bool() => UInt() != 0;
+    public bool Bool()
+    {
+        var value = UInt();
+        return value switch
+        {
+            0 => false,
+            1 => true,
+            _ => throw new NfsException($"Malformed XDR boolean value: {value}.")
+        };
+    }
 
     public byte[] Opaque()
     {
