@@ -303,19 +303,21 @@ public sealed class NfsV4Client : IAsyncDisposable
         EnsureCompoundOk(resp, "SECINFO");
 
         var secResult = resp.Results[^1];
+        return DecodeSecInfoFlavors(secResult.Data!);
+    }
+
+    private static List<uint> DecodeSecInfoFlavors(XdrReader reader)
+    {
         var flavors = new List<uint>();
-        var count = secResult.Data!.UInt();
+        var count = reader.UInt();
         for (var i = 0; i < count; i++)
         {
-            var flavor = secResult.Data.UInt();
+            var flavor = reader.UInt();
             if (flavor == 6)
             {
-                secResult.Data.UInt(); // gss oid count
-                var oidCount = secResult.Data.UInt();
-                for (var j = 0; j < oidCount; j++)
-                    secResult.Data.SkipOpaque();
-                secResult.Data.UInt(); // qop
-                secResult.Data.UInt(); // service
+                reader.SkipOpaque(); // sec_oid4
+                reader.UInt(); // qop
+                reader.UInt(); // service
             }
             flavors.Add(flavor);
         }

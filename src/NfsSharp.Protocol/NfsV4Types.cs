@@ -566,9 +566,19 @@ public sealed class NfsV4CompoundResponse
                 CaptureSpaceLimit(writer, reader);
                 CaptureNfsAce(writer, reader);
                 return;
+            case 3:
+                CaptureOpenNoneDelegation(writer, reader);
+                return;
             default:
                 throw new NfsException($"Unsupported NFSv4 open delegation type: {delegationType}.");
         }
+    }
+
+    private static void CaptureOpenNoneDelegation(XdrWriter writer, XdrReader reader)
+    {
+        var why = CaptureUInt(writer, reader);
+        if (why is 1 or 2)
+            CaptureBool(writer, reader);
     }
 
     private static void CaptureSpaceLimit(XdrWriter writer, XdrReader reader)
