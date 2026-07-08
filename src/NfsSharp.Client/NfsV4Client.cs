@@ -496,9 +496,7 @@ public sealed class NfsV4Client : IAsyncDisposable
             w.UInt((uint)deny);
             w.ULong(_clientId); // owner.clientid
             w.Str($"owner-{_clientId}-{_sequenceId++}"); // owner.owner
-            w.UInt(0); // open_type OPEN
-            w.UInt((uint)NfsV4CreateMode.Unchecked);
-            w.UInt(0); // attrs bitmap count
+            w.UInt(0); // OPEN4_NOCREATE
             w.UInt((uint)NfsV4OpenClaimType.Null);
             w.Str(name);
         });

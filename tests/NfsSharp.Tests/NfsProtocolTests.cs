@@ -1,3 +1,5 @@
+using System.Net;
+using System.Reflection;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
 using Xunit.Abstractions;
@@ -400,6 +402,37 @@ public class NfsModelsTests
         Assert.Equal(stateIdData, NfsV4StateId.Decode(response.Results[1].Data!).Data);
         Assert.Equal(fileHandle, response.Results[2].Data!.Opaque());
         Assert.Equal(0, response.Results[2].Data!.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4Client_OpenNoCreate_EncodesClaimImmediatelyAfterOpenType()
+    {
+        var ctor = typeof(NfsV4Client).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(IPAddress), typeof(NfsClientOptions), typeof(uint)],
+            modifiers: null);
+        Assert.NotNull(ctor);
+
+        var client = (NfsV4Client)ctor.Invoke([IPAddress.Loopback, NfsClientOptions.Default, 0u]);
+        var method = typeof(NfsV4Client).GetMethod("MakeOpenOp", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var op = (NfsV4Operation)method.Invoke(
+            client,
+            ["file.txt", NfsV4OpenShareAccess.Write, NfsV4OpenShareDeny.None])!;
+
+        Assert.Equal(NfsV4Op.Open, op.Op);
+        var reader = new XdrReader(op.Args!);
+        Assert.Equal(0u, reader.UInt()); // seqid
+        Assert.Equal((uint)NfsV4OpenShareAccess.Write, reader.UInt());
+        Assert.Equal((uint)NfsV4OpenShareDeny.None, reader.UInt());
+        Assert.Equal(0UL, reader.ULong()); // owner.clientid
+        Assert.Equal("owner-0-0", reader.Str());
+        Assert.Equal(0u, reader.UInt()); // OPEN4_NOCREATE
+        Assert.Equal((uint)NfsV4OpenClaimType.Null, reader.UInt());
+        Assert.Equal("file.txt", reader.Str());
+        Assert.Equal(0, reader.Remaining);
     }
 
     [Fact]
