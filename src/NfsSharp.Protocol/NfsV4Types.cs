@@ -75,6 +75,7 @@ public enum NfsV4Op : uint
     ReadPlus = 68,
     Seek = 69,
     WriteSame = 70,
+    Clone = 71,
     Illegal = 10044,
 }
 
@@ -86,34 +87,67 @@ public static class NfsV4Status
     public const uint NoEnt = 2;
     public const uint Io = 5;
     public const uint Nxio = 6;
+    public const uint BadType = 10007;
+    public const uint Delay = 10008;
+    public const uint Same = 10009;
+    public const uint Denied = 10010;
+    public const uint Expired = 10011;
+    public const uint Locked = 10012;
+    public const uint Grace = 10013;
     public const uint Access = 13;
     public const uint Exist = 17;
     public const uint Xdev = 18;
     public const uint NotDir = 20;
     public const uint IsDir = 21;
+    public const uint Inval = 22;
     public const uint Fbig = 27;
     public const uint NoSpc = 28;
     public const uint RoFs = 30;
     public const uint Mlink = 31;
+    public const uint NamTooLong = 63;
+    public const uint NotEmpty = 66;
+    public const uint Dquot = 69;
+    public const uint Stale = 70;
+    public const uint BadHandle = 10001;
+    public const uint BadCookie = 10003;
+    public const uint NotSupp = 10004;
+    public const uint TooSmall = 10005;
+    public const uint ServerFault = 10006;
     public const uint FhExpired = 10014;
     public const uint ShareDenied = 10015;
-    public const uint WrongType = 10016;
-    public const uint FhReval = 10017;
-    public const uint RestoreFh = 10018;
-    public const uint BadStateId = 10022;
+    public const uint WrongSec = 10016;
+    public const uint ClidInUse = 10017;
+    public const uint Resource = 10018;
+    public const uint Moved = 10019;
+    public const uint NoFileHandle = 10020;
+    public const uint MinorVersMismatch = 10021;
+    public const uint StaleClientId = 10022;
     public const uint StaleStateId = 10023;
+    public const uint OldStateId = 10024;
+    public const uint BadStateId = 10025;
     public const uint BadSeqId = 10026;
-    public const uint LockNotSupp = 10028;
-    public const uint LockRange = 10029;
-    public const uint Grace = 10013;
+    public const uint NotSame = 10027;
+    public const uint LockRange = 10028;
+    public const uint SymLink = 10029;
+    public const uint RestoreFh = 10030;
+    public const uint LeaseMoved = 10031;
     public const uint AttrNotSupp = 10032;
     public const uint NoGrace = 10033;
     public const uint ReclaimBad = 10034;
     public const uint ReclaimConflict = 10035;
     public const uint BadXdr = 10036;
+    public const uint LocksHeld = 10037;
     public const uint OpenMode = 10038;
-    public const uint ReplayMe = 10044;
-    public const uint Delay = 10068;
+    public const uint BadOwner = 10039;
+    public const uint BadChar = 10040;
+    public const uint BadName = 10041;
+    public const uint BadRange = 10042;
+    public const uint LockNotSupp = 10043;
+    public const uint OpIllegal = 10044;
+    public const uint Deadlock = 10045;
+    public const uint FileOpen = 10046;
+    public const uint AdminRevoked = 10047;
+    public const uint CbPathDown = 10048;
 
     public static string Describe(uint status) => status switch
     {
@@ -127,28 +161,62 @@ public static class NfsV4Status
         Xdev => "XDEV",
         NotDir => "NOTDIR",
         IsDir => "ISDIR",
+        Inval => "INVAL",
         Fbig => "FBIG",
         NoSpc => "NOSPC",
         RoFs => "ROFS",
         Mlink => "MLINK",
+        NamTooLong => "NAMETOOLONG",
+        NotEmpty => "NOTEMPTY",
+        Dquot => "DQUOT",
+        Stale => "STALE",
+        BadHandle => "BADHANDLE",
+        BadCookie => "BAD_COOKIE",
+        NotSupp => "NOTSUPP",
+        TooSmall => "TOOSMALL",
+        ServerFault => "SERVERFAULT",
+        BadType => "BADTYPE",
+        Delay => "DELAY",
+        Same => "SAME",
+        Denied => "DENIED",
+        Expired => "EXPIRED",
+        Locked => "LOCKED",
+        Grace => "GRACE",
         FhExpired => "FHEXPIRED",
         ShareDenied => "SHAREDENIED",
-        WrongType => "WRONGTYPE",
-        FhReval => "FHREVAL",
-        RestoreFh => "RESTOREFH",
+        WrongSec => "WRONGSEC",
+        ClidInUse => "CLID_INUSE",
+        Resource => "RESOURCE",
+        Moved => "MOVED",
+        NoFileHandle => "NOFILEHANDLE",
+        MinorVersMismatch => "MINOR_VERS_MISMATCH",
+        StaleClientId => "STALE_CLIENTID",
         BadStateId => "BADSTATEID",
-        StaleStateId => "EXPIRED",
+        StaleStateId => "STALE_STATEID",
+        OldStateId => "OLD_STATEID",
         BadSeqId => "BAD_SEQID",
-        LockNotSupp => "LOCK_NOTSUPP",
+        NotSame => "NOT_SAME",
         OpenMode => "OPENMODE",
-        ReplayMe => "REPLAY_ME",
         BadXdr => "BAD_XDR",
         LockRange => "LOCK_RANGE",
-        Grace => "GRACE",
+        SymLink => "SYMLINK",
+        RestoreFh => "RESTOREFH",
+        LeaseMoved => "LEASE_MOVED",
+        AttrNotSupp => "ATTRNOTSUPP",
         NoGrace => "NO_GRACE",
         ReclaimBad => "RECLAIM_BAD",
         ReclaimConflict => "RECLAIM_CONFLICT",
-        Delay => "DELAY",
+        LocksHeld => "LOCKS_HELD",
+        BadOwner => "BADOWNER",
+        BadChar => "BADCHAR",
+        BadName => "BADNAME",
+        BadRange => "BAD_RANGE",
+        LockNotSupp => "LOCK_NOTSUPP",
+        OpIllegal => "OP_ILLEGAL",
+        Deadlock => "DEADLOCK",
+        FileOpen => "FILE_OPEN",
+        AdminRevoked => "ADMIN_REVOKED",
+        CbPathDown => "CB_PATH_DOWN",
         _ => status.ToString()
     };
 }
@@ -315,6 +383,273 @@ public sealed class NfsV4CompoundResponse
     public string Tag { get; set; } = "";
     public uint Status { get; set; }
     public List<NfsV4OperationResult> Results { get; set; } = new();
+
+    public static NfsV4CompoundResponse Decode(XdrReader reader)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+
+        var response = new NfsV4CompoundResponse
+        {
+            Status = reader.UInt(),
+            Tag = reader.Str()
+        };
+
+        var count = checked((int)reader.UInt());
+        for (var i = 0; i < count; i++)
+        {
+            var op = (NfsV4Op)reader.UInt();
+            var status = reader.UInt();
+            response.Results.Add(new NfsV4OperationResult
+            {
+                Op = op,
+                Status = status,
+                Data = status == NfsV4Status.Ok
+                    ? CaptureOperationResult(op, reader, i == count - 1)
+                    : null
+            });
+        }
+
+        return response;
+    }
+
+    private static XdrReader CaptureOperationResult(NfsV4Op op, XdrReader reader, bool isLast)
+    {
+        var writer = new XdrWriter();
+        switch (op)
+        {
+            case NfsV4Op.Lookup:
+            case NfsV4Op.Putfh:
+            case NfsV4Op.PutRootFh:
+            case NfsV4Op.RestoreFh:
+            case NfsV4Op.SaveFh:
+            case NfsV4Op.SetClientIdConfirm:
+                break;
+            case NfsV4Op.Close:
+                CaptureStateId(writer, reader);
+                break;
+            case NfsV4Op.Commit:
+                CaptureFixedBytes(writer, reader, 8);
+                break;
+            case NfsV4Op.Clone:
+                break;
+            case NfsV4Op.Copy:
+                CaptureCopyResult(writer, reader);
+                break;
+            case NfsV4Op.Create:
+                CaptureChangeInfo(writer, reader);
+                CaptureBitmap(writer, reader);
+                break;
+            case NfsV4Op.GetAttr:
+                CaptureFattr(writer, reader);
+                break;
+            case NfsV4Op.GetFh:
+                CaptureOpaque(writer, reader);
+                break;
+            case NfsV4Op.Open:
+                CaptureOpenResult(writer, reader);
+                break;
+            case NfsV4Op.Read:
+                CaptureBool(writer, reader);
+                CaptureOpaque(writer, reader);
+                break;
+            case NfsV4Op.ReadDir:
+                CaptureReadDir(writer, reader);
+                break;
+            case NfsV4Op.Remove:
+                CaptureChangeInfo(writer, reader);
+                break;
+            case NfsV4Op.Rename:
+                CaptureChangeInfo(writer, reader);
+                CaptureChangeInfo(writer, reader);
+                break;
+            case NfsV4Op.SecInfo:
+                CaptureSecInfo(writer, reader);
+                break;
+            case NfsV4Op.SetClientId:
+                CaptureULong(writer, reader);
+                CaptureFixedBytes(writer, reader, 8);
+                break;
+            case NfsV4Op.Seek:
+                CaptureBool(writer, reader);
+                CaptureULong(writer, reader);
+                break;
+            case NfsV4Op.Write:
+                CaptureUInt(writer, reader);
+                CaptureUInt(writer, reader);
+                CaptureFixedBytes(writer, reader, 8);
+                break;
+            default:
+                if (!isLast)
+                    throw new NfsException($"Cannot decode non-final NFSv4 operation result payload for {op}.");
+                writer.Raw(reader.ReadRemainingBytes());
+                break;
+        }
+
+        return new XdrReader(writer.ToArray());
+    }
+
+    private static uint CaptureUInt(XdrWriter writer, XdrReader reader)
+    {
+        var value = reader.UInt();
+        writer.UInt(value);
+        return value;
+    }
+
+    private static ulong CaptureULong(XdrWriter writer, XdrReader reader)
+    {
+        var value = reader.ULong();
+        writer.ULong(value);
+        return value;
+    }
+
+    private static bool CaptureBool(XdrWriter writer, XdrReader reader)
+    {
+        var value = reader.Bool();
+        writer.Bool(value);
+        return value;
+    }
+
+    private static void CaptureFixedBytes(XdrWriter writer, XdrReader reader, int length) =>
+        writer.FixedBytes(reader.FixedBytes(length));
+
+    private static void CaptureOpaque(XdrWriter writer, XdrReader reader) =>
+        writer.Opaque(reader.Opaque());
+
+    private static void CaptureString(XdrWriter writer, XdrReader reader) =>
+        writer.Str(reader.Str());
+
+    private static void CaptureBitmap(XdrWriter writer, XdrReader reader)
+    {
+        var count = CaptureUInt(writer, reader);
+        for (var i = 0; i < count; i++)
+            CaptureUInt(writer, reader);
+    }
+
+    private static void CaptureFattr(XdrWriter writer, XdrReader reader)
+    {
+        CaptureBitmap(writer, reader);
+        CaptureOpaque(writer, reader);
+    }
+
+    private static void CaptureChangeInfo(XdrWriter writer, XdrReader reader)
+    {
+        CaptureBool(writer, reader);
+        CaptureULong(writer, reader);
+        CaptureULong(writer, reader);
+    }
+
+    private static void CaptureStateId(XdrWriter writer, XdrReader reader)
+    {
+        CaptureUInt(writer, reader);
+        CaptureFixedBytes(writer, reader, 12);
+    }
+
+    private static void CaptureOpenResult(XdrWriter writer, XdrReader reader)
+    {
+        CaptureStateId(writer, reader);
+        CaptureChangeInfo(writer, reader);
+        CaptureUInt(writer, reader); // rflags
+        CaptureBitmap(writer, reader);
+        CaptureOpenDelegation(writer, reader);
+    }
+
+    private static void CaptureOpenDelegation(XdrWriter writer, XdrReader reader)
+    {
+        var delegationType = CaptureUInt(writer, reader);
+        switch (delegationType)
+        {
+            case 0:
+                return;
+            case 1:
+                CaptureStateId(writer, reader);
+                CaptureBool(writer, reader);
+                CaptureNfsAce(writer, reader);
+                return;
+            case 2:
+                CaptureStateId(writer, reader);
+                CaptureBool(writer, reader);
+                CaptureSpaceLimit(writer, reader);
+                CaptureNfsAce(writer, reader);
+                return;
+            case 3:
+                CaptureOpenNoneDelegation(writer, reader);
+                return;
+            default:
+                throw new NfsException($"Unsupported NFSv4 open delegation type: {delegationType}.");
+        }
+    }
+
+    private static void CaptureOpenNoneDelegation(XdrWriter writer, XdrReader reader)
+    {
+        var why = CaptureUInt(writer, reader);
+        if (why is 1 or 2)
+            CaptureBool(writer, reader);
+    }
+
+    private static void CaptureSpaceLimit(XdrWriter writer, XdrReader reader)
+    {
+        var limitBy = CaptureUInt(writer, reader);
+        switch (limitBy)
+        {
+            case 1:
+                CaptureULong(writer, reader);
+                break;
+            case 2:
+                CaptureUInt(writer, reader);
+                CaptureUInt(writer, reader);
+                break;
+            default:
+                throw new NfsException($"Unsupported NFSv4 space limit type: {limitBy}.");
+        }
+    }
+
+    private static void CaptureNfsAce(XdrWriter writer, XdrReader reader)
+    {
+        CaptureUInt(writer, reader);
+        CaptureUInt(writer, reader);
+        CaptureUInt(writer, reader);
+        CaptureString(writer, reader);
+    }
+
+    private static void CaptureReadDir(XdrWriter writer, XdrReader reader)
+    {
+        CaptureFixedBytes(writer, reader, 8);
+        while (CaptureBool(writer, reader))
+        {
+            CaptureULong(writer, reader);
+            CaptureString(writer, reader);
+            CaptureFattr(writer, reader);
+        }
+        CaptureBool(writer, reader); // eof
+    }
+
+    private static void CaptureSecInfo(XdrWriter writer, XdrReader reader)
+    {
+        var count = CaptureUInt(writer, reader);
+        for (var i = 0; i < count; i++)
+        {
+            var flavor = CaptureUInt(writer, reader);
+            if (flavor == 6)
+            {
+                CaptureOpaque(writer, reader);
+                CaptureUInt(writer, reader);
+                CaptureUInt(writer, reader);
+            }
+        }
+    }
+
+    private static void CaptureCopyResult(XdrWriter writer, XdrReader reader)
+    {
+        var callbackCount = CaptureUInt(writer, reader);
+        for (var i = 0; i < callbackCount; i++)
+            CaptureStateId(writer, reader);
+
+        CaptureULong(writer, reader);
+        CaptureUInt(writer, reader);
+        CaptureFixedBytes(writer, reader, 8);
+        CaptureBool(writer, reader);
+        CaptureBool(writer, reader);
+    }
 }
 
 /// <summary>A single NFSv4 operation in a COMPOUND request.</summary>

@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-08
+
+### Fixed
+
+- Corrected NFSv4 `nfsstat4` constants and descriptions used in protocol exceptions.
+- Corrected NFSv4 COMPOUND response decoding to read `status`, `tag`, and operation results in wire order, preserve operation payloads, and decode `fattr4` attribute lists as XDR opaque data.
+- Corrected NFSv4 `OPEN4_NOCREATE` argument encoding by removing create-only fields from open-existing requests.
+- Corrected NFSv4.2 `COPY` and `CLONE` request construction, including source/destination filehandle order, COPY argument layout, CLONE opcode use, and COPY response payload capture.
+- Corrected NFSv4 `SECINFO` path handling so the operation resolves the parent directory and sends only the target name.
+- Corrected NFSv4 `SECINFO` RPCSEC_GSS response decoding to treat `sec_oid4` as a single XDR opaque value.
+- Corrected NFSv4.1+ `OPEN_DELEGATE_NONE_EXT` response capture so legal OPEN responses with extended no-delegation reasons are accepted.
+- Hardened XDR boolean decoding to reject malformed values other than `0` or `1`.
+
 ## [1.1.0] - 2026-07-06
 
 ### Added

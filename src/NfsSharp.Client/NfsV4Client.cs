@@ -296,29 +296,28 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>SECINFO — discover security flavors for a path.</summary>
     public async Task<List<uint>> SecInfoAsync(string path, CancellationToken ct)
     {
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(path))
-            ops.Add(MakeLookupOp(part));
-        ops.Add(MakeOp(NfsV4Op.SecInfo, w => { w.Str(path.Split('/').LastOrDefault() ?? ""); }));
+        var ops = MakeParentLookupOps(path, out var name);
+        ops.Add(MakeOp(NfsV4Op.SecInfo, w => { w.Str(name); }));
 
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "secinfo", Operations = ops }, ct);
         EnsureCompoundOk(resp, "SECINFO");
 
         var secResult = resp.Results[^1];
+        return DecodeSecInfoFlavors(secResult.Data!);
+    }
+
+    private static List<uint> DecodeSecInfoFlavors(XdrReader reader)
+    {
         var flavors = new List<uint>();
-        var count = secResult.Data!.UInt();
+        var count = reader.UInt();
         for (var i = 0; i < count; i++)
         {
-            var flavor = secResult.Data.UInt();
+            var flavor = reader.UInt();
             if (flavor == 6)
             {
-                secResult.Data.UInt(); // gss oid count
-                var oidCount = secResult.Data.UInt();
-                for (var j = 0; j < oidCount; j++)
-                    secResult.Data.SkipOpaque();
-                secResult.Data.UInt(); // qop
-                secResult.Data.UInt(); // service
+                reader.SkipOpaque(); // sec_oid4
+                reader.UInt(); // qop
+                reader.UInt(); // service
             }
             flavors.Add(flavor);
         }
@@ -426,11 +425,11 @@ public sealed class NfsV4Client : IAsyncDisposable
 
         var ops = new List<NfsV4Operation>();
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(dstPath))
+        foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeOp(NfsV4Op.SaveFh));
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(srcPath))
+        foreach (var part in SplitPath(dstPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeCopyOp(srcOffset, dstOffset, count));
 
@@ -438,6 +437,9 @@ public sealed class NfsV4Client : IAsyncDisposable
         EnsureCompoundOk(resp, "COPY");
 
         var result = resp.Results[^1].Data!;
+        var callbackCount = result.UInt();
+        for (var i = 0; i < callbackCount; i++)
+            NfsV4StateId.Decode(result);
         return result.ULong(); // count written
     }
 
@@ -449,13 +451,13 @@ public sealed class NfsV4Client : IAsyncDisposable
 
         var ops = new List<NfsV4Operation>();
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(dstPath))
+        foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeOp(NfsV4Op.SaveFh));
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
-        foreach (var part in SplitPath(srcPath))
+        foreach (var part in SplitPath(dstPath))
             ops.Add(MakeLookupOp(part));
-        ops.Add(MakeOp(NfsV4Op.Copy, w => { /* src stateid + clone flag */ w.UInt(0); w.FixedBytes(new byte[12]); }));
+        ops.Add(MakeCloneOp(0, 0, 0));
 
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "clone", Operations = ops }, ct);
         EnsureCompoundOk(resp, "CLONE");
@@ -475,6 +477,19 @@ public sealed class NfsV4Client : IAsyncDisposable
 
     private static NfsV4Operation MakeLookupOp(string name) =>
         MakeOp(NfsV4Op.Lookup, w => w.Str(name));
+
+    private static List<NfsV4Operation> MakeParentLookupOps(string path, out string name)
+    {
+        var parts = SplitPath(path).ToArray();
+        if (parts.Length == 0)
+            throw new NfsException("Path must include an object name.");
+
+        name = parts[^1];
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
+        for (var i = 0; i < parts.Length - 1; i++)
+            ops.Add(MakeLookupOp(parts[i]));
+        return ops;
+    }
 
     private static NfsV4Operation MakeGetAttrOp(params uint[] attrs) =>
         MakeOp(NfsV4Op.GetAttr, w => NfsV4Bitmap.Of(attrs).Encode(w));
@@ -496,9 +511,7 @@ public sealed class NfsV4Client : IAsyncDisposable
             w.UInt((uint)deny);
             w.ULong(_clientId); // owner.clientid
             w.Str($"owner-{_clientId}-{_sequenceId++}"); // owner.owner
-            w.UInt(0); // open_type OPEN
-            w.UInt((uint)NfsV4CreateMode.Unchecked);
-            w.UInt(0); // attrs bitmap count
+            w.UInt(0); // OPEN4_NOCREATE
             w.UInt((uint)NfsV4OpenClaimType.Null);
             w.Str(name);
         });
@@ -601,10 +614,23 @@ public sealed class NfsV4Client : IAsyncDisposable
         MakeOp(NfsV4Op.Copy, w =>
         {
             w.UInt(0); w.FixedBytes(new byte[12]); // src stateid
-            w.ULong(srcOffset);
-            w.ULong(count);
             w.UInt(0); w.FixedBytes(new byte[12]); // dst stateid
+            w.ULong(srcOffset);
             w.ULong(dstOffset);
+            w.ULong(count);
+            w.Bool(false); // consecutive not required
+            w.Bool(true); // request synchronous copy
+            w.UInt(0); // source_server count for intra-server copy
+        });
+
+    private NfsV4Operation MakeCloneOp(ulong srcOffset, ulong dstOffset, ulong count) =>
+        MakeOp(NfsV4Op.Clone, w =>
+        {
+            NfsV4StateId.Anonymous.Encode(w);
+            NfsV4StateId.Anonymous.Encode(w);
+            w.ULong(srcOffset);
+            w.ULong(dstOffset);
+            w.ULong(count);
         });
 
     // --- Encoding / Decoding ---
@@ -624,74 +650,46 @@ public sealed class NfsV4Client : IAsyncDisposable
     }
 
     private NfsV4CompoundResponse DecodeCompoundResponse(XdrReader reader)
-    {
-        var response = new NfsV4CompoundResponse
-        {
-            Tag = reader.Str(),
-            Status = reader.UInt()
-        };
-
-        var count = reader.UInt();
-        for (var i = 0; i < count; i++)
-        {
-            var result = new NfsV4OperationResult
-            {
-                Op = (NfsV4Op)reader.UInt(),
-                Status = reader.UInt()
-            };
-
-            if (result.Status == NfsV4Status.Ok)
-                result.Data = reader;
-
-            response.Results.Add(result);
-        }
-
-        return response;
-    }
+        => NfsV4CompoundResponse.Decode(reader);
 
     private NfsV4Fattr DecodeFattr(XdrReader reader)
     {
-        var bitmapCount = (int)reader.UInt();
-        var masks = new uint[bitmapCount];
-        for (var i = 0; i < bitmapCount; i++)
-            masks[i] = reader.UInt();
-        var bitmap = new NfsV4Bitmap(masks);
-
-        var attrLen = (int)reader.UInt();
+        var bitmap = NfsV4Bitmap.Decode(reader);
+        var attrReader = new XdrReader(reader.Opaque());
         var attr = new NfsV4Fattr();
 
         if (bitmap.HasAttr(NfsV4Attr.Type))
-            attr = attr with { Type = (NfsV4FType)reader.UInt() };
+            attr = attr with { Type = (NfsV4FType)attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.Change))
-            attr = attr with { Change = reader.ULong() };
+            attr = attr with { Change = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.Size))
-            attr = attr with { Size = reader.ULong() };
+            attr = attr with { Size = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.Fileid))
-            attr = attr with { Fileid = reader.ULong() };
+            attr = attr with { Fileid = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.Mode))
-            attr = attr with { Mode = reader.UInt() };
+            attr = attr with { Mode = attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.Numinlinks))
-            attr = attr with { Numinlinks = reader.UInt() };
+            attr = attr with { Numinlinks = attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.Owner))
-            attr = attr with { Owner = reader.Str() };
+            attr = attr with { Owner = attrReader.Str() };
         if (bitmap.HasAttr(NfsV4Attr.OwnerGroup))
-            attr = attr with { OwnerGroup = reader.Str() };
+            attr = attr with { OwnerGroup = attrReader.Str() };
         if (bitmap.HasAttr(NfsV4Attr.SpaceAvail))
-            attr = attr with { SpaceAvail = reader.ULong() };
+            attr = attr with { SpaceAvail = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.SpaceFree))
-            attr = attr with { SpaceFree = reader.ULong() };
+            attr = attr with { SpaceFree = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.SpaceTotal))
-            attr = attr with { SpaceTotal = reader.ULong() };
+            attr = attr with { SpaceTotal = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.SpaceUsed))
-            attr = attr with { SpaceUsed = reader.ULong() };
+            attr = attr with { SpaceUsed = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.Maxfilesize))
-            attr = attr with { Maxfilesize = reader.ULong() };
+            attr = attr with { Maxfilesize = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.Maxread))
-            attr = attr with { Maxread = reader.UInt() };
+            attr = attr with { Maxread = attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.Maxwrite))
-            attr = attr with { Maxwrite = reader.UInt() };
+            attr = attr with { Maxwrite = attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.LeaseTime))
-            attr = attr with { LeaseTime = reader.UInt() };
+            attr = attr with { LeaseTime = attrReader.UInt() };
 
         return attr;
     }
@@ -705,13 +703,11 @@ public sealed class NfsV4Client : IAsyncDisposable
         {
             var cookie = reader.ULong();
             var name = reader.Str();
-            var attrsPresent = reader.Bool();
-            NfsV4Fattr? attr = null;
-            if (attrsPresent)
-                attr = DecodeFattr(reader);
+            var attr = DecodeFattr(reader);
 
             entries.Add(new NfsV4DirEntry { Cookie = cookie, Name = name, Attributes = attr });
         }
+        reader.Bool(); // eof
 
         return entries;
     }

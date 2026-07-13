@@ -1,3 +1,5 @@
+using System.Net;
+using System.Reflection;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
 using Xunit.Abstractions;
@@ -46,6 +48,16 @@ public class XdrTests
         var reader = new XdrReader(bytes);
         Assert.True(reader.Bool());
         Assert.False(reader.Bool());
+    }
+
+    [Fact]
+    public void XdrReader_Bool_RejectsInvalidWireValues()
+    {
+        var writer = new XdrWriter();
+        writer.UInt(2);
+
+        var ex = Assert.Throws<NfsException>(() => new XdrReader(writer.ToArray()).Bool());
+        Assert.Contains("Malformed XDR boolean", ex.Message);
     }
 
     [Fact]
@@ -217,6 +229,31 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV4Status_UsesProtocolErrorCodesAndNames()
+    {
+        Assert.Equal(10008u, NfsV4Status.Delay);
+        Assert.Equal("DELAY", NfsV4Status.Describe(NfsV4Status.Delay));
+
+        Assert.Equal(10022u, NfsV4Status.StaleClientId);
+        Assert.Equal("STALE_CLIENTID", NfsV4Status.Describe(NfsV4Status.StaleClientId));
+
+        Assert.Equal(10023u, NfsV4Status.StaleStateId);
+        Assert.Equal("STALE_STATEID", NfsV4Status.Describe(NfsV4Status.StaleStateId));
+
+        Assert.Equal(10025u, NfsV4Status.BadStateId);
+        Assert.Equal("BADSTATEID", NfsV4Status.Describe(NfsV4Status.BadStateId));
+
+        Assert.Equal(10028u, NfsV4Status.LockRange);
+        Assert.Equal("LOCK_RANGE", NfsV4Status.Describe(NfsV4Status.LockRange));
+
+        Assert.Equal(10029u, NfsV4Status.SymLink);
+        Assert.Equal("SYMLINK", NfsV4Status.Describe(NfsV4Status.SymLink));
+
+        Assert.Equal(10044u, NfsV4Status.OpIllegal);
+        Assert.Equal("OP_ILLEGAL", NfsV4Status.Describe(NfsV4Status.OpIllegal));
+    }
+
+    [Fact]
     public void NfsSetAttributes_Defaults()
     {
         Assert.Equal(0x1A4u, NfsSetAttributes.FileDefault.Mode);
@@ -331,6 +368,340 @@ public class NfsModelsTests
             stateId.Encode(writer);
             return new XdrReader(writer.ToArray());
         }
+    }
+
+    [Fact]
+    public void NfsV4CompoundResponse_DecodesStatusFirstAndConsumesOperationPayloads()
+    {
+        var stateIdData = new byte[]
+        {
+            0x01, 0x02, 0x03, 0x04,
+            0x10, 0x11, 0x12, 0x13,
+            0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B
+        };
+        var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
+
+        var writer = new XdrWriter();
+        writer.UInt(NfsV4Status.Ok);
+        writer.Str("open-getfh");
+        writer.UInt(3);
+        writer.UInt((uint)NfsV4Op.PutRootFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.UInt((uint)NfsV4Op.Open);
+        writer.UInt(NfsV4Status.Ok);
+        new NfsV4StateId(stateIdData).Encode(writer);
+        writer.Bool(true); // cinfo.atomic
+        writer.ULong(10); // cinfo.before
+        writer.ULong(11); // cinfo.after
+        writer.UInt(0); // rflags
+        NfsV4Bitmap.Of(NfsV4Attr.Size).Encode(writer);
+        writer.UInt(0); // OPEN_DELEGATE_NONE
+        writer.UInt((uint)NfsV4Op.GetFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Opaque(fileHandle);
+
+        var response = NfsV4CompoundResponse.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(NfsV4Status.Ok, response.Status);
+        Assert.Equal("open-getfh", response.Tag);
+        Assert.Equal(3, response.Results.Count);
+        Assert.Equal(NfsV4Op.PutRootFh, response.Results[0].Op);
+        Assert.Equal(NfsV4Op.Open, response.Results[1].Op);
+        Assert.Equal(NfsV4Op.GetFh, response.Results[2].Op);
+        Assert.Equal(stateIdData, NfsV4StateId.Decode(response.Results[1].Data!).Data);
+        Assert.Equal(fileHandle, response.Results[2].Data!.Opaque());
+        Assert.Equal(0, response.Results[2].Data!.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4CompoundResponse_CapturesRemoveAndRenameChangeInfoPayloads()
+    {
+        var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
+
+        var writer = new XdrWriter();
+        writer.UInt(NfsV4Status.Ok);
+        writer.Str("remove-rename-getfh");
+        writer.UInt(3);
+        writer.UInt((uint)NfsV4Op.Remove);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Bool(true); // remove cinfo.atomic
+        writer.ULong(10); // remove cinfo.before
+        writer.ULong(11); // remove cinfo.after
+        writer.UInt((uint)NfsV4Op.Rename);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Bool(false); // rename source cinfo.atomic
+        writer.ULong(20); // rename source cinfo.before
+        writer.ULong(21); // rename source cinfo.after
+        writer.Bool(true); // rename target cinfo.atomic
+        writer.ULong(30); // rename target cinfo.before
+        writer.ULong(31); // rename target cinfo.after
+        writer.UInt((uint)NfsV4Op.GetFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Opaque(fileHandle);
+
+        var response = NfsV4CompoundResponse.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(NfsV4Op.Remove, response.Results[0].Op);
+        Assert.Equal(NfsV4Op.Rename, response.Results[1].Op);
+        Assert.Equal(NfsV4Op.GetFh, response.Results[2].Op);
+
+        var removeReader = response.Results[0].Data!;
+        Assert.True(removeReader.Bool());
+        Assert.Equal(10UL, removeReader.ULong());
+        Assert.Equal(11UL, removeReader.ULong());
+        Assert.Equal(0, removeReader.Remaining);
+
+        var renameReader = response.Results[1].Data!;
+        Assert.False(renameReader.Bool());
+        Assert.Equal(20UL, renameReader.ULong());
+        Assert.Equal(21UL, renameReader.ULong());
+        Assert.True(renameReader.Bool());
+        Assert.Equal(30UL, renameReader.ULong());
+        Assert.Equal(31UL, renameReader.ULong());
+        Assert.Equal(0, renameReader.Remaining);
+
+        Assert.Equal(fileHandle, response.Results[2].Data!.Opaque());
+    }
+
+    [Fact]
+    public void NfsV4CompoundResponse_CapturesOpenNoneExtendedDelegation()
+    {
+        var stateIdData = new byte[]
+        {
+            0x01, 0x02, 0x03, 0x04,
+            0x10, 0x11, 0x12, 0x13,
+            0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B
+        };
+        var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
+
+        var writer = new XdrWriter();
+        writer.UInt(NfsV4Status.Ok);
+        writer.Str("open-none-ext-getfh");
+        writer.UInt(2);
+        writer.UInt((uint)NfsV4Op.Open);
+        writer.UInt(NfsV4Status.Ok);
+        new NfsV4StateId(stateIdData).Encode(writer);
+        writer.Bool(false); // cinfo.atomic
+        writer.ULong(20); // cinfo.before
+        writer.ULong(21); // cinfo.after
+        writer.UInt(0); // rflags
+        NfsV4Bitmap.Of().Encode(writer);
+        writer.UInt(3); // OPEN_DELEGATE_NONE_EXT
+        writer.UInt(1); // WND4_CONTENTION
+        writer.Bool(true); // ond_server_will_push_deleg
+        writer.UInt((uint)NfsV4Op.GetFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Opaque(fileHandle);
+
+        var response = NfsV4CompoundResponse.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(NfsV4Op.Open, response.Results[0].Op);
+        Assert.Equal(NfsV4Op.GetFh, response.Results[1].Op);
+
+        var openReader = response.Results[0].Data!;
+        Assert.Equal(stateIdData, NfsV4StateId.Decode(openReader).Data);
+        Assert.False(openReader.Bool());
+        Assert.Equal(20UL, openReader.ULong());
+        Assert.Equal(21UL, openReader.ULong());
+        Assert.Equal(0u, openReader.UInt());
+        Assert.Empty(NfsV4Bitmap.Decode(openReader).Masks);
+        Assert.Equal(3u, openReader.UInt());
+        Assert.Equal(1u, openReader.UInt());
+        Assert.True(openReader.Bool());
+        Assert.Equal(0, openReader.Remaining);
+
+        Assert.Equal(fileHandle, response.Results[1].Data!.Opaque());
+    }
+
+    [Fact]
+    public void NfsV4CompoundResponse_CapturesOpenWriteDelegationBlockLimit()
+    {
+        var stateIdData = new byte[]
+        {
+            0x01, 0x02, 0x03, 0x04,
+            0x10, 0x11, 0x12, 0x13,
+            0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B
+        };
+        var delegationStateIdData = new byte[]
+        {
+            0x05, 0x06, 0x07, 0x08,
+            0x20, 0x21, 0x22, 0x23,
+            0x24, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2A, 0x2B
+        };
+        var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
+
+        var writer = new XdrWriter();
+        writer.UInt(NfsV4Status.Ok);
+        writer.Str("open-write-delegation-getfh");
+        writer.UInt(2);
+        writer.UInt((uint)NfsV4Op.Open);
+        writer.UInt(NfsV4Status.Ok);
+        new NfsV4StateId(stateIdData).Encode(writer);
+        writer.Bool(true); // cinfo.atomic
+        writer.ULong(30); // cinfo.before
+        writer.ULong(31); // cinfo.after
+        writer.UInt(0); // rflags
+        NfsV4Bitmap.Of(NfsV4Attr.Size).Encode(writer);
+        writer.UInt(2); // OPEN_DELEGATE_WRITE
+        new NfsV4StateId(delegationStateIdData).Encode(writer);
+        writer.Bool(false); // recall
+        writer.UInt(2); // NFS_LIMIT_BLOCKS
+        writer.UInt(4096); // num_blocks
+        writer.UInt(512); // bytes_per_block
+        writer.UInt(0); // ace.type
+        writer.UInt(0); // ace.flag
+        writer.UInt(0x001F01FF); // ace.access_mask
+        writer.Str("OWNER@");
+        writer.UInt((uint)NfsV4Op.GetFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Opaque(fileHandle);
+
+        var response = NfsV4CompoundResponse.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(NfsV4Op.Open, response.Results[0].Op);
+        Assert.Equal(NfsV4Op.GetFh, response.Results[1].Op);
+
+        var openReader = response.Results[0].Data!;
+        Assert.Equal(stateIdData, NfsV4StateId.Decode(openReader).Data);
+        Assert.True(openReader.Bool());
+        Assert.Equal(30UL, openReader.ULong());
+        Assert.Equal(31UL, openReader.ULong());
+        Assert.Equal(0u, openReader.UInt());
+        Assert.Equal([1u << 4], NfsV4Bitmap.Decode(openReader).Masks);
+        Assert.Equal(2u, openReader.UInt());
+        Assert.Equal(delegationStateIdData, NfsV4StateId.Decode(openReader).Data);
+        Assert.False(openReader.Bool());
+        Assert.Equal(2u, openReader.UInt());
+        Assert.Equal(4096u, openReader.UInt());
+        Assert.Equal(512u, openReader.UInt());
+        Assert.Equal(0u, openReader.UInt());
+        Assert.Equal(0u, openReader.UInt());
+        Assert.Equal(0x001F01FFu, openReader.UInt());
+        Assert.Equal("OWNER@", openReader.Str());
+        Assert.Equal(0, openReader.Remaining);
+
+        Assert.Equal(fileHandle, response.Results[1].Data!.Opaque());
+    }
+
+    [Fact]
+    public void NfsV4Client_OpenNoCreate_EncodesClaimImmediatelyAfterOpenType()
+    {
+        var client = CreateNfsV4Client();
+        var method = typeof(NfsV4Client).GetMethod("MakeOpenOp", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var op = (NfsV4Operation)method.Invoke(
+            client,
+            ["file.txt", NfsV4OpenShareAccess.Write, NfsV4OpenShareDeny.None])!;
+
+        Assert.Equal(NfsV4Op.Open, op.Op);
+        var reader = new XdrReader(op.Args!);
+        Assert.Equal(0u, reader.UInt()); // seqid
+        Assert.Equal((uint)NfsV4OpenShareAccess.Write, reader.UInt());
+        Assert.Equal((uint)NfsV4OpenShareDeny.None, reader.UInt());
+        Assert.Equal(0UL, reader.ULong()); // owner.clientid
+        Assert.Equal("owner-0-0", reader.Str());
+        Assert.Equal(0u, reader.UInt()); // OPEN4_NOCREATE
+        Assert.Equal((uint)NfsV4OpenClaimType.Null, reader.UInt());
+        Assert.Equal("file.txt", reader.Str());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4Client_Copy_EncodesNfsV42CopyArgumentsInWireOrder()
+    {
+        var client = CreateNfsV4Client(minorVersion: 2);
+        var method = typeof(NfsV4Client).GetMethod("MakeCopyOp", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var op = (NfsV4Operation)method.Invoke(client, [3UL, 5UL, 7UL])!;
+
+        Assert.Equal(NfsV4Op.Copy, op.Op);
+        var reader = new XdrReader(op.Args!);
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(3UL, reader.ULong());
+        Assert.Equal(5UL, reader.ULong());
+        Assert.Equal(7UL, reader.ULong());
+        Assert.False(reader.Bool());
+        Assert.True(reader.Bool());
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4Client_Clone_UsesCloneOpcodeAndArgumentLayout()
+    {
+        var client = CreateNfsV4Client(minorVersion: 2);
+        var method = typeof(NfsV4Client).GetMethod("MakeCloneOp", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var op = (NfsV4Operation)method.Invoke(client, [11UL, 13UL, 17UL])!;
+
+        Assert.Equal(NfsV4Op.Clone, op.Op);
+        Assert.Equal(71u, (uint)op.Op);
+        var reader = new XdrReader(op.Args!);
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(new byte[12], reader.FixedBytes(12));
+        Assert.Equal(11UL, reader.ULong());
+        Assert.Equal(13UL, reader.ULong());
+        Assert.Equal(17UL, reader.ULong());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    [Fact]
+    public void NfsV4Client_SecInfo_ResolvesParentDirectoryBeforeName()
+    {
+        var method = typeof(NfsV4Client).GetMethod("MakeParentLookupOps", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        object?[] args = ["/exports/project/file.txt", null];
+        var ops = (List<NfsV4Operation>)method.Invoke(null, args)!;
+
+        Assert.Equal("file.txt", args[1]);
+        Assert.Equal([NfsV4Op.PutRootFh, NfsV4Op.Lookup, NfsV4Op.Lookup], ops.Select(op => op.Op));
+        Assert.Null(ops[0].Args);
+        Assert.Equal("exports", new XdrReader(ops[1].Args!).Str());
+        Assert.Equal("project", new XdrReader(ops[2].Args!).Str());
+    }
+
+    [Fact]
+    public void NfsV4Client_SecInfo_DecodesRpcSecGssOpaqueOid()
+    {
+        var writer = new XdrWriter();
+        writer.UInt(2);
+        writer.UInt(1); // AUTH_SYS
+        writer.UInt(6); // RPCSEC_GSS
+        writer.Opaque([0x2A, 0x86, 0x48, 0x86, 0xF7, 0x12, 0x01, 0x02, 0x02]); // Kerberos V5 OID
+        writer.UInt(0); // qop
+        writer.UInt(1); // rpc_gss_svc_none
+
+        var method = typeof(NfsV4Client).GetMethod("DecodeSecInfoFlavors", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var flavors = (List<uint>)method.Invoke(null, [new XdrReader(writer.ToArray())])!;
+
+        Assert.Equal([1u, 6u], flavors);
+    }
+
+    private static NfsV4Client CreateNfsV4Client(uint minorVersion = 0)
+    {
+        var ctor = typeof(NfsV4Client).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(IPAddress), typeof(NfsClientOptions), typeof(uint)],
+            modifiers: null);
+        Assert.NotNull(ctor);
+
+        return (NfsV4Client)ctor.Invoke([IPAddress.Loopback, NfsClientOptions.Default, minorVersion]);
     }
 
     [Fact]
