@@ -590,8 +590,8 @@ public sealed class NfsV4CompoundResponse
                 CaptureULong(writer, reader);
                 break;
             case 2:
-                CaptureULong(writer, reader);
-                CaptureULong(writer, reader);
+                CaptureUInt(writer, reader);
+                CaptureUInt(writer, reader);
                 break;
             default:
                 throw new NfsException($"Unsupported NFSv4 space limit type: {limitBy}.");

@@ -466,6 +466,78 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV4CompoundResponse_CapturesOpenWriteDelegationBlockLimit()
+    {
+        var stateIdData = new byte[]
+        {
+            0x01, 0x02, 0x03, 0x04,
+            0x10, 0x11, 0x12, 0x13,
+            0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B
+        };
+        var delegationStateIdData = new byte[]
+        {
+            0x05, 0x06, 0x07, 0x08,
+            0x20, 0x21, 0x22, 0x23,
+            0x24, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2A, 0x2B
+        };
+        var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
+
+        var writer = new XdrWriter();
+        writer.UInt(NfsV4Status.Ok);
+        writer.Str("open-write-delegation-getfh");
+        writer.UInt(2);
+        writer.UInt((uint)NfsV4Op.Open);
+        writer.UInt(NfsV4Status.Ok);
+        new NfsV4StateId(stateIdData).Encode(writer);
+        writer.Bool(true); // cinfo.atomic
+        writer.ULong(30); // cinfo.before
+        writer.ULong(31); // cinfo.after
+        writer.UInt(0); // rflags
+        NfsV4Bitmap.Of(NfsV4Attr.Size).Encode(writer);
+        writer.UInt(2); // OPEN_DELEGATE_WRITE
+        new NfsV4StateId(delegationStateIdData).Encode(writer);
+        writer.Bool(false); // recall
+        writer.UInt(2); // NFS_LIMIT_BLOCKS
+        writer.UInt(4096); // num_blocks
+        writer.UInt(512); // bytes_per_block
+        writer.UInt(0); // ace.type
+        writer.UInt(0); // ace.flag
+        writer.UInt(0x001F01FF); // ace.access_mask
+        writer.Str("OWNER@");
+        writer.UInt((uint)NfsV4Op.GetFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Opaque(fileHandle);
+
+        var response = NfsV4CompoundResponse.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(NfsV4Op.Open, response.Results[0].Op);
+        Assert.Equal(NfsV4Op.GetFh, response.Results[1].Op);
+
+        var openReader = response.Results[0].Data!;
+        Assert.Equal(stateIdData, NfsV4StateId.Decode(openReader).Data);
+        Assert.True(openReader.Bool());
+        Assert.Equal(30UL, openReader.ULong());
+        Assert.Equal(31UL, openReader.ULong());
+        Assert.Equal(0u, openReader.UInt());
+        Assert.Equal([1u << 4], NfsV4Bitmap.Decode(openReader).Masks);
+        Assert.Equal(2u, openReader.UInt());
+        Assert.Equal(delegationStateIdData, NfsV4StateId.Decode(openReader).Data);
+        Assert.False(openReader.Bool());
+        Assert.Equal(2u, openReader.UInt());
+        Assert.Equal(4096u, openReader.UInt());
+        Assert.Equal(512u, openReader.UInt());
+        Assert.Equal(0u, openReader.UInt());
+        Assert.Equal(0u, openReader.UInt());
+        Assert.Equal(0x001F01FFu, openReader.UInt());
+        Assert.Equal("OWNER@", openReader.Str());
+        Assert.Equal(0, openReader.Remaining);
+
+        Assert.Equal(fileHandle, response.Results[1].Data!.Opaque());
+    }
+
+    [Fact]
     public void NfsV4Client_OpenNoCreate_EncodesClaimImmediatelyAfterOpenType()
     {
         var client = CreateNfsV4Client();
