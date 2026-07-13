@@ -420,8 +420,6 @@ public sealed class NfsV4CompoundResponse
             case NfsV4Op.Lookup:
             case NfsV4Op.Putfh:
             case NfsV4Op.PutRootFh:
-            case NfsV4Op.Remove:
-            case NfsV4Op.Rename:
             case NfsV4Op.RestoreFh:
             case NfsV4Op.SaveFh:
             case NfsV4Op.SetClientIdConfirm:
@@ -456,6 +454,13 @@ public sealed class NfsV4CompoundResponse
                 break;
             case NfsV4Op.ReadDir:
                 CaptureReadDir(writer, reader);
+                break;
+            case NfsV4Op.Remove:
+                CaptureChangeInfo(writer, reader);
+                break;
+            case NfsV4Op.Rename:
+                CaptureChangeInfo(writer, reader);
+                CaptureChangeInfo(writer, reader);
                 break;
             case NfsV4Op.SecInfo:
                 CaptureSecInfo(writer, reader);

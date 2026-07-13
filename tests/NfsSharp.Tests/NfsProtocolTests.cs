@@ -415,6 +415,56 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV4CompoundResponse_CapturesRemoveAndRenameChangeInfoPayloads()
+    {
+        var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
+
+        var writer = new XdrWriter();
+        writer.UInt(NfsV4Status.Ok);
+        writer.Str("remove-rename-getfh");
+        writer.UInt(3);
+        writer.UInt((uint)NfsV4Op.Remove);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Bool(true); // remove cinfo.atomic
+        writer.ULong(10); // remove cinfo.before
+        writer.ULong(11); // remove cinfo.after
+        writer.UInt((uint)NfsV4Op.Rename);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Bool(false); // rename source cinfo.atomic
+        writer.ULong(20); // rename source cinfo.before
+        writer.ULong(21); // rename source cinfo.after
+        writer.Bool(true); // rename target cinfo.atomic
+        writer.ULong(30); // rename target cinfo.before
+        writer.ULong(31); // rename target cinfo.after
+        writer.UInt((uint)NfsV4Op.GetFh);
+        writer.UInt(NfsV4Status.Ok);
+        writer.Opaque(fileHandle);
+
+        var response = NfsV4CompoundResponse.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(NfsV4Op.Remove, response.Results[0].Op);
+        Assert.Equal(NfsV4Op.Rename, response.Results[1].Op);
+        Assert.Equal(NfsV4Op.GetFh, response.Results[2].Op);
+
+        var removeReader = response.Results[0].Data!;
+        Assert.True(removeReader.Bool());
+        Assert.Equal(10UL, removeReader.ULong());
+        Assert.Equal(11UL, removeReader.ULong());
+        Assert.Equal(0, removeReader.Remaining);
+
+        var renameReader = response.Results[1].Data!;
+        Assert.False(renameReader.Bool());
+        Assert.Equal(20UL, renameReader.ULong());
+        Assert.Equal(21UL, renameReader.ULong());
+        Assert.True(renameReader.Bool());
+        Assert.Equal(30UL, renameReader.ULong());
+        Assert.Equal(31UL, renameReader.ULong());
+        Assert.Equal(0, renameReader.Remaining);
+
+        Assert.Equal(fileHandle, response.Results[2].Data!.Opaque());
+    }
+
+    [Fact]
     public void NfsV4CompoundResponse_CapturesOpenNoneExtendedDelegation()
     {
         var stateIdData = new byte[]
