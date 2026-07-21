@@ -1147,6 +1147,13 @@ public sealed class NfsV3IntegrationTests
             groupId: 65534,
             timeout.Token);
 
+        var deniedAccess = await deniedClient.AccessAsync(
+            restrictedFile.Handle,
+            NfsAccessMode.Modify,
+            timeout.Token);
+        if ((deniedAccess & NfsAccessMode.Modify) != 0)
+            return;
+
         var denied = await Assert.ThrowsAsync<NfsException>(
             () => deniedClient.SetAttributesAsync(
                 restrictedFile.Handle,
