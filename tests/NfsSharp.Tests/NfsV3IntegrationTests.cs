@@ -783,6 +783,33 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_CanceledWritesDoNotReportSuccessOrCreateFiles()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var existingPath = fixture.GetRunPath("canceled-write-existing.bin");
+        var created = await client.CreateFileAsync(existingPath, timeout.Token);
+        var originalContent = new byte[] { 0x10, 0x11 };
+        await client.WriteAtAsync(created.Handle, 0, originalContent, timeout.Token);
+
+        var newPath = fixture.GetRunPath("canceled-write-new.bin");
+        using var canceled = new CancellationTokenSource();
+        await canceled.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.WriteAtAsync(created.Handle, 0, new byte[] { 0x20 }, canceled.Token));
+        Assert.Equal(originalContent, await ReadBytesAsync(client, existingPath, timeout.Token));
+
+        await using var input = new MemoryStream(new byte[] { 0x30 }, writable: false);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.WriteFileAsync(newPath, input, canceled.Token));
+        await AssertMissingPathAsync(client, newPath, timeout.Token);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsClient_WritesAndCommitsThroughFacade()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
