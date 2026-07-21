@@ -6,7 +6,7 @@ NfsSharp is evolving toward a dependable managed NFS SDK for .NET applications t
 
 ## Current Focus
 
-**M1: NFSv3 Integration Baseline** is the active workstream. The immediate goal is a repeatable integration harness backed by a real NFSv3 server, followed by focused tests for export discovery, mount and unmount, metadata, directory traversal, file I/O, mutations, and cleanup.
+**M1: NFSv3 Integration Baseline** remains the active workstream. The repository now has a repeatable NFS-Ganesha integration harness and broad coverage for export discovery, mount and unmount, metadata, directory traversal, file I/O, mutations, and cleanup. The remaining work is to close the open M1 acceptance criteria, document server-dependent behavior, and preserve this evidence as the client evolves.
 
 Track the live work in [M1 on GitHub](https://github.com/GaTTGeng/NfsSharp/milestone/1) or review the detailed [compatibility matrix](nfs-compatibility.md).
 

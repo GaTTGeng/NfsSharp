@@ -807,13 +807,24 @@ public sealed class NfsV4Client : IAsyncDisposable
             var marker = BinaryPrimitives.ReadUInt32BigEndian(header);
             last = (marker & 0x8000_0000u) != 0;
             var length = (int)(marker & 0x7FFF_FFFF);
-            if (length < 0 || length > MaxRpcRecordLength)
-                throw new NfsException($"Invalid RPC fragment length: {length}.");
+            ValidateRpcRecordLength(length, aggregate.Length);
             var fragment = new byte[length];
             await stream.ReadExactlyAsync(fragment, ct);
             aggregate.Write(fragment, 0, length);
         }
         return aggregate.ToArray();
+    }
+
+    private static void ValidateRpcRecordLength(int fragmentLength, long accumulatedLength)
+    {
+        if (fragmentLength < 0 ||
+            fragmentLength > MaxRpcRecordLength ||
+            accumulatedLength < 0 ||
+            accumulatedLength > MaxRpcRecordLength - fragmentLength)
+        {
+            throw new NfsException(
+                $"Invalid RPC record length: accumulated={accumulatedLength}, fragment={fragmentLength}.");
+        }
     }
 
     private static void EnsureCompoundOk(NfsV4CompoundResponse resp, string operation)
