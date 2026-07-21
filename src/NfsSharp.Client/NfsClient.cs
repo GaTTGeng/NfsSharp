@@ -97,11 +97,17 @@ public sealed class NfsClient : IAsyncDisposable
     public Task<(int BytesRead, bool Eof)> ReadAtAsync(byte[] fileHandle, ulong offset, byte[] buffer, int bufferOffset, int count, CancellationToken ct = default) =>
         RequireMounted().ReadAtAsync(fileHandle, offset, buffer, bufferOffset, count, ct);
 
-    public Task<int> WriteAtAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default) =>
-        RequireMounted().WriteAtAsync(fileHandle, offset, data, ct);
+    public Task<int> WriteAtAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return RequireMounted().WriteAtAsync(fileHandle, offset, data, ct);
+    }
 
-    public Task<NfsWriteResult> WriteAtWithResultAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default) =>
-        RequireMounted().WriteAtWithResultAsync(fileHandle, offset, data, ct);
+    public Task<NfsWriteResult> WriteAtWithResultAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return RequireMounted().WriteAtWithResultAsync(fileHandle, offset, data, ct);
+    }
 
     public Task<List<NfsEntry>> GetItemListAsync(string path, CancellationToken ct = default) =>
         RequireMounted().GetItemListAsync(path, ct);
@@ -121,8 +127,11 @@ public sealed class NfsClient : IAsyncDisposable
     public Task ReadAsync(string sourceRemotePath, string destinationLocalPath, CancellationToken ct = default) =>
         RequireMounted().ReadFileAsync(sourceRemotePath, destinationLocalPath, ct);
 
-    public Task<NfsLookup> WriteAsync(string destinationRemotePath, Stream source, CancellationToken ct = default) =>
-        RequireMounted().WriteFileAsync(destinationRemotePath, source, ct);
+    public Task<NfsLookup> WriteAsync(string destinationRemotePath, Stream source, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return RequireMounted().WriteFileAsync(destinationRemotePath, source, ct);
+    }
 
     public Task<NfsLookup> WriteAsync(string destinationRemotePath, string sourceLocalPath, CancellationToken ct = default) =>
         RequireMounted().WriteFileAsync(destinationRemotePath, sourceLocalPath, ct);

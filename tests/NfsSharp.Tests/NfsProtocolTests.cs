@@ -231,6 +231,23 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsClient_WriteOperations_PrioritizeRequestedCancellationBeforeMount()
+    {
+        await using var client = new NfsClient(NfsVersion.V3, NfsClientOptions.Default);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteAtAsync([0x01], 0, new byte[] { 0x02 }, cancellation.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteAtWithResultAsync([0x01], 0, new byte[] { 0x02 }, cancellation.Token));
+
+        await using var input = new MemoryStream([0x03], writable: false);
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteAsync("cancelled.bin", input, cancellation.Token));
+    }
+
+    [Fact]
     public void NfsV3Client_DirectoryPaging_RejectsNonterminalPagesWithoutProgress()
     {
         var method = typeof(NfsV3Client).GetMethod(
