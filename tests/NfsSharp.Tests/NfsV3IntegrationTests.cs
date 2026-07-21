@@ -1140,7 +1140,12 @@ public sealed class NfsV3IntegrationTests
         var restrictedFile = await setupClient.LookupPathAsync(
             NfsV3IntegrationFixture.RestrictedFilePath,
             timeout.Token);
-        await using var deniedClient = await ConnectV3ClientAsync(userId: 65534, groupId: 65534, timeout.Token);
+        var restrictedAttributes = await setupClient.GetAttributesAsync(restrictedFile.Handle, timeout.Token);
+        var deniedUserId = restrictedAttributes.Uid == 65534 ? 65533u : 65534u;
+        await using var deniedClient = await ConnectV3ClientAsync(
+            userId: deniedUserId,
+            groupId: 65534,
+            timeout.Token);
 
         var denied = await Assert.ThrowsAsync<NfsException>(
             () => deniedClient.SetAttributesAsync(
