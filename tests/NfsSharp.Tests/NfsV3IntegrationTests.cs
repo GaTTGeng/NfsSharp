@@ -1128,6 +1128,44 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    public async Task NfsV3Client_PreservesSetAttributePermissionFailures()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+
+        if (!fixture.Capabilities.AppliesRestrictedModeBits)
+            return;
+
+        var restrictedFile = await setupClient.LookupPathAsync(
+            NfsV3IntegrationFixture.RestrictedFilePath,
+            timeout.Token);
+        var restrictedAttributes = await setupClient.GetAttributesAsync(restrictedFile.Handle, timeout.Token);
+        var deniedUserId = restrictedAttributes.Uid == 65534 ? 65533u : 65534u;
+        await using var deniedClient = await ConnectV3ClientAsync(
+            userId: deniedUserId,
+            groupId: 65534,
+            timeout.Token);
+
+        var deniedAccess = await deniedClient.AccessAsync(
+            restrictedFile.Handle,
+            NfsAccessMode.Modify,
+            timeout.Token);
+        if ((deniedAccess & NfsAccessMode.Modify) != 0)
+            return;
+
+        var denied = await Assert.ThrowsAsync<NfsException>(
+            () => deniedClient.SetAttributesAsync(
+                restrictedFile.Handle,
+                new NfsSetAttributes { Mode = 0x1A4 },
+                timeout.Token));
+
+        Assert.Contains(denied.Status, new uint?[] { NfsV3Status.Access, NfsV3Status.Perm });
+        Assert.Contains("SETATTR", denied.Message);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsClient_MutatesAttributesThroughFacade()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
