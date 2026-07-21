@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Ensured NFSv3 direct-client and facade write operations honor an already-cancelled token before validating connection or mount state or performing network work.
+- Reject non-terminal NFSv3 directory pages that do not advance their enumeration cookie, preventing malformed responses from causing an infinite loop.
+- Limit the total size of multi-fragment ONC RPC records to 64 MiB for NFSv3 and NFSv4 clients.
+
 ## [1.1.1] - 2026-07-08
 
 ### Fixed

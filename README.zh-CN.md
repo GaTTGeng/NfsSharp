@@ -93,7 +93,7 @@ await client.UnMountDeviceAsync();
 - 尚未实现 NFSv2。
 - NFSv4 API 仍处于实验阶段，尚缺少专门的自动化测试和多服务端集成验证。
 - 端到端行为取决于服务端导出策略、身份映射、防火墙、rpcbind 和 mountd 配置。
-- 自动化测试目前主要覆盖协议编码和本地行为；针对多种 NFS 服务端的集成测试仍属于后续路线图。
+- 自动化测试覆盖协议编码和本地行为；CI 还会针对仓库自有的 NFS-Ganesha 服务端运行 NFSv3 集成测试。针对多种 NFS 服务端的集成测试仍属于后续路线图。
 
 ## 文档
 
@@ -116,7 +116,7 @@ dotnet test NfsSharp.sln --configuration Release --no-build --no-restore
 
 - `.github/workflows/ci.yml` 在 push 和 pull request 时执行 restore、build、test、pack，并上传包产物。
 - `.github/workflows/release-nuget.yml` 使用 NuGet Trusted Publishing 发布包。
-- `1.1.0` 或 `v1.1.0` 这样的 Git tag 会生成版本为 `1.1.0` 的 NuGet 包。
+- `<version>` 或 `v<version>` 这样的 Git tag 会生成对应版本的 NuGet 包。
 
 ## 参与贡献
 

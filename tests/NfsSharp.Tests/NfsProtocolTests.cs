@@ -213,11 +213,93 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_WriteOperations_PrioritizeRequestedCancellation()
+    {
+        await using var client = CreateNfsV3Client();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteAtWithResultAsync([0x01], 0, new byte[] { 0x02 }, cancellation.Token));
+
+        await using var input = new MemoryStream([0x03], writable: false);
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteFileAsync([0x01], input, cancellation.Token));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteFileAsync("cancelled.bin", input, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task NfsClient_WriteOperations_PrioritizeRequestedCancellationBeforeMount()
+    {
+        await using var client = new NfsClient(NfsVersion.V3, NfsClientOptions.Default);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteAtAsync([0x01], 0, new byte[] { 0x02 }, cancellation.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteAtWithResultAsync([0x01], 0, new byte[] { 0x02 }, cancellation.Token));
+
+        await using var input = new MemoryStream([0x03], writable: false);
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.WriteAsync("cancelled.bin", input, cancellation.Token));
+    }
+
+    [Fact]
+    public void NfsV3Client_DirectoryPaging_RejectsNonterminalPagesWithoutProgress()
+    {
+        var method = typeof(NfsV3Client).GetMethod(
+            "EnsureDirectoryReadProgress",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var emptyPage = Assert.Throws<TargetInvocationException>(
+            () => method.Invoke(null, [0UL, 0UL, 0, false, "READDIR"]));
+        Assert.Contains("without advancing its cookie", Assert.IsType<NfsException>(emptyPage.InnerException).Message);
+
+        var repeatedCookie = Assert.Throws<TargetInvocationException>(
+            () => method.Invoke(null, [4UL, 4UL, 1, false, "READDIRPLUS"]));
+        Assert.Contains("READDIRPLUS", Assert.IsType<NfsException>(repeatedCookie.InnerException).Message);
+
+        method.Invoke(null, [0UL, 4UL, 1, false, "READDIR"]);
+        method.Invoke(null, [0UL, 0UL, 0, true, "READDIRPLUS"]);
+    }
+
+    [Fact]
+    public void NfsV3Client_RpcRecordLength_RejectsAggregateOverflow()
+    {
+        var method = typeof(NfsV3Client).GetMethod(
+            "ValidateRpcRecordLength",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        method.Invoke(null, [1024, 1024L]);
+
+        var ex = Assert.Throws<TargetInvocationException>(
+            () => method.Invoke(null, [1, 64L * 1024 * 1024]));
+        Assert.Contains("Invalid RPC record length", Assert.IsType<NfsException>(ex.InnerException).Message);
+    }
+
+    [Fact]
     public void NfsException_IsNotFound()
     {
         var ex = new NfsException("not found", NfsV3Status.NoEnt);
         Assert.True(ex.IsNotFound);
         Assert.Equal(NfsV3Status.NoEnt, ex.Status);
+    }
+
+    private static NfsV3Client CreateNfsV3Client()
+    {
+        var ctor = typeof(NfsV3Client).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(IPAddress), typeof(NfsClientOptions)],
+            modifiers: null);
+
+        Assert.NotNull(ctor);
+        return (NfsV3Client)ctor.Invoke([IPAddress.Loopback, NfsClientOptions.Default]);
     }
 
     [Fact]

@@ -120,7 +120,7 @@ Console.WriteLine($"{attributes.Size} bytes");
 - NFSv2 is not implemented.
 - NFSv4 APIs are experimental and currently lack dedicated automated and multi-server integration coverage.
 - End-to-end behavior depends on the server's export policy, identity mapping, firewall, rpcbind, and mountd configuration.
-- The automated test suite primarily covers protocol encoding and local behavior. Integration tests against multiple NFS server implementations remain a roadmap item.
+- The automated suite covers protocol encoding and local behavior, and CI also runs a repository-owned NFS-Ganesha integration suite for NFSv3. Integration tests against multiple NFS server implementations remain a roadmap item.
 
 ## Documentation
 
@@ -151,7 +151,7 @@ NuGet metadata is defined in `src/Directory.Build.props`. Package artifacts incl
 
 - `.github/workflows/ci.yml` restores, builds, tests, packs, and uploads package artifacts for pushes and pull requests.
 - `.github/workflows/release-nuget.yml` builds versioned packages and publishes them to NuGet.org using Trusted Publishing.
-- A tag such as `1.1.0` or `v1.1.0` resolves to NuGet package version `1.1.0`.
+- A tag such as `<version>` or `v<version>` resolves to the corresponding NuGet package version.
 
 ## Contributing
 

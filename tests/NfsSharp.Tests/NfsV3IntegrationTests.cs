@@ -1085,11 +1085,17 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(0x180u, handleAttributes.Mode & 0x1FF);
 
         await client.ChmodAsync(path, 0x1A4, timeout.Token);
+        await client.ChownAsync(path, handleAttributes.Uid, handleAttributes.Gid, timeout.Token);
         await client.SetFileSizeAsync(path, 2, timeout.Token);
+        await client.UtimesAsync(path, pathMtime, handleMtime, timeout.Token);
 
         var finalAttributes = await client.GetAttributesAsync(path, timeout.Token);
         Assert.Equal(0x1A4u, finalAttributes.Mode & 0x1FF);
         Assert.Equal(2, finalAttributes.Size);
+        Assert.Equal(handleAttributes.Uid, finalAttributes.Uid);
+        Assert.Equal(handleAttributes.Gid, finalAttributes.Gid);
+        AssertCloseTo(pathMtime, finalAttributes.Atime);
+        AssertCloseTo(handleMtime, finalAttributes.Mtime);
         Assert.Equal(new byte[] { 0x41, 0x42 }, await ReadBytesAsync(client, path, timeout.Token));
     }
 

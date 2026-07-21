@@ -33,8 +33,8 @@ Before tagging, prepare and review a release PR that:
 Use NuGet SemVer tags without a leading `v`:
 
 ```powershell
-git tag 1.1.0
-git push origin 1.1.0
+git tag <version>
+git push origin <version>
 ```
 
 The release workflow strips a leading `v` if one is used, but plain SemVer tags match the NuGet package version directly.

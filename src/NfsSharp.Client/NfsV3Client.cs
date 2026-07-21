@@ -622,6 +622,8 @@ public sealed class NfsV3Client : IAsyncDisposable
 
         while (true)
         {
+            var requestCookie = cookie;
+            var pageEntryCount = 0;
             var writer = new XdrWriter();
             writer.Opaque(dirFh);
             writer.ULong(cookie);
@@ -652,9 +654,12 @@ public sealed class NfsV3Client : IAsyncDisposable
                     handle = reader.Opaque();
 
                 entries.Add(new NfsEntryPlus(name, fileId, attr, handle));
+                pageEntryCount++;
             }
 
-            if (reader.Bool())
+            var eof = reader.Bool();
+            EnsureDirectoryReadProgress(requestCookie, cookie, pageEntryCount, eof, "READDIRPLUS");
+            if (eof)
                 break;
         }
 
@@ -717,6 +722,8 @@ public sealed class NfsV3Client : IAsyncDisposable
 
         while (true)
         {
+            var requestCookie = cookie;
+            var pageEntryCount = 0;
             var writer = new XdrWriter();
             writer.Opaque(dirFh);
             writer.ULong(cookie);
@@ -736,9 +743,12 @@ public sealed class NfsV3Client : IAsyncDisposable
                 var name = reader.Str();
                 cookie = reader.ULong();
                 entries.Add(new NfsEntry(name, fileId));
+                pageEntryCount++;
             }
 
-            if (reader.Bool())
+            var eof = reader.Bool();
+            EnsureDirectoryReadProgress(requestCookie, cookie, pageEntryCount, eof, "READDIR");
+            if (eof)
                 break;
         }
 
@@ -796,6 +806,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>WRITE to a file handle at a specific offset. Returns count, committed stability, and verifier.</summary>
     public async Task<NfsWriteResult> WriteAtWithResultAsync(byte[] fileFh, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         ValidateHandle(fileFh);
         if (data.Length == 0)
             return new NfsWriteResult(0, _options.StableHow, Array.Empty<byte>());
@@ -871,6 +882,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>WRITE stream content to an existing file handle.</summary>
     public async Task WriteFileAsync(byte[] fileFh, Stream input, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         ValidateReadableStream(input);
         ValidateHandle(fileFh);
 
@@ -904,6 +916,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     /// <summary>Create or truncate a file, then write stream content to it.</summary>
     public async Task<NfsLookup> WriteFileAsync(string remotePath, Stream input, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         ValidateReadableStream(input);
         var (parent, name) = await ResolveParentAsync(remotePath, ct);
         NfsLookup file;
@@ -1176,6 +1189,20 @@ public sealed class NfsV3Client : IAsyncDisposable
 
         InvalidateDirCacheForMutation(fileFh);
         return new NfsWriteResult((int)count, committed, writeVerifier);
+    }
+
+    private static void EnsureDirectoryReadProgress(
+        ulong requestCookie,
+        ulong responseCookie,
+        int entryCount,
+        bool eof,
+        string procedure)
+    {
+        if (!eof && (entryCount == 0 || responseCookie == requestCookie))
+        {
+            throw new NfsException(
+                $"{procedure} returned a non-terminal page without advancing its cookie.");
+        }
     }
 
     private async Task<(byte[] ParentHandle, string Name)> ResolveParentAsync(string path, CancellationToken ct)
@@ -1600,8 +1627,7 @@ public sealed class NfsV3Client : IAsyncDisposable
             var marker = BinaryPrimitives.ReadUInt32BigEndian(header);
             last = (marker & 0x8000_0000u) != 0;
             var length = (int)(marker & 0x7FFF_FFFF);
-            if (length < 0 || length > MaxRpcRecordLength)
-                throw new NfsException($"Invalid RPC fragment length: {length}.");
+            ValidateRpcRecordLength(length, aggregate.Length);
 
             var fragment = new byte[length];
             await stream.ReadExactlyAsync(fragment, ct);
@@ -1609,6 +1635,18 @@ public sealed class NfsV3Client : IAsyncDisposable
         }
 
         return aggregate.ToArray();
+    }
+
+    private static void ValidateRpcRecordLength(int fragmentLength, long accumulatedLength)
+    {
+        if (fragmentLength < 0 ||
+            fragmentLength > MaxRpcRecordLength ||
+            accumulatedLength < 0 ||
+            accumulatedLength > MaxRpcRecordLength - fragmentLength)
+        {
+            throw new NfsException(
+                $"Invalid RPC record length: accumulated={accumulatedLength}, fragment={fragmentLength}.");
+        }
     }
 
     private static NfsLookup ReadDiropOk(XdrReader reader)
