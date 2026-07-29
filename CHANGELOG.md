@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Hardened NFSv3 RPC record decoding for fragmented and truncated records, and reject non-zero XDR padding bytes.
+
 ## [1.1.2] - 2026-07-21
 
 ### Fixed
