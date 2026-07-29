@@ -1540,8 +1540,9 @@ public sealed class NfsV3Client : IAsyncDisposable
         return reader;
     }
 
-    private static bool IsTransient(Exception ex) =>
-        ex is SocketException or IOException or ObjectDisposedException;
+    internal static bool IsTransient(Exception ex) =>
+        ex is SocketException or IOException or ObjectDisposedException ||
+        ex is NfsException { InnerException: Exception inner } && IsTransient(inner);
 
     internal static bool CanRetryTransient(uint prog, uint vers, uint proc) =>
         (prog, vers, proc) switch

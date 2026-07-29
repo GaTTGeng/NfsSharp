@@ -302,6 +302,14 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV3Client_IsTransient_RecognizesWrappedTruncatedRecord()
+    {
+        var truncated = new NfsException("Truncated RPC record.", new EndOfStreamException());
+
+        Assert.True(NfsV3Client.IsTransient(truncated));
+    }
+
+    [Fact]
     public async Task RpcRecordStream_ReassemblesFragmentsAndRejectsTruncation()
     {
         var record = Concat(
