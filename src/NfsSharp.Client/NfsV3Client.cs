@@ -1403,32 +1403,13 @@ public sealed class NfsV3Client : IAsyncDisposable
             await SendRecordAsync(conn.Stream, writer.ToArray(), token);
             var reply = await RecvRecordAsync(conn.Stream, token);
 
-            var reader = new XdrReader(reply);
-            var rxid = reader.UInt();
-            if (rxid != xid)
-                throw new NfsException($"RPC xid mismatch. Expected {xid}, got {rxid}.");
-
-            var messageType = reader.UInt();
-            if (messageType != 1)
-                throw new NfsException($"Unexpected RPC message type: {messageType}.");
-
-            var replyStat = reader.UInt();
-            if (replyStat != 0)
-                throw new NfsException($"RPC message denied (reply_stat={replyStat}).");
-
-            var verifierFlavor = reader.UInt();
-            reader.SkipOpaque();
-            var acceptStat = reader.UInt();
-            if (acceptStat != 0)
-            {
-                _logger?.LogWarning("RPC call rejected (prog={Prog}, proc={Proc}, accept_stat={AcceptStat})", prog, proc, acceptStat);
-                throw new NfsException($"RPC call failed (accept_stat={acceptStat}).");
-            }
+            var rpcReply = RpcReplyParser.Decode(reply, xid);
+            var reader = rpcReply.Body;
 
             // Verify GSS response verifier if applicable
-            if (_gssContext is not null && verifierFlavor == (uint)RpcSecGssFlavor.Gss)
+            if (_gssContext is not null && rpcReply.VerifierFlavor == (uint)RpcSecGssFlavor.Gss)
             {
-                var replyVerifier = reader.Opaque();
+                var replyVerifier = rpcReply.Verifier;
                 // In a full implementation, we'd verify the MIC here
             }
 
@@ -1531,14 +1512,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         await SendRecordAsync(conn.Stream, writer.ToArray(), ct);
         var reply = await RecvRecordAsync(conn.Stream, ct);
 
-        var reader = new XdrReader(reply);
-        reader.UInt(); // xid
-        reader.UInt(); // msg type
-        reader.UInt(); // reply stat
-        reader.UInt(); // verifier flavor
-        reader.SkipOpaque();
-        reader.UInt(); // accept stat
-        return reader;
+        return RpcReplyParser.Decode(reply, xid).Body;
     }
 
     private static bool IsTransient(Exception ex) =>
@@ -1865,20 +1839,7 @@ public sealed class NfsV3Client : IAsyncDisposable
             machine = "nfssharp";
         }
 
-        if (machine.Length > 255)
-            machine = machine[..255];
-
-        var writer = new XdrWriter();
-        writer.UInt(0);
-        writer.Str(machine);
-        writer.UInt(options.UserId);
-        writer.UInt(options.GroupId);
-        var auxiliaryGroups = options.AuxiliaryGroups ?? Array.Empty<uint>();
-        writer.UInt((uint)auxiliaryGroups.Count);
-        foreach (var group in auxiliaryGroups)
-            writer.UInt(group);
-
-        return writer.ToArray();
+        return RpcAuthSys.Encode(0, machine, options.UserId, options.GroupId, options.AuxiliaryGroups ?? Array.Empty<uint>());
     }
 
     private static void EnsureOk(uint status, string message)

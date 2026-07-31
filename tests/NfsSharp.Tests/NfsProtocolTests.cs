@@ -132,6 +132,223 @@ public class XdrTests
     }
 }
 
+public class RpcReplyParserTests
+{
+    private const uint Xid = 0x10203040;
+
+    [Fact]
+    public void Decode_AcceptedSuccess_ExposesOnlyProcedurePayload()
+    {
+        var fixture = AcceptedReply(0, verifierFlavor: 0, verifier: []);
+        fixture.UInt(0xCAFE_BABE);
+
+        var reply = RpcReplyParser.Decode(fixture.ToArray(), Xid);
+
+        Assert.Equal(0u, reply.VerifierFlavor);
+        Assert.Empty(reply.Verifier);
+        Assert.Equal(0xCAFE_BABEu, reply.Body.UInt());
+    }
+
+    [Theory]
+    [InlineData(1u, "program unavailable")]
+    [InlineData(3u, "procedure unavailable")]
+    [InlineData(4u, "garbage arguments")]
+    [InlineData(5u, "system error")]
+    public void Decode_AcceptedFailures_RejectProcedureResult(uint acceptStatus, string expectedMessage)
+    {
+        var exception = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(AcceptedReply(acceptStatus).ToArray(), Xid));
+
+        Assert.Contains(expectedMessage, exception.Message);
+    }
+
+    [Fact]
+    public void Decode_AcceptedProgramMismatch_IncludesSupportedRange()
+    {
+        var fixture = AcceptedReply(2);
+        fixture.UInt(2);
+        fixture.UInt(4);
+
+        var exception = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(fixture.ToArray(), Xid));
+
+        Assert.Contains("2..4", exception.Message);
+    }
+
+    [Fact]
+    public void Decode_RejectsInvalidAcceptedAndDeniedDiscriminators()
+    {
+        var invalidAccepted = Assert.Throws<NfsException>(
+            () => RpcReplyParser.Decode(AcceptedReply(6).ToArray(), Xid));
+        Assert.Contains("Invalid RPC accept_stat", invalidAccepted.Message);
+
+        var invalidDenied = new XdrWriter();
+        invalidDenied.UInt(Xid);
+        invalidDenied.UInt(1);
+        invalidDenied.UInt(1);
+        invalidDenied.UInt(2);
+        var deniedException = Assert.Throws<NfsException>(
+            () => RpcReplyParser.Decode(invalidDenied.ToArray(), Xid));
+        Assert.Contains("Invalid RPC reject_stat", deniedException.Message);
+    }
+
+    [Theory]
+    [InlineData(1u, "bad credentials")]
+    [InlineData(2u, "rejected credentials")]
+    [InlineData(3u, "bad verifier")]
+    [InlineData(4u, "rejected verifier")]
+    [InlineData(5u, "credentials too weak")]
+    [InlineData(6u, "invalid response verifier")]
+    [InlineData(7u, "authentication failed")]
+    [InlineData(8u, "Kerberos error")]
+    [InlineData(9u, "ticket expired")]
+    [InlineData(10u, "ticket file error")]
+    [InlineData(11u, "credential decode error")]
+    [InlineData(12u, "network address mismatch")]
+    [InlineData(13u, "RPCSEC_GSS credential problem")]
+    [InlineData(14u, "RPCSEC_GSS context problem")]
+    public void Decode_DeniedAuthenticationFailures_RejectProcedureResult(uint authStatus, string expectedMessage)
+    {
+        var exception = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(DeniedAuthReply(authStatus).ToArray(), Xid));
+
+        Assert.Contains(expectedMessage, exception.Message);
+        Assert.Contains($"auth_stat={authStatus}", exception.Message);
+    }
+
+    [Fact]
+    public void Decode_DeniedRpcMismatch_IncludesSupportedRange()
+    {
+        var fixture = new XdrWriter();
+        fixture.UInt(Xid);
+        fixture.UInt(1);
+        fixture.UInt(1);
+        fixture.UInt(0);
+        fixture.UInt(2);
+        fixture.UInt(3);
+
+        var exception = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(fixture.ToArray(), Xid));
+
+        Assert.Contains("2..3", exception.Message);
+    }
+
+    [Theory]
+    [InlineData(0u, "xid mismatch")]
+    [InlineData(1u, "Unexpected RPC message type")]
+    [InlineData(2u, "Invalid RPC reply_stat")]
+    public void Decode_RejectsInvalidEnvelopeOrderAndDiscriminators(uint malformedField, string expectedMessage)
+    {
+        var fixture = AcceptedReply(0);
+        var bytes = fixture.ToArray();
+        switch (malformedField)
+        {
+            case 0:
+                bytes[3]++;
+                break;
+            case 1:
+                bytes[7] = 0;
+                break;
+            case 2:
+                bytes[11] = 2;
+                break;
+        }
+
+        var exception = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(bytes, Xid));
+
+        Assert.Contains(expectedMessage, exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Decode_RejectsMalformedOrOversizedVerifier()
+    {
+        var truncated = new XdrWriter();
+        truncated.UInt(Xid);
+        truncated.UInt(1);
+        truncated.UInt(0);
+        truncated.UInt(0);
+        truncated.UInt(1);
+        var truncatedException = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(truncated.ToArray(), Xid));
+        Assert.Contains("Malformed XDR payload", truncatedException.Message);
+
+        var oversized = AcceptedReply(0, verifierFlavor: 1, verifier: new byte[401]);
+        var oversizedException = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(oversized.ToArray(), Xid));
+        Assert.Contains("opaque length is too large", oversizedException.Message);
+
+        var nonEmptyNone = AcceptedReply(0, verifierFlavor: 0, verifier: [1]);
+        var noneException = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(nonEmptyNone.ToArray(), Xid));
+        Assert.Contains("AUTH_NONE must be empty", noneException.Message);
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(15u)]
+    public void Decode_RejectsInvalidDeniedAuthenticationStatus(uint authStatus)
+    {
+        var exception = Assert.Throws<NfsException>(() => RpcReplyParser.Decode(DeniedAuthReply(authStatus).ToArray(), Xid));
+
+        Assert.Contains("Invalid RPC auth_stat", exception.Message);
+    }
+
+    private static XdrWriter AcceptedReply(uint acceptStatus, uint verifierFlavor = 0, byte[]? verifier = null)
+    {
+        var fixture = new XdrWriter();
+        fixture.UInt(Xid);
+        fixture.UInt(1);
+        fixture.UInt(0);
+        fixture.UInt(verifierFlavor);
+        fixture.Opaque(verifier ?? []);
+        fixture.UInt(acceptStatus);
+        return fixture;
+    }
+
+    private static XdrWriter DeniedAuthReply(uint authStatus)
+    {
+        var fixture = new XdrWriter();
+        fixture.UInt(Xid);
+        fixture.UInt(1);
+        fixture.UInt(1);
+        fixture.UInt(1);
+        fixture.UInt(authStatus);
+        return fixture;
+    }
+}
+
+public class RpcAuthSysTests
+{
+    [Fact]
+    public void Encode_UsesUnsignedIdentifiersAndPermitsSixteenGroups()
+    {
+        uint[] groups = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, uint.MaxValue];
+
+        var encoded = RpcAuthSys.Encode(uint.MaxValue, "nfs-host", uint.MaxValue, 0, groups);
+        var reader = new XdrReader(encoded);
+
+        Assert.Equal(uint.MaxValue, reader.UInt());
+        Assert.Equal("nfs-host", reader.Str());
+        Assert.Equal(uint.MaxValue, reader.UInt());
+        Assert.Equal(0u, reader.UInt());
+        Assert.Equal(16u, reader.UInt());
+        foreach (var group in groups)
+            Assert.Equal(group, reader.UInt());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    [Fact]
+    public void Encode_TruncatesMachineNameAtUtf8CharacterBoundary()
+    {
+        var encoded = RpcAuthSys.Encode(0, new string('\u00E9', 128), 0, 0, []);
+        var reader = new XdrReader(encoded);
+
+        reader.UInt();
+        Assert.Equal(254, reader.Opaque().Length);
+    }
+
+    [Fact]
+    public void Encode_RejectsMoreThanSixteenGroups()
+    {
+        var exception = Assert.Throws<NfsException>(() => RpcAuthSys.Encode(0, "host", 0, 0, Enumerable.Repeat(0u, 17).ToArray()));
+
+        Assert.Contains("at most 16", exception.Message);
+    }
+}
+
 public class NfsModelsTests
 {
     [Fact]

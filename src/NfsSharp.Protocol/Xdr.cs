@@ -90,9 +90,12 @@ public sealed class XdrReader
         };
     }
 
-    public byte[] Opaque()
+    public byte[] Opaque() => Opaque(MaxOpaqueLength);
+
+    /// <summary>Reads an opaque value constrained to <paramref name="maxLength"/> bytes.</summary>
+    public byte[] Opaque(int maxLength)
     {
-        var length = CheckedLength(UInt());
+        var length = CheckedLength(UInt(), maxLength);
         Ensure(length);
         var data = _buffer.AsSpan(_position, length).ToArray();
         _position += length;
@@ -121,17 +124,22 @@ public sealed class XdrReader
         return data;
     }
 
-    public void SkipOpaque()
+    public void SkipOpaque() => SkipOpaque(MaxOpaqueLength);
+
+    /// <summary>Skips an opaque value constrained to <paramref name="maxLength"/> bytes.</summary>
+    public void SkipOpaque(int maxLength)
     {
-        var length = CheckedLength(UInt());
+        var length = CheckedLength(UInt(), maxLength);
         Ensure(length);
         _position += length;
         SkipPad(length);
     }
 
-    private static int CheckedLength(uint value)
+    private static int CheckedLength(uint value, int maxLength)
     {
-        if (value > MaxOpaqueLength)
+        if (maxLength < 0 || maxLength > MaxOpaqueLength)
+            throw new ArgumentOutOfRangeException(nameof(maxLength));
+        if (value > maxLength)
             throw new NfsException($"XDR opaque length is too large: {value}.");
 
         return (int)value;
