@@ -138,8 +138,11 @@ public sealed record NfsClientOptions
 {
     public static NfsClientOptions Default { get; } = new();
 
+    /// <summary>AUTH_SYS user identifier, encoded as an unsigned 32-bit value.</summary>
     public uint UserId { get; init; }
+    /// <summary>AUTH_SYS primary-group identifier, encoded as an unsigned 32-bit value.</summary>
     public uint GroupId { get; init; }
+    /// <summary>AUTH_SYS auxiliary groups. At most 16 unsigned 32-bit identifiers are permitted.</summary>
     public IReadOnlyList<uint> AuxiliaryGroups { get; init; } = Array.Empty<uint>();
     public TimeSpan CommandTimeout { get; init; } = TimeSpan.FromSeconds(30);
     public bool UsePrivilegedSourcePort { get; init; } = true;
@@ -185,8 +188,8 @@ public sealed record NfsClientOptions
             throw new NfsException("DirectoryCacheTtl must be greater than zero when directory caching is enabled.");
         if (TcpKeepAlive && KeepAliveInterval < TimeSpan.Zero)
             throw new NfsException("KeepAliveInterval cannot be negative.");
-        if (AuxiliaryGroups.Count > 16)
-            throw new NfsException("AUTH_SYS supports at most 16 auxiliary groups.");
+        if (AuxiliaryGroups.Count > RpcAuthSys.MaxAuxiliaryGroups)
+            throw new NfsException($"AUTH_SYS supports at most {RpcAuthSys.MaxAuxiliaryGroups} auxiliary groups.");
     }
 }
 

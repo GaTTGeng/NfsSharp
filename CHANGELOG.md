@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Validate complete ONC RPC reply envelopes, including XID correlation, accepted and denied failure variants, reply verifier bounds, and invalid discriminators before exposing a procedure result.
 - Hardened NFSv3 RPC record decoding for fragmented and truncated records, and reject non-zero XDR padding bytes.
 
 ## [1.1.2] - 2026-07-21

@@ -113,26 +113,7 @@ public sealed class NfsV4Client : IAsyncDisposable
             await SendRecordAsync(conn.Stream, writer.ToArray(), token);
             var reply = await RecvRecordAsync(conn.Stream, token);
 
-            var reader = new XdrReader(reply);
-            var rxid = reader.UInt();
-            if (rxid != xid)
-                throw new NfsException($"RPC xid mismatch. Expected {xid}, got {rxid}.");
-
-            var messageType = reader.UInt();
-            if (messageType != 1)
-                throw new NfsException($"Unexpected RPC message type: {messageType}.");
-
-            var replyStat = reader.UInt();
-            if (replyStat != 0)
-                throw new NfsException($"RPC message denied (reply_stat={replyStat}).");
-
-            reader.UInt(); // verifier flavor
-            reader.SkipOpaque();
-            var acceptStat = reader.UInt();
-            if (acceptStat != 0)
-                throw new NfsException($"RPC call failed (accept_stat={acceptStat}).");
-
-            return DecodeCompoundResponse(reader);
+            return DecodeCompoundResponse(RpcReplyParser.Decode(reply, xid).Body);
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
         {
@@ -746,14 +727,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         await SendRecordAsync(conn.Stream, writer.ToArray(), ct);
         var reply = await RecvRecordAsync(conn.Stream, ct);
 
-        var reader = new XdrReader(reply);
-        reader.UInt(); // xid
-        reader.UInt(); // msg type
-        reader.UInt(); // reply stat
-        reader.UInt(); // verifier flavor
-        reader.SkipOpaque();
-        reader.UInt(); // accept stat
-        return reader;
+        return RpcReplyParser.Decode(reply, xid).Body;
     }
 
     private Conn RequireNfs() => _nfs ?? throw new NfsException("NFS connection is not established.");
@@ -843,16 +817,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     {
         string machine;
         try { machine = Dns.GetHostName(); } catch { machine = "nfs-sharp"; }
-        if (machine.Length > 255) machine = machine[..255];
-        var writer = new XdrWriter();
-        writer.UInt(0);
-        writer.Str(machine);
-        writer.UInt(options.UserId);
-        writer.UInt(options.GroupId);
-        var groups = options.AuxiliaryGroups ?? Array.Empty<uint>();
-        writer.UInt((uint)groups.Count);
-        foreach (var g in groups) writer.UInt(g);
-        return writer.ToArray();
+        return RpcAuthSys.Encode(0, machine, options.UserId, options.GroupId, options.AuxiliaryGroups ?? Array.Empty<uint>());
     }
 
     private static async Task<IPAddress> ResolveAddressAsync(string server, CancellationToken ct)
