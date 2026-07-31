@@ -1,4 +1,5 @@
 using System.Net;
+using System.Buffers.Binary;
 using System.Reflection;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
@@ -129,6 +130,28 @@ public class XdrTests
         Assert.Equal(8, reader.Remaining);
         reader.UInt();
         Assert.Equal(4, reader.Remaining);
+    }
+
+    [Fact]
+    public void XdrReader_RejectsNonZeroPadding()
+    {
+        var writer = new XdrWriter();
+        writer.FixedBytes([0x01]);
+        var bytes = writer.ToArray();
+        bytes[1] = 0xFF;
+
+        var ex = Assert.Throws<NfsException>(() => new XdrReader(bytes).FixedBytes(1));
+        Assert.Contains("padding", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void XdrReader_RejectsOpaqueLengthsAboveLimitBeforeAllocation()
+    {
+        var writer = new XdrWriter();
+        writer.UInt((64u * 1024 * 1024) + 1);
+
+        var ex = Assert.Throws<NfsException>(() => new XdrReader(writer.ToArray()).Opaque());
+        Assert.Contains("too large", ex.Message);
     }
 }
 
@@ -487,17 +510,50 @@ public class NfsModelsTests
     [Fact]
     public void NfsV3Client_RpcRecordLength_RejectsAggregateOverflow()
     {
-        var method = typeof(NfsV3Client).GetMethod(
-            "ValidateRpcRecordLength",
-            BindingFlags.Static | BindingFlags.NonPublic);
-        Assert.NotNull(method);
+        RpcRecordStream.ValidateLength(1024, 1024L);
+        RpcRecordStream.ValidateLength(RpcRecordStream.MaxRecordLength, 0);
 
-        method.Invoke(null, [1024, 1024L]);
-
-        var ex = Assert.Throws<TargetInvocationException>(
-            () => method.Invoke(null, [1, 64L * 1024 * 1024]));
-        Assert.Contains("Invalid RPC record length", Assert.IsType<NfsException>(ex.InnerException).Message);
+        var ex = Assert.Throws<NfsException>(
+            () => RpcRecordStream.ValidateLength(1, RpcRecordStream.MaxRecordLength));
+        Assert.Contains("Invalid RPC record length", ex.Message);
     }
+
+    [Fact]
+    public void NfsV3Client_IsTransient_RecognizesWrappedTruncatedRecord()
+    {
+        var truncated = new NfsException("Truncated RPC record.", new EndOfStreamException());
+
+        Assert.True(NfsV3Client.IsTransient(truncated));
+    }
+
+    [Fact]
+    public async Task RpcRecordStream_ReassemblesFragmentsAndRejectsTruncation()
+    {
+        var record = Concat(
+            RecordFragment(last: false, [0x01, 0x02]),
+            RecordFragment(last: true, [0x03, 0x04, 0x05]));
+        await using var stream = new MemoryStream(record, writable: false);
+
+        Assert.Equal([0x01, 0x02, 0x03, 0x04, 0x05], await RpcRecordStream.ReceiveAsync(stream, CancellationToken.None));
+
+        await using var truncated = new MemoryStream(
+            Concat(RecordFragment(last: true, [0x10, 0x11])[..5]),
+            writable: false);
+        var ex = await Assert.ThrowsAsync<NfsException>(
+            () => RpcRecordStream.ReceiveAsync(truncated, CancellationToken.None));
+        Assert.Contains("Truncated RPC record", ex.Message);
+    }
+
+    private static byte[] RecordFragment(bool last, byte[] payload)
+    {
+        var record = new byte[sizeof(uint) + payload.Length];
+        var marker = (uint)payload.Length | (last ? 0x8000_0000u : 0);
+        BinaryPrimitives.WriteUInt32BigEndian(record, marker);
+        payload.CopyTo(record, sizeof(uint));
+        return record;
+    }
+
+    private static byte[] Concat(params byte[][] parts) => parts.SelectMany(part => part).ToArray();
 
     [Fact]
     public void NfsException_IsNotFound()

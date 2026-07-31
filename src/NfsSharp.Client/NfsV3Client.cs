@@ -48,7 +48,6 @@ public sealed class NfsV3Client : IAsyncDisposable
 
     private const uint IpprotoTcp = 6;
     private const int DefaultNfsPort = 2049;
-    private const int MaxRpcRecordLength = 64 * 1024 * 1024;
     private const NfsAccessMode ValidAccessMask =
         NfsAccessMode.Read |
         NfsAccessMode.Lookup |
@@ -1401,7 +1400,7 @@ public sealed class NfsV3Client : IAsyncDisposable
             writer.Raw(args);
 
             await SendRecordAsync(conn.Stream, writer.ToArray(), token);
-            var reply = await RecvRecordAsync(conn.Stream, token);
+            var reply = await RpcRecordStream.ReceiveAsync(conn.Stream, token);
 
             var rpcReply = RpcReplyParser.Decode(reply, xid);
             var reader = rpcReply.Body;
@@ -1510,13 +1509,14 @@ public sealed class NfsV3Client : IAsyncDisposable
         writer.Raw(args);
 
         await SendRecordAsync(conn.Stream, writer.ToArray(), ct);
-        var reply = await RecvRecordAsync(conn.Stream, ct);
+        var reply = await RpcRecordStream.ReceiveAsync(conn.Stream, ct);
 
         return RpcReplyParser.Decode(reply, xid).Body;
     }
 
-    private static bool IsTransient(Exception ex) =>
-        ex is SocketException or IOException or ObjectDisposedException;
+    internal static bool IsTransient(Exception ex) =>
+        ex is SocketException or IOException or ObjectDisposedException ||
+        ex is NfsException { InnerException: Exception inner } && IsTransient(inner);
 
     internal static bool CanRetryTransient(uint prog, uint vers, uint proc) =>
         (prog, vers, proc) switch
@@ -1587,40 +1587,6 @@ public sealed class NfsV3Client : IAsyncDisposable
         await stream.WriteAsync(header, ct);
         await stream.WriteAsync(message, ct);
         await stream.FlushAsync(ct);
-    }
-
-    private static async Task<byte[]> RecvRecordAsync(Stream stream, CancellationToken ct)
-    {
-        using var aggregate = new MemoryStream();
-        var header = new byte[4];
-        var last = false;
-
-        while (!last)
-        {
-            await stream.ReadExactlyAsync(header, ct);
-            var marker = BinaryPrimitives.ReadUInt32BigEndian(header);
-            last = (marker & 0x8000_0000u) != 0;
-            var length = (int)(marker & 0x7FFF_FFFF);
-            ValidateRpcRecordLength(length, aggregate.Length);
-
-            var fragment = new byte[length];
-            await stream.ReadExactlyAsync(fragment, ct);
-            aggregate.Write(fragment, 0, length);
-        }
-
-        return aggregate.ToArray();
-    }
-
-    private static void ValidateRpcRecordLength(int fragmentLength, long accumulatedLength)
-    {
-        if (fragmentLength < 0 ||
-            fragmentLength > MaxRpcRecordLength ||
-            accumulatedLength < 0 ||
-            accumulatedLength > MaxRpcRecordLength - fragmentLength)
-        {
-            throw new NfsException(
-                $"Invalid RPC record length: accumulated={accumulatedLength}, fragment={fragmentLength}.");
-        }
     }
 
     private static NfsLookup ReadDiropOk(XdrReader reader)

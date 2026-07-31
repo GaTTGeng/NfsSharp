@@ -149,6 +149,11 @@ public sealed class XdrReader
     {
         var pad = (4 - (length & 3)) & 3;
         Ensure(pad);
+        for (var i = 0; i < pad; i++)
+        {
+            if (_buffer[_position + i] != 0)
+                throw new NfsException("Malformed XDR padding. Padding bytes must be zero.");
+        }
         _position += pad;
     }
 
