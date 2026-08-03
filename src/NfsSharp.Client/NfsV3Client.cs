@@ -1405,16 +1405,7 @@ public sealed class NfsV3Client : IAsyncDisposable
             await SendRecordAsync(conn.Stream, writer.ToArray(), token);
             var reply = await RpcRecordStream.ReceiveAsync(conn.Stream, token);
 
-            RpcReply rpcReply;
-            try
-            {
-                rpcReply = RpcReplyParser.Decode(reply, xid);
-            }
-            catch (NfsException ex)
-            {
-                throw new NfsException($"RPC call failed (prog={prog}, vers={vers}, proc={proc}): {ex.Message}", ex);
-            }
-
+            var rpcReply = DecodeRpcReplyWithContext(reply, xid, prog, vers, proc);
             var reader = rpcReply.Body;
 
             // Verify GSS response verifier if applicable
@@ -1436,6 +1427,23 @@ public sealed class NfsV3Client : IAsyncDisposable
     {
         if (port == 0)
             throw new NfsException($"{service} service is not registered in portmap for TCP.");
+    }
+
+    private static RpcReply DecodeRpcReplyWithContext(
+        byte[] reply,
+        uint xid,
+        uint prog,
+        uint vers,
+        uint proc)
+    {
+        try
+        {
+            return RpcReplyParser.Decode(reply, xid);
+        }
+        catch (NfsException ex)
+        {
+            throw new NfsException($"RPC call failed (prog={prog}, vers={vers}, proc={proc}): {ex.Message}", ex);
+        }
     }
 
     private void EncodeGssCredential(XdrWriter writer, uint proc, byte[] args)
@@ -1529,7 +1537,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         await SendRecordAsync(conn.Stream, writer.ToArray(), ct);
         var reply = await RpcRecordStream.ReceiveAsync(conn.Stream, ct);
 
-        return RpcReplyParser.Decode(reply, xid).Body;
+        return DecodeRpcReplyWithContext(reply, xid, prog, vers, proc).Body;
     }
 
     internal static bool IsTransient(Exception ex) =>

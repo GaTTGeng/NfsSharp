@@ -485,6 +485,23 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public void NfsV3Client_RpcReplyFailuresIncludeRawCallContext()
+    {
+        var method = typeof(NfsV3Client).GetMethod(
+            "DecodeRpcReplyWithContext",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var reply = RpcFixtureServer.AcceptedReply(42, RpcFixtureServer.ProcedureUnavailable);
+        var exception = Assert.Throws<TargetInvocationException>(
+            () => method.Invoke(null, [reply, 42u, 100003u, 3u, 0u]));
+
+        var inner = Assert.IsType<NfsException>(exception.InnerException);
+        Assert.Contains("prog=100003, vers=3, proc=0", inner.Message);
+        Assert.Contains("procedure unavailable", inner.Message);
+    }
+
+    [Fact]
     public async Task NfsV3Client_ListsEmptyAndGroupVariantExportReplies()
     {
         await using var emptyMount = new RpcFixtureServer(1, call =>
