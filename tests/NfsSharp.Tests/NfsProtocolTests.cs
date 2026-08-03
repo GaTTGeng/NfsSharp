@@ -427,7 +427,7 @@ public class NfsModelsTests
             () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(programUnavailable.Port), CancellationToken.None));
 
         Assert.Contains("prog=100000, vers=2, proc=3", programException.Message);
-        Assert.Contains("PROG_UNAVAIL", programException.Message);
+        Assert.Contains("program unavailable", programException.Message);
         await programUnavailable.WaitForRequestsAsync();
 
         await using var versionMismatch = new RpcFixtureServer(1, call =>
@@ -443,8 +443,8 @@ public class NfsModelsTests
         var versionException = await Assert.ThrowsAsync<NfsException>(
             () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(versionMismatch.Port), CancellationToken.None));
 
-        Assert.Contains("PROG_MISMATCH", versionException.Message);
-        Assert.Contains("supported_versions=3-4", versionException.Message);
+        Assert.Contains("program version mismatch", versionException.Message);
+        Assert.Contains("supported range 3..4", versionException.Message);
         await versionMismatch.WaitForRequestsAsync();
 
         await using var procedureUnavailable = new RpcFixtureServer(1, call =>
@@ -453,7 +453,7 @@ public class NfsModelsTests
         var procedureException = await Assert.ThrowsAsync<NfsException>(
             () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(procedureUnavailable.Port), CancellationToken.None));
 
-        Assert.Contains("PROC_UNAVAIL", procedureException.Message);
+        Assert.Contains("procedure unavailable", procedureException.Message);
         await procedureUnavailable.WaitForRequestsAsync();
     }
 
@@ -465,9 +465,9 @@ public class NfsModelsTests
         var exception = await Assert.ThrowsAsync<NfsException>(
             () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(portmap.Port), CancellationToken.None));
 
-        Assert.Contains("RPC call denied", exception.Message);
+        Assert.Contains("RPC message denied", exception.Message);
         Assert.Contains("prog=100000, vers=2, proc=3", exception.Message);
-        Assert.Contains("supported_versions=1-2", exception.Message);
+        Assert.Contains("supported range 1..2", exception.Message);
         await portmap.WaitForRequestsAsync();
     }
 
@@ -479,7 +479,7 @@ public class NfsModelsTests
         var exception = await Assert.ThrowsAsync<NfsException>(
             () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(portmap.Port), CancellationToken.None));
 
-        Assert.Contains("Unexpected RPC reply status 2", exception.Message);
+        Assert.Contains("Invalid RPC reply_stat discriminator: 2", exception.Message);
         Assert.Contains("prog=100000, vers=2, proc=3", exception.Message);
         await portmap.WaitForRequestsAsync();
     }
@@ -554,7 +554,7 @@ public class NfsModelsTests
         await using var client = await NfsV3Client.ConnectAsync("127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
         var unmountException = await Assert.ThrowsAsync<NfsException>(() => client.UnmountAsync(CancellationToken.None));
 
-        Assert.Contains("PROC_UNAVAIL", unmountException.Message);
+        Assert.Contains("procedure unavailable", unmountException.Message);
         await client.UnmountAsync(CancellationToken.None);
         await portmap.WaitForRequestsAsync();
         await mount.WaitForRequestsAsync();
