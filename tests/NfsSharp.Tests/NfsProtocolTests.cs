@@ -472,6 +472,19 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_RejectsUnexpectedRpcReplyStatusWithoutDecodingDeniedBody()
+    {
+        await using var portmap = new RpcFixtureServer(1, call => RpcFixtureServer.ReplyWithStatus(call.Xid, 2));
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(portmap.Port), CancellationToken.None));
+
+        Assert.Contains("Unexpected RPC reply status 2", exception.Message);
+        Assert.Contains("prog=100000, vers=2, proc=3", exception.Message);
+        await portmap.WaitForRequestsAsync();
+    }
+
+    [Fact]
     public async Task NfsV3Client_ListsEmptyAndGroupVariantExportReplies()
     {
         await using var emptyMount = new RpcFixtureServer(1, call =>
@@ -1357,6 +1370,15 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
         writer.UInt(0); // RPC_MISMATCH
         writer.UInt(low);
         writer.UInt(high);
+        return writer.ToArray();
+    }
+
+    public static byte[] ReplyWithStatus(uint xid, uint replyStatus)
+    {
+        var writer = new XdrWriter();
+        writer.UInt(xid);
+        writer.UInt(1); // REPLY
+        writer.UInt(replyStatus);
         return writer.ToArray();
     }
 
