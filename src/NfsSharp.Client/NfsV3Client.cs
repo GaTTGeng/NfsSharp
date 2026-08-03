@@ -47,7 +47,7 @@ public sealed class NfsV3Client : IAsyncDisposable
     private const uint NfsCommit = 21;
 
     private const uint IpprotoTcp = 6;
-    private const int DefaultNfsPort = 2049;
+    private const int MaxRpcRecordLength = 64 * 1024 * 1024;
     private const NfsAccessMode ValidAccessMask =
         NfsAccessMode.Read |
         NfsAccessMode.Lookup |
@@ -108,10 +108,8 @@ public sealed class NfsV3Client : IAsyncDisposable
         var mountPort = await client.GetPortAsync(ProgMount, VerMount, ct);
         var nfsPort = await client.GetPortAsync(ProgNfs, VerNfs, ct);
 
-        if (mountPort <= 0)
-            throw new NfsException("mountd port was not found in portmap.");
-        if (nfsPort <= 0)
-            nfsPort = DefaultNfsPort;
+        EnsureMappedPort(mountPort, "mountd");
+        EnsureMappedPort(nfsPort, "NFS");
         client._mountPort = mountPort;
 
         client._rootFh = await client.MountAsync(exportPath, ct);
@@ -149,8 +147,7 @@ public sealed class NfsV3Client : IAsyncDisposable
 
         var mountPort = await client.GetPortAsync(ProgMount, VerMount, ct);
 
-        if (mountPort <= 0)
-            throw new NfsException("mountd port was not found in portmap.");
+        EnsureMappedPort(mountPort, "mountd");
 
         client._mountPort = mountPort;
         var reader = await client.CallWithOwnedConnectionAsync(
@@ -183,25 +180,23 @@ public sealed class NfsV3Client : IAsyncDisposable
 
         _unmounted = true;
         _logger?.LogInformation("Unmounting NFS export {Export}", _exportPath);
-        if (_mountPort > 0 && !string.IsNullOrWhiteSpace(_exportPath))
+        try
         {
-            try
+            if (_mountPort > 0 && !string.IsNullOrWhiteSpace(_exportPath))
             {
                 await using var mount = await OpenAsync(_mountPort, ct);
                 var writer = new XdrWriter();
                 writer.Str(_exportPath);
                 await CallAsync(mount, ProgMount, VerMount, MountUmnt, writer.ToArray(), ct);
             }
-            catch
-            {
-                // UMNT is best-effort cleanup. The TCP connection close is the real resource boundary.
-            }
         }
-
-        if (_nfs is not null)
+        finally
         {
-            await _nfs.DisposeAsync();
-            _nfs = null;
+            if (_nfs is not null)
+            {
+                await _nfs.DisposeAsync();
+                _nfs = null;
+            }
         }
     }
 
@@ -1246,7 +1241,11 @@ public sealed class NfsV3Client : IAsyncDisposable
             PmapGetPort,
             writer.ToArray(),
             ct);
-        return (int)reader.UInt();
+        var port = reader.UInt();
+        if (port > ushort.MaxValue)
+            throw new NfsException($"Portmap returned invalid TCP port {port} for program {prog} version {vers}.");
+
+        return (int)port;
     }
 
     private async Task<byte[]> MountAsync(string exportPath, CancellationToken ct)
@@ -1262,8 +1261,12 @@ public sealed class NfsV3Client : IAsyncDisposable
             writer.ToArray(),
             ct);
         var status = reader.UInt();
-        if (status != 0)
-            throw new NfsException($"MOUNT \"{exportPath}\" failed (mountstat3={status}).", status);
+        if (status != MountV3Status.Ok)
+        {
+            throw new NfsException(
+                $"MOUNT \"{exportPath}\" failed (mountstat3={MountV3Status.Describe(status)} ({status})).",
+                status);
+        }
 
         return reader.Opaque();
     }
@@ -1402,7 +1405,7 @@ public sealed class NfsV3Client : IAsyncDisposable
             await SendRecordAsync(conn.Stream, writer.ToArray(), token);
             var reply = await RpcRecordStream.ReceiveAsync(conn.Stream, token);
 
-            var rpcReply = RpcReplyParser.Decode(reply, xid);
+            var rpcReply = DecodeRpcReplyWithContext(reply, xid, prog, vers, proc);
             var reader = rpcReply.Body;
 
             // Verify GSS response verifier if applicable
@@ -1417,6 +1420,29 @@ public sealed class NfsV3Client : IAsyncDisposable
         finally
         {
             _rpcLock.Release();
+        }
+    }
+
+    private static void EnsureMappedPort(int port, string service)
+    {
+        if (port == 0)
+            throw new NfsException($"{service} service is not registered in portmap for TCP.");
+    }
+
+    private static RpcReply DecodeRpcReplyWithContext(
+        byte[] reply,
+        uint xid,
+        uint prog,
+        uint vers,
+        uint proc)
+    {
+        try
+        {
+            return RpcReplyParser.Decode(reply, xid);
+        }
+        catch (NfsException ex)
+        {
+            throw new NfsException($"RPC call failed (prog={prog}, vers={vers}, proc={proc}): {ex.Message}", ex);
         }
     }
 
@@ -1511,7 +1537,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         await SendRecordAsync(conn.Stream, writer.ToArray(), ct);
         var reply = await RpcRecordStream.ReceiveAsync(conn.Stream, ct);
 
-        return RpcReplyParser.Decode(reply, xid).Body;
+        return DecodeRpcReplyWithContext(reply, xid, prog, vers, proc).Body;
     }
 
     internal static bool IsTransient(Exception ex) =>

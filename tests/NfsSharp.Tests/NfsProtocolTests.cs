@@ -1,5 +1,6 @@
-using System.Net;
 using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
@@ -375,6 +376,216 @@ public class RpcAuthSysTests
 public class NfsModelsTests
 {
     [Fact]
+    public async Task NfsV3Client_PortmapUnavailableMountServiceIsExplicit()
+    {
+        await using var portmap = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(0)));
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(portmap.Port), CancellationToken.None));
+
+        Assert.Contains("mountd service is not registered in portmap", exception.Message);
+        await portmap.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public async Task NfsV3Client_PortmapUnavailableNfsServiceDoesNotFallBackTo2049()
+    {
+        await using var portmap = new RpcFixtureServer(2, (call, index) =>
+            RpcFixtureServer.AcceptedReply(
+                call.Xid,
+                RpcFixtureServer.Success,
+                writer => writer.UInt(index == 0 ? 2048u : 0u)));
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ConnectAsync("127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None));
+
+        Assert.Contains("NFS service is not registered in portmap", exception.Message);
+        await portmap.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public async Task NfsV3Client_PortmapRejectsOutOfRangePort()
+    {
+        await using var portmap = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(65536)));
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(portmap.Port), CancellationToken.None));
+
+        Assert.Contains("invalid TCP port 65536", exception.Message);
+        await portmap.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public async Task NfsV3Client_PreservesRpcProgramVersionAndProcedureRejections()
+    {
+        await using var programUnavailable = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.ProgramUnavailable));
+
+        var programException = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(programUnavailable.Port), CancellationToken.None));
+
+        Assert.Contains("prog=100000, vers=2, proc=3", programException.Message);
+        Assert.Contains("program unavailable", programException.Message);
+        await programUnavailable.WaitForRequestsAsync();
+
+        await using var versionMismatch = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(
+                call.Xid,
+                RpcFixtureServer.ProgramMismatch,
+                writer =>
+                {
+                    writer.UInt(3);
+                    writer.UInt(4);
+                }));
+
+        var versionException = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(versionMismatch.Port), CancellationToken.None));
+
+        Assert.Contains("program version mismatch", versionException.Message);
+        Assert.Contains("supported range 3..4", versionException.Message);
+        await versionMismatch.WaitForRequestsAsync();
+
+        await using var procedureUnavailable = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.ProcedureUnavailable));
+
+        var procedureException = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(procedureUnavailable.Port), CancellationToken.None));
+
+        Assert.Contains("procedure unavailable", procedureException.Message);
+        await procedureUnavailable.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public async Task NfsV3Client_PreservesDeniedRpcContext()
+    {
+        await using var portmap = new RpcFixtureServer(1, call => RpcFixtureServer.DeniedVersionReply(call.Xid, 1, 2));
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(portmap.Port), CancellationToken.None));
+
+        Assert.Contains("RPC message denied", exception.Message);
+        Assert.Contains("prog=100000, vers=2, proc=3", exception.Message);
+        Assert.Contains("supported range 1..2", exception.Message);
+        await portmap.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public async Task NfsV3Client_RejectsUnexpectedRpcReplyStatusWithoutDecodingDeniedBody()
+    {
+        await using var portmap = new RpcFixtureServer(1, call => RpcFixtureServer.ReplyWithStatus(call.Xid, 2));
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(portmap.Port), CancellationToken.None));
+
+        Assert.Contains("Invalid RPC reply_stat discriminator: 2", exception.Message);
+        Assert.Contains("prog=100000, vers=2, proc=3", exception.Message);
+        await portmap.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public void NfsV3Client_RpcReplyFailuresIncludeRawCallContext()
+    {
+        var method = typeof(NfsV3Client).GetMethod(
+            "DecodeRpcReplyWithContext",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var reply = RpcFixtureServer.AcceptedReply(42, RpcFixtureServer.ProcedureUnavailable);
+        var exception = Assert.Throws<TargetInvocationException>(
+            () => method.Invoke(null, [reply, 42u, 100003u, 3u, 0u]));
+
+        var inner = Assert.IsType<NfsException>(exception.InnerException);
+        Assert.Contains("prog=100003, vers=3, proc=0", inner.Message);
+        Assert.Contains("procedure unavailable", inner.Message);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_ListsEmptyAndGroupVariantExportReplies()
+    {
+        await using var emptyMount = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.Bool(false)));
+        await using var emptyPortmap = CreateMountPortmap(emptyMount.Port);
+
+        var empty = await NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(emptyPortmap.Port), CancellationToken.None);
+
+        Assert.Empty(empty);
+        await emptyPortmap.WaitForRequestsAsync();
+        await emptyMount.WaitForRequestsAsync();
+
+        await using var groupsMount = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer =>
+            {
+                writer.Bool(true);
+                writer.Str("/data");
+                writer.Bool(true);
+                writer.Str("*");
+                writer.Bool(true);
+                writer.Str("admins");
+                writer.Bool(false);
+                writer.Bool(false);
+            }));
+        await using var groupsPortmap = CreateMountPortmap(groupsMount.Port);
+
+        var exports = await NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(groupsPortmap.Port), CancellationToken.None);
+
+        var export = Assert.Single(exports);
+        Assert.Equal("/data", export.Path);
+        Assert.Equal(["*", "admins"], export.Groups);
+        await groupsPortmap.WaitForRequestsAsync();
+        await groupsMount.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public async Task NfsV3Client_PreservesMountStatusAndUnmountTransportFailure()
+    {
+        await using var deniedMount = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(MountV3Status.Access)));
+        await using var deniedPortmap = new RpcFixtureServer(2, (call, index) =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(index == 0 ? (uint)deniedMount.Port : 2048)));
+
+        var mountException = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ConnectAsync("127.0.0.1", "/denied", CreateFixtureOptions(deniedPortmap.Port), CancellationToken.None));
+
+        Assert.Equal(MountV3Status.Access, mountException.Status);
+        Assert.Contains("mountstat3=ACCESS (13)", mountException.Message);
+        await deniedPortmap.WaitForRequestsAsync();
+        await deniedMount.WaitForRequestsAsync();
+
+        await using var nfs = new RpcFixtureServer(
+            1,
+            _ => throw new InvalidOperationException("NFS should not receive an RPC call."),
+            readRequests: false);
+        await using var mount = new RpcFixtureServer(2, (call, index) => index == 0
+            ? RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer =>
+            {
+                writer.UInt(MountV3Status.Ok);
+                writer.Opaque([0x01]);
+                writer.UInt(0);
+            })
+            : RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.ProcedureUnavailable));
+        await using var portmap = new RpcFixtureServer(2, (call, index) =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(index == 0 ? (uint)mount.Port : (uint)nfs.Port)));
+
+        await using var client = await NfsV3Client.ConnectAsync("127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        var unmountException = await Assert.ThrowsAsync<NfsException>(() => client.UnmountAsync(CancellationToken.None));
+
+        Assert.Contains("procedure unavailable", unmountException.Message);
+        await client.UnmountAsync(CancellationToken.None);
+        await portmap.WaitForRequestsAsync();
+        await mount.WaitForRequestsAsync();
+        await nfs.WaitForRequestsAsync();
+    }
+
+    [Fact]
+    public void MountV3Status_DescribesKnownValues()
+    {
+        Assert.Equal("ACCESS", MountV3Status.Describe(MountV3Status.Access));
+        Assert.Equal("10007", MountV3Status.Describe(10007));
+    }
+
+    [Fact]
     public void NfsFattr_Creation()
     {
         var attr = new NfsFattr(NfsType.Reg, 1024, DateTime.UtcNow)
@@ -562,6 +773,19 @@ public class NfsModelsTests
         Assert.True(ex.IsNotFound);
         Assert.Equal(NfsV3Status.NoEnt, ex.Status);
     }
+
+    private static NfsClientOptions CreateFixtureOptions(int portmapPort) => new()
+    {
+        PortmapPort = portmapPort,
+        CommandTimeout = TimeSpan.FromSeconds(5)
+    };
+
+    private static RpcFixtureServer CreateMountPortmap(int mountPort) => new(
+        1,
+        call => RpcFixtureServer.AcceptedReply(
+            call.Xid,
+            RpcFixtureServer.Success,
+            writer => writer.UInt((uint)mountPort)));
 
     private static NfsV3Client CreateNfsV3Client()
     {
@@ -1104,3 +1328,153 @@ public class NfsModelsTests
             () => new NfsCommitResult(new byte[7]));
     }
 }
+
+internal sealed class RpcFixtureServer : IAsyncDisposable
+{
+    public const uint Success = 0;
+    public const uint ProgramUnavailable = 1;
+    public const uint ProgramMismatch = 2;
+    public const uint ProcedureUnavailable = 3;
+
+    private readonly TcpListener _listener;
+    private readonly Task _serveTask;
+
+    public RpcFixtureServer(
+        int expectedRequests,
+        Func<RpcFixtureCall, byte[]> reply,
+        bool readRequests = true)
+        : this(expectedRequests, (call, _) => reply(call), readRequests)
+    {
+    }
+
+    public RpcFixtureServer(
+        int expectedRequests,
+        Func<RpcFixtureCall, int, byte[]> reply,
+        bool readRequests = true)
+    {
+        if (expectedRequests <= 0)
+            throw new ArgumentOutOfRangeException(nameof(expectedRequests));
+
+        _listener = new TcpListener(IPAddress.Loopback, 0);
+        _listener.Start();
+        Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        _serveTask = ServeAsync(expectedRequests, reply, readRequests);
+    }
+
+    public int Port { get; }
+
+    public Task WaitForRequestsAsync() => _serveTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+    public static byte[] AcceptedReply(uint xid, uint acceptStat, Action<XdrWriter>? result = null)
+    {
+        var writer = new XdrWriter();
+        writer.UInt(xid);
+        writer.UInt(1); // REPLY
+        writer.UInt(0); // MSG_ACCEPTED
+        writer.UInt(0); // AUTH_NONE verifier
+        writer.Opaque(Array.Empty<byte>());
+        writer.UInt(acceptStat);
+        result?.Invoke(writer);
+        return writer.ToArray();
+    }
+
+    public static byte[] DeniedVersionReply(uint xid, uint low, uint high)
+    {
+        var writer = new XdrWriter();
+        writer.UInt(xid);
+        writer.UInt(1); // REPLY
+        writer.UInt(1); // MSG_DENIED
+        writer.UInt(0); // RPC_MISMATCH
+        writer.UInt(low);
+        writer.UInt(high);
+        return writer.ToArray();
+    }
+
+    public static byte[] ReplyWithStatus(uint xid, uint replyStatus)
+    {
+        var writer = new XdrWriter();
+        writer.UInt(xid);
+        writer.UInt(1); // REPLY
+        writer.UInt(replyStatus);
+        return writer.ToArray();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _listener.Stop();
+        try
+        {
+            await _serveTask;
+        }
+        catch (OperationCanceledException)
+        {
+            // Listener shutdown cancels pending accepts.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Listener shutdown races its accept loop.
+        }
+    }
+
+    private async Task ServeAsync(int expectedRequests, Func<RpcFixtureCall, int, byte[]> reply, bool readRequests)
+    {
+        for (var index = 0; index < expectedRequests; index++)
+        {
+            using var client = await _listener.AcceptTcpClientAsync();
+            if (!readRequests)
+                continue;
+
+            var call = await ReadCallAsync(client.GetStream());
+            var response = reply(call, index);
+            await SendRecordAsync(client.GetStream(), response);
+        }
+    }
+
+    private static async Task<RpcFixtureCall> ReadCallAsync(Stream stream)
+    {
+        var record = await ReadRecordAsync(stream);
+        var reader = new XdrReader(record);
+        var xid = reader.UInt();
+        Assert.Equal(0u, reader.UInt()); // CALL
+        Assert.Equal(2u, reader.UInt()); // RPC version
+        var program = reader.UInt();
+        var version = reader.UInt();
+        var procedure = reader.UInt();
+        reader.UInt(); // credential flavor
+        reader.SkipOpaque();
+        reader.UInt(); // verifier flavor
+        reader.SkipOpaque();
+        return new RpcFixtureCall(xid, program, version, procedure, reader.ReadRemainingBytes());
+    }
+
+    private static async Task<byte[]> ReadRecordAsync(Stream stream)
+    {
+        using var result = new MemoryStream();
+        var last = false;
+        var header = new byte[4];
+
+        while (!last)
+        {
+            await stream.ReadExactlyAsync(header);
+            var marker = BinaryPrimitives.ReadUInt32BigEndian(header);
+            last = (marker & 0x8000_0000u) != 0;
+            var length = checked((int)(marker & 0x7FFF_FFFF));
+            var fragment = new byte[length];
+            await stream.ReadExactlyAsync(fragment);
+            result.Write(fragment);
+        }
+
+        return result.ToArray();
+    }
+
+    private static async Task SendRecordAsync(Stream stream, byte[] message)
+    {
+        var header = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(header, 0x8000_0000u | (uint)message.Length);
+        await stream.WriteAsync(header);
+        await stream.WriteAsync(message);
+        await stream.FlushAsync();
+    }
+}
+
+internal sealed record RpcFixtureCall(uint Xid, uint Program, uint Version, uint Procedure, byte[] Arguments);

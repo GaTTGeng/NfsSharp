@@ -11,6 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Validate complete ONC RPC reply envelopes, including XID correlation, accepted and denied failure variants, reply verifier bounds, and invalid discriminators before exposing a procedure result.
 - Hardened NFSv3 RPC record decoding for fragmented and truncated records, and reject non-zero XDR padding bytes.
 
+- Made NFSv3 portmapper discovery fail explicitly for unavailable or invalid TCP mappings instead of falling back to an implicit NFS port, and preserve RPC program/version/procedure rejection context and mount status names in public exceptions.
+- Made NFSv3 unmount transport failures observable while still closing the local NFS connection and retaining idempotent repeated unmount behavior.
+
 ## [1.1.2] - 2026-07-21
 
 ### Fixed

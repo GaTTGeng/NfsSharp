@@ -321,3 +321,33 @@ public static class NfsV3Status
         _ => status.ToString()
     };
 }
+
+/// <summary>mount protocol v3 status values defined by RFC 1813 appendix I.</summary>
+public static class MountV3Status
+{
+    public const uint Ok = 0;
+    public const uint Perm = 1;
+    public const uint NoEnt = 2;
+    public const uint Io = 5;
+    public const uint Access = 13;
+    public const uint NotDir = 20;
+    public const uint Inval = 22;
+    public const uint NameTooLong = 63;
+    public const uint NotSupp = 10004;
+    public const uint ServerFault = 10006;
+
+    public static string Describe(uint status) => status switch
+    {
+        Ok => "OK",
+        Perm => "PERM",
+        NoEnt => "NOENT",
+        Io => "IO",
+        Access => "ACCESS",
+        NotDir => "NOTDIR",
+        Inval => "INVAL",
+        NameTooLong => "NAMETOOLONG",
+        NotSupp => "NOTSUPP",
+        ServerFault => "SERVERFAULT",
+        _ => status.ToString()
+    };
+}

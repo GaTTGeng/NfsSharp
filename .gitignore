@@ -8,6 +8,14 @@ artifacts/
 artifacts-*/
 artifacts*/
 TestResults/
+coverage/
+coverage-*/
+*.coverage
+*.coveragexml
+*.opencover.xml
+*.trx
+*.nupkg
+*.snupkg
 *.user
 *.suo
 *.rsuser
@@ -16,12 +24,27 @@ TestResults/
 .idea/
 .vs/
 .vscode/
+*.sln.iml
+
+# .NET tooling and NuGet
+.dotnet/
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+*.nuget.props
+*.nuget.targets
+NuGet.Config.user
 
 # OS files
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Logs and temporary files
 *.log
 *.tmp
 *.temp
+*.bak
+*.swp
+*~
