@@ -283,7 +283,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         }
     }
 
-    /// <summary>FSSTAT for a file handle â returns storage capacity and availability.</summary>
+    /// <summary>FSSTAT for a file handle — returns storage capacity and availability.</summary>
     public async Task<NfsFileSystemStat> GetFileSystemStatAsync(byte[] fileHandle, CancellationToken ct)
     {
         ValidateHandle(fileHandle);
@@ -314,7 +314,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         return await GetFileSystemStatAsync(lookup.Handle, ct);
     }
 
-    /// <summary>FSINFO for a file handle â returns server transfer preferences and feature flags.</summary>
+    /// <summary>FSINFO for a file handle — returns server transfer preferences and feature flags.</summary>
     public async Task<NfsFileSystemInfo> GetFileSystemInfoAsync(byte[] fileHandle, CancellationToken ct)
     {
         ValidateHandle(fileHandle);
@@ -361,7 +361,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         return await GetFileSystemInfoAsync(lookup.Handle, ct);
     }
 
-    /// <summary>PATHCONF for a file handle â returns POSIX path constraints.</summary>
+    /// <summary>PATHCONF for a file handle — returns POSIX path constraints.</summary>
     public async Task<NfsPathConf> GetPathConfAsync(byte[] fileHandle, CancellationToken ct)
     {
         ValidateHandle(fileHandle);
@@ -430,7 +430,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         return await AccessAsync(lookup.Handle, desired, ct);
     }
 
-    /// <summary>READLINK â read the target of a symbolic link.</summary>
+    /// <summary>READLINK — read the target of a symbolic link.</summary>
     public async Task<string> ReadLinkAsync(byte[] symlinkHandle, CancellationToken ct)
     {
         ValidateHandle(symlinkHandle);
@@ -445,7 +445,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         return reader.Str();
     }
 
-    /// <summary>READLINK â read the target of an export-relative symbolic link path.</summary>
+    /// <summary>READLINK — read the target of an export-relative symbolic link path.</summary>
     public async Task<string> ReadLinkAsync(string path, CancellationToken ct)
     {
         var lookup = await LookupPathAsync(path, ct);
@@ -468,13 +468,13 @@ public sealed class NfsV3Client : IAsyncDisposable
         return await CreateFileAsync(parent, name, attributes ?? NfsSetAttributes.FileDefault, ct);
     }
 
-    /// <summary>COMMIT â flush cached data to stable storage for a file handle.</summary>
+    /// <summary>COMMIT — flush cached data to stable storage for a file handle.</summary>
     public async Task CommitAsync(byte[] fileFh, ulong offset, uint count, CancellationToken ct)
     {
         await CommitWithResultAsync(fileFh, offset, count, ct);
     }
 
-    /// <summary>COMMIT â flush cached data to stable storage and return the server write verifier.</summary>
+    /// <summary>COMMIT — flush cached data to stable storage and return the server write verifier.</summary>
     public async Task<NfsCommitResult> CommitWithResultAsync(byte[] fileFh, ulong offset, uint count, CancellationToken ct)
     {
         ValidateHandle(fileFh);
@@ -492,21 +492,21 @@ public sealed class NfsV3Client : IAsyncDisposable
         return new NfsCommitResult(writeVerifier);
     }
 
-    /// <summary>COMMIT â flush cached data to stable storage for an export-relative file path.</summary>
+    /// <summary>COMMIT — flush cached data to stable storage for an export-relative file path.</summary>
     public async Task CommitAsync(string path, ulong offset, uint count, CancellationToken ct)
     {
         var lookup = await LookupPathAsync(path, ct);
         await CommitAsync(lookup.Handle, offset, count, ct);
     }
 
-    /// <summary>COMMIT â flush cached data to stable storage for an export-relative path and return the server write verifier.</summary>
+    /// <summary>COMMIT — flush cached data to stable storage for an export-relative path and return the server write verifier.</summary>
     public async Task<NfsCommitResult> CommitWithResultAsync(string path, ulong offset, uint count, CancellationToken ct)
     {
         var lookup = await LookupPathAsync(path, ct);
         return await CommitWithResultAsync(lookup.Handle, offset, count, ct);
     }
 
-    /// <summary>SYMLINK â create a symbolic link in a directory handle.</summary>
+    /// <summary>SYMLINK — create a symbolic link in a directory handle.</summary>
     public async Task<NfsLookup> CreateSymLinkAsync(
         byte[] dirFh,
         string linkName,
@@ -531,14 +531,14 @@ public sealed class NfsV3Client : IAsyncDisposable
         return ReadDiropOk(reader);
     }
 
-    /// <summary>SYMLINK â create a symbolic link at an export-relative path.</summary>
+    /// <summary>SYMLINK — create a symbolic link at an export-relative path.</summary>
     public async Task<NfsLookup> CreateSymLinkAsync(string linkPath, string targetPath, CancellationToken ct)
     {
         var (parent, name) = await ResolveParentAsync(linkPath, ct);
         return await CreateSymLinkAsync(parent, name, targetPath, null, ct);
     }
 
-    /// <summary>LINK â create a hard link in a directory pointing to an existing file.</summary>
+    /// <summary>LINK — create a hard link in a directory pointing to an existing file.</summary>
     public async Task CreateHardLinkAsync(
         byte[] targetFh,
         byte[] linkDirFh,
@@ -562,7 +562,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         InvalidateDirCache(linkDirFh);
     }
 
-    /// <summary>LINK â create a hard link at an export-relative path pointing to an existing file path.</summary>
+    /// <summary>LINK — create a hard link at an export-relative path pointing to an existing file path.</summary>
     public async Task CreateHardLinkAsync(string existingFilePath, string linkPath, CancellationToken ct)
     {
         var target = await LookupPathAsync(existingFilePath, ct);
@@ -570,7 +570,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         await CreateHardLinkAsync(target.Handle, linkDir, linkName, ct);
     }
 
-    /// <summary>MKNOD â create a device node, FIFO, or socket in a directory handle.</summary>
+    /// <summary>MKNOD — create a device node, FIFO, or socket in a directory handle.</summary>
     public async Task<NfsLookup> CreateNodeAsync(
         byte[] dirFh,
         string name,
@@ -603,7 +603,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         return ReadDiropOk(reader);
     }
 
-    /// <summary>READDIRPLUS â directory listing with attributes and file handles. Reduces LOOKUP round-trips.</summary>
+    /// <summary>READDIRPLUS — directory listing with attributes and file handles. Reduces LOOKUP round-trips.</summary>
     public async Task<List<NfsEntryPlus>> ReadDirPlusAsync(byte[] dirFh, CancellationToken ct)
     {
         ValidateHandle(dirFh);
@@ -679,7 +679,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         return await ReadDirPlusAsync(lookup.Handle, ct);
     }
 
-    /// <summary>CHMOD â set file mode (permission bits) on a file handle.</summary>
+    /// <summary>CHMOD — set file mode (permission bits) on a file handle.</summary>
     public Task ChmodAsync(byte[] fileHandle, uint mode, CancellationToken ct) =>
         SetAttributesAsync(fileHandle, new NfsSetAttributes { Mode = mode }, ct);
 
@@ -690,7 +690,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         await ChmodAsync(lookup.Handle, mode, ct);
     }
 
-    /// <summary>CHOWN â set uid/gid on a file handle.</summary>
+    /// <summary>CHOWN — set uid/gid on a file handle.</summary>
     public Task ChownAsync(byte[] fileHandle, uint uid, uint gid, CancellationToken ct) =>
         SetAttributesAsync(fileHandle, new NfsSetAttributes { Uid = uid, Gid = gid }, ct);
 
@@ -701,7 +701,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         await ChownAsync(lookup.Handle, uid, gid, ct);
     }
 
-    /// <summary>UTIMES â set access and modification times on a file handle.</summary>
+    /// <summary>UTIMES — set access and modification times on a file handle.</summary>
     public Task UtimesAsync(byte[] fileHandle, DateTime? atime, DateTime? mtime, CancellationToken ct) =>
         SetAttributesAsync(fileHandle, new NfsSetAttributes { Atime = atime, Mtime = mtime }, ct);
 
