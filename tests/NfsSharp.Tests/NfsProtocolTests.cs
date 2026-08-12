@@ -579,6 +579,363 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_ReadSideProceduresDecodeOptionalMetadataAndExpectedStatuses()
+    {
+        // RFC 1813 §§3.3.1 and 3.3.3-3.3.6 define these status-discriminated result arms.
+        uint[] procedures = [1, 1, 3, 3, 4, 4, 5, 5, 6, 6];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            return index switch
+            {
+                0 => NfsReply(call, writer =>
+                {
+                    writer.UInt(NfsV3Status.Ok);
+                    WriteFattr3(writer, NfsType.Reg, 7, fileId: 42);
+                }),
+                1 => NfsReply(call, writer => writer.UInt(NfsV3Status.NoEnt)),
+                2 => NfsReply(call, writer =>
+                {
+                    writer.UInt(NfsV3Status.Ok);
+                    writer.Opaque([0xA1]);
+                    WritePostOpAttr(writer, present: false);
+                    WritePostOpAttr(writer, present: false);
+                }),
+                3 => NfsReply(call, writer => writer.UInt(NfsV3Status.NoEnt)),
+                4 => NfsReply(call, writer =>
+                {
+                    writer.UInt(NfsV3Status.Ok);
+                    WritePostOpAttr(writer, present: false);
+                    writer.UInt((uint)NfsAccessMode.Read);
+                }),
+                5 => NfsReply(call, writer => writer.UInt(NfsV3Status.Access)),
+                6 => NfsReply(call, writer =>
+                {
+                    writer.UInt(NfsV3Status.Ok);
+                    WritePostOpAttr(writer, present: false);
+                    writer.Str("target/file");
+                }),
+                7 => NfsReply(call, writer => writer.UInt(NfsV3Status.Inval)),
+                8 => NfsReply(call, writer =>
+                {
+                    writer.UInt(NfsV3Status.Ok);
+                    WritePostOpAttr(writer, present: false);
+                    writer.UInt(3);
+                    writer.Bool(true);
+                    writer.Opaque([0x10, 0x11, 0x12]);
+                }),
+                9 => NfsReply(call, writer => writer.UInt(NfsV3Status.IsDir)),
+                _ => throw new InvalidOperationException($"Unexpected NFS fixture request {index}.")
+            };
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            var attr = await client.GetAttributesAsync(FixtureHandle, CancellationToken.None);
+            Assert.Equal(NfsType.Reg, attr.Type);
+            Assert.Equal(7, attr.Size);
+            Assert.Equal(42ul, attr.FileId);
+
+            var getattrFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.GetAttributesAsync(FixtureHandle, CancellationToken.None));
+            Assert.Equal(NfsV3Status.NoEnt, getattrFailure.Status);
+
+            var lookup = await client.LookupAsync(FixtureHandle, "entry", CancellationToken.None);
+            Assert.Equal([0xA1], lookup.Handle);
+            Assert.Null(lookup.Attr);
+
+            var lookupFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.LookupAsync(FixtureHandle, "missing", CancellationToken.None));
+            Assert.Equal(NfsV3Status.NoEnt, lookupFailure.Status);
+
+            var granted = await client.AccessAsync(
+                FixtureHandle, NfsAccessMode.Read | NfsAccessMode.Lookup, CancellationToken.None);
+            Assert.Equal(NfsAccessMode.Read, granted);
+
+            var accessFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.AccessAsync(FixtureHandle, NfsAccessMode.Read, CancellationToken.None));
+            Assert.Equal(NfsV3Status.Access, accessFailure.Status);
+
+            Assert.Equal("target/file", await client.ReadLinkAsync(FixtureHandle, CancellationToken.None));
+
+            var readLinkFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadLinkAsync(FixtureHandle, CancellationToken.None));
+            Assert.Equal(NfsV3Status.Inval, readLinkFailure.Status);
+
+            var buffer = new byte[4];
+            var read = await client.ReadAtAsync(FixtureHandle, 0, buffer, 0, buffer.Length, CancellationToken.None);
+            Assert.Equal(3, read.BytesRead);
+            Assert.True(read.Eof);
+            Assert.Equal([0x10, 0x11, 0x12], buffer[..3]);
+
+            var readFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadAtAsync(FixtureHandle, 0, new byte[1], 0, 1, CancellationToken.None));
+            Assert.Equal(NfsV3Status.IsDir, readFailure.Status);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_AccessRejectsResponseGrantsOutsideRequestedMask()
+    {
+        await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
+        {
+            AssertNfsProcedure(call, 4);
+            writer.UInt(NfsV3Status.Ok);
+            WritePostOpAttr(writer, present: false);
+            writer.UInt((uint)NfsAccessMode.Modify);
+        }));
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            var exception = await Assert.ThrowsAsync<NfsException>(
+                () => client.AccessAsync(FixtureHandle, NfsAccessMode.Read, CancellationToken.None));
+            Assert.Contains("outside requested mask", exception.Message);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_ReadRejectsInconsistentCountsAndNonTerminalEmptyResponses()
+    {
+        // RFC 1813 §3.3.6 requires count and data to describe the same READ result.
+        await using var nfs = new RpcFixtureServer(3, (call, index) =>
+        {
+            AssertNfsProcedure(call, 6);
+            return NfsReply(call, writer =>
+            {
+                writer.UInt(NfsV3Status.Ok);
+                WritePostOpAttr(writer, present: false);
+                switch (index)
+                {
+                    case 0:
+                        writer.UInt(3);
+                        writer.Bool(true);
+                        writer.Opaque([0x01, 0x02, 0x03]);
+                        break;
+                    case 1:
+                        writer.UInt(2);
+                        writer.Bool(true);
+                        writer.Opaque([0x04, 0x05, 0x06]);
+                        break;
+                    case 2:
+                        writer.UInt(0);
+                        writer.Bool(false);
+                        writer.Opaque([]);
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unexpected READ fixture request {index}.");
+                }
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            var countFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadAtAsync(FixtureHandle, 0, new byte[2], 0, 2, CancellationToken.None));
+            Assert.Contains("count 3 for 2 byte request", countFailure.Message);
+
+            var dataFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadAtAsync(FixtureHandle, 0, new byte[2], 0, 2, CancellationToken.None));
+            Assert.Contains("XDR opaque length is too large", dataFailure.Message);
+
+            await using var output = new MemoryStream();
+            var progressFailure = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadFileAsync(FixtureHandle, output, CancellationToken.None));
+            Assert.Contains("non-terminal response without data", progressFailure.Message);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_ReadFileAllowsShortResponsesWithLargeConfiguredReadLimit()
+    {
+        const int largeReadLimit = 64 * 1024 * 1024 + 1;
+        await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
+        {
+            AssertNfsProcedure(call, 6);
+            var request = new XdrReader(call.Arguments);
+            Assert.Equal(FixtureHandle, request.Opaque());
+            Assert.Equal(0ul, request.ULong());
+            Assert.Equal((uint)largeReadLimit, request.UInt());
+
+            writer.UInt(NfsV3Status.Ok);
+            WritePostOpAttr(writer, present: false);
+            writer.UInt(1);
+            writer.Bool(true);
+            writer.Opaque([0x5A]);
+        }));
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var options = CreateFixtureOptions(portmap.Port) with { MaxReadSize = largeReadLimit };
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", options, CancellationToken.None);
+        try
+        {
+            await using var output = new MemoryStream();
+            await client.ReadFileAsync(FixtureHandle, output, CancellationToken.None);
+            Assert.Equal([0x5A], output.ToArray());
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_GetAttrRejectsFileSizesOutsideThePublicModelRange()
+    {
+        await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
+        {
+            AssertNfsProcedure(call, 1);
+            writer.UInt(NfsV3Status.Ok);
+            WriteFattr3(writer, NfsType.Reg, ulong.MaxValue);
+        }));
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            var exception = await Assert.ThrowsAsync<NfsException>(
+                () => client.GetAttributesAsync(FixtureHandle, CancellationToken.None));
+            Assert.Contains("exceeds the supported Int64 range", exception.Message);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_DirectoryResultsContinueCookiesAndRejectMalformedPages()
+    {
+        // RFC 1813 §§3.3.16-3.3.17 require cookie/verifier continuation for non-terminal pages.
+        byte[] readDirVerifier = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        byte[] readDirPlusVerifier = [0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27];
+        uint[] procedures = [16, 16, 17, 17, 16, 17, 16, 17];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            switch (index)
+            {
+                case 0:
+                    AssertReadDirRequest(call, expectedCookie: 0, new byte[8], plus: false);
+                    return NfsReply(call, writer => WriteReadDirResult(
+                        writer, readDirVerifier, [(1ul, "first", 11ul)], eof: false));
+                case 1:
+                    AssertReadDirRequest(call, expectedCookie: 11, readDirVerifier, plus: false);
+                    return NfsReply(call, writer => WriteReadDirResult(
+                        writer, readDirVerifier, [(2ul, "second", 22ul)], eof: true));
+                case 2:
+                    AssertReadDirRequest(call, expectedCookie: 0, new byte[8], plus: true);
+                    return NfsReply(call, writer => WriteReadDirPlusResult(
+                        writer, readDirPlusVerifier, [(3ul, "third", 33ul)], eof: false));
+                case 3:
+                    AssertReadDirRequest(call, expectedCookie: 33, readDirPlusVerifier, plus: true);
+                    return NfsReply(call, writer => WriteReadDirPlusResult(
+                        writer, readDirPlusVerifier, [(4ul, "fourth", 44ul)], eof: true));
+                case 4:
+                    return NfsReply(call, writer => writer.UInt(NfsV3Status.BadCookie));
+                case 5:
+                    return NfsReply(call, writer => writer.UInt(NfsV3Status.NotDir));
+                case 6:
+                    return NfsReply(call, writer => WriteReadDirResult(
+                        writer, new byte[8], [], eof: false));
+                case 7:
+                    return NfsReply(call, writer => WriteReadDirPlusResult(
+                        writer, new byte[8], [(5ul, "stalled", 0ul)], eof: false));
+                default:
+                    throw new InvalidOperationException($"Unexpected directory fixture request {index}.");
+            }
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            var entries = await client.ReadDirAsync(FixtureHandle, CancellationToken.None);
+            Assert.Collection(
+                entries,
+                entry => Assert.Equal(new NfsEntry("first", 1), entry),
+                entry => Assert.Equal(new NfsEntry("second", 2), entry));
+
+            var plusEntries = await client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None);
+            Assert.Collection(
+                plusEntries,
+                entry =>
+                {
+                    Assert.Equal("third", entry.Name);
+                    Assert.Null(entry.Attr);
+                    Assert.Null(entry.Handle);
+                },
+                entry =>
+                {
+                    Assert.Equal("fourth", entry.Name);
+                    Assert.Null(entry.Attr);
+                    Assert.Null(entry.Handle);
+                });
+
+            var readDirStatus = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadDirAsync(FixtureHandle, CancellationToken.None));
+            Assert.Equal(NfsV3Status.BadCookie, readDirStatus.Status);
+
+            var readDirPlusStatus = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None));
+            Assert.Equal(NfsV3Status.NotDir, readDirPlusStatus.Status);
+
+            var emptyPage = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadDirAsync(FixtureHandle, CancellationToken.None));
+            Assert.Contains("without advancing its cookie", emptyPage.Message);
+
+            var stalledPage = await Assert.ThrowsAsync<NfsException>(
+                () => client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None));
+            Assert.Contains("READDIRPLUS", stalledPage.Message);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
     public void MountV3Status_DescribesKnownValues()
     {
         Assert.Equal("ACCESS", MountV3Status.Describe(MountV3Status.Access));
@@ -773,6 +1130,141 @@ public class NfsModelsTests
         Assert.True(ex.IsNotFound);
         Assert.Equal(NfsV3Status.NoEnt, ex.Status);
     }
+
+    private static readonly byte[] FixtureHandle = [0xF0, 0x0D];
+
+    private static RpcFixtureServer CreateNfsPortmap(int mountPort, int nfsPort) => new(
+        2,
+        (call, index) =>
+        {
+            Assert.Equal(100000u, call.Program);
+            Assert.Equal(2u, call.Version);
+            Assert.Equal(3u, call.Procedure);
+            return RpcFixtureServer.AcceptedReply(
+                call.Xid,
+                RpcFixtureServer.Success,
+                writer => writer.UInt((uint)(index == 0 ? mountPort : nfsPort)));
+        });
+
+    private static RpcFixtureServer CreateMountedExportServer() => new(
+        2,
+        (call, index) =>
+        {
+            Assert.Equal(100005u, call.Program);
+            Assert.Equal(3u, call.Version);
+            Assert.Equal(index == 0 ? 1u : 3u, call.Procedure);
+            return RpcFixtureServer.AcceptedReply(
+                call.Xid,
+                RpcFixtureServer.Success,
+                index == 0
+                    ? writer =>
+                    {
+                        writer.UInt(MountV3Status.Ok);
+                        writer.Opaque(FixtureHandle);
+                        writer.UInt(0); // auth_flavors
+                    }
+                    : null);
+        });
+
+    private static byte[] NfsReply(RpcFixtureCall call, Action<XdrWriter> write) =>
+        RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, write);
+
+    private static void AssertNfsProcedure(RpcFixtureCall call, uint procedure)
+    {
+        Assert.Equal(100003u, call.Program);
+        Assert.Equal(3u, call.Version);
+        Assert.Equal(procedure, call.Procedure);
+    }
+
+    private static void AssertReadDirRequest(
+        RpcFixtureCall call,
+        ulong expectedCookie,
+        byte[] expectedVerifier,
+        bool plus)
+    {
+        var reader = new XdrReader(call.Arguments);
+        Assert.Equal(FixtureHandle, reader.Opaque());
+        Assert.Equal(expectedCookie, reader.ULong());
+        Assert.Equal(expectedVerifier, reader.FixedBytes(8));
+        Assert.Equal(32 * 1024u, reader.UInt());
+        if (plus)
+            Assert.Equal(32 * 1024u, reader.UInt());
+        Assert.Equal(0, reader.Remaining);
+    }
+
+    private static void WriteReadDirResult(
+        XdrWriter writer,
+        byte[] cookieVerifier,
+        IReadOnlyList<(ulong FileId, string Name, ulong Cookie)> entries,
+        bool eof)
+    {
+        writer.UInt(NfsV3Status.Ok);
+        WritePostOpAttr(writer, present: false);
+        writer.FixedBytes(cookieVerifier);
+        foreach (var entry in entries)
+        {
+            writer.Bool(true);
+            writer.ULong(entry.FileId);
+            writer.Str(entry.Name);
+            writer.ULong(entry.Cookie);
+        }
+
+        writer.Bool(false);
+        writer.Bool(eof);
+    }
+
+    private static void WriteReadDirPlusResult(
+        XdrWriter writer,
+        byte[] cookieVerifier,
+        IReadOnlyList<(ulong FileId, string Name, ulong Cookie)> entries,
+        bool eof)
+    {
+        writer.UInt(NfsV3Status.Ok);
+        WritePostOpAttr(writer, present: false);
+        writer.FixedBytes(cookieVerifier);
+        foreach (var entry in entries)
+        {
+            writer.Bool(true);
+            writer.ULong(entry.FileId);
+            writer.Str(entry.Name);
+            writer.ULong(entry.Cookie);
+            WritePostOpAttr(writer, present: false);
+            writer.Bool(false); // name_handle follows
+        }
+
+        writer.Bool(false);
+        writer.Bool(eof);
+    }
+
+    private static void WritePostOpAttr(XdrWriter writer, bool present)
+    {
+        writer.Bool(present);
+        if (present)
+            WriteFattr3(writer, NfsType.Reg, 0);
+    }
+
+    private static void WriteFattr3(XdrWriter writer, NfsType type, ulong size, ulong fileId = 1)
+    {
+        writer.UInt((uint)type);
+        writer.UInt(0x1A4);
+        writer.UInt(1);
+        writer.UInt(1000);
+        writer.UInt(1000);
+        writer.ULong(size);
+        writer.ULong(size);
+        writer.UInt(0);
+        writer.UInt(0);
+        writer.ULong(1);
+        writer.ULong(fileId);
+        for (var index = 0; index < 3; index++)
+        {
+            writer.UInt(0);
+            writer.UInt(0);
+        }
+    }
+
+    private static Task WaitForRequestsAsync(params RpcFixtureServer[] servers) =>
+        Task.WhenAll(servers.Select(server => server.WaitForRequestsAsync()));
 
     private static NfsClientOptions CreateFixtureOptions(int portmapPort) => new()
     {
@@ -1418,15 +1910,31 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
 
     private async Task ServeAsync(int expectedRequests, Func<RpcFixtureCall, int, byte[]> reply, bool readRequests)
     {
-        for (var index = 0; index < expectedRequests; index++)
+        var index = 0;
+        while (index < expectedRequests)
         {
             using var client = await _listener.AcceptTcpClientAsync();
             if (!readRequests)
+            {
+                index++;
                 continue;
+            }
 
-            var call = await ReadCallAsync(client.GetStream());
-            var response = reply(call, index);
-            await SendRecordAsync(client.GetStream(), response);
+            while (index < expectedRequests)
+            {
+                RpcFixtureCall call;
+                try
+                {
+                    call = await ReadCallAsync(client.GetStream());
+                }
+                catch (EndOfStreamException)
+                {
+                    break;
+                }
+
+                var response = reply(call, index++);
+                await SendRecordAsync(client.GetStream(), response);
+            }
         }
     }
 

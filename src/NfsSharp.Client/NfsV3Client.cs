@@ -413,7 +413,14 @@ public sealed class NfsV3Client : IAsyncDisposable
         var status = reader.UInt();
         EnsureOk(status, "ACCESS failed");
         ReadPostOpAttr(reader);
-        return (NfsAccessMode)reader.UInt();
+        var granted = (NfsAccessMode)reader.UInt();
+        if ((granted & ~desired) != NfsAccessMode.None)
+        {
+            throw new NfsException(
+                $"ACCESS returned grant 0x{(uint)granted:X} outside requested mask 0x{(uint)desired:X}.");
+        }
+
+        return granted;
     }
 
     /// <summary>ACCESS check on an export-relative path.</summary>
@@ -782,7 +789,10 @@ public sealed class NfsV3Client : IAsyncDisposable
         ReadPostOpAttr(reader);
         var readCount = reader.UInt();
         var eof = reader.Bool();
-        var data = reader.Opaque();
+        if (readCount > (uint)count)
+            throw new NfsException($"READ returned count {readCount} for {count} byte request.");
+
+        var data = reader.Opaque(Math.Min(count, MaxRpcRecordLength));
         if (data.Length != readCount)
             throw new NfsException($"READ returned {data.Length} bytes but count was {readCount}.");
 
@@ -829,7 +839,13 @@ public sealed class NfsV3Client : IAsyncDisposable
             ReadPostOpAttr(reader);
             var count = reader.UInt();
             var eof = reader.Bool();
-            var data = reader.Opaque();
+            if (count > (uint)_options.MaxReadSize)
+            {
+                throw new NfsException(
+                    $"READ returned count {count} for {_options.MaxReadSize} byte request.");
+            }
+
+            var data = reader.Opaque(Math.Min(_options.MaxReadSize, MaxRpcRecordLength));
             if (data.Length != count)
                 throw new NfsException($"READ returned {data.Length} bytes but count was {count}.");
 
@@ -839,8 +855,11 @@ public sealed class NfsV3Client : IAsyncDisposable
                 offset += (ulong)data.Length;
             }
 
-            if (eof || data.Length == 0)
+            if (eof)
                 break;
+
+            if (data.Length == 0)
+                throw new NfsException("READ returned a non-terminal response without data.");
         }
     }
 
@@ -1644,7 +1663,10 @@ public sealed class NfsV3Client : IAsyncDisposable
         var mtime = ReadNfsTimestamp(reader);
         var ctime = ReadNfsTimestamp(reader);
 
-        return new NfsFattr(type, checked((long)size), mtime?.ToDateTimeUtc())
+        if (size > long.MaxValue)
+            throw new NfsException($"NFSv3 file size {size} exceeds the supported Int64 range.");
+
+        return new NfsFattr(type, (long)size, mtime?.ToDateTimeUtc())
         {
             Mode = mode,
             LinkCount = nlink,
