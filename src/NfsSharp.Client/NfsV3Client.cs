@@ -792,7 +792,7 @@ public sealed class NfsV3Client : IAsyncDisposable
         if (readCount > (uint)count)
             throw new NfsException($"READ returned count {readCount} for {count} byte request.");
 
-        var data = reader.Opaque(count);
+        var data = reader.Opaque(Math.Min(count, MaxRpcRecordLength));
         if (data.Length != readCount)
             throw new NfsException($"READ returned {data.Length} bytes but count was {readCount}.");
 
@@ -845,7 +845,7 @@ public sealed class NfsV3Client : IAsyncDisposable
                     $"READ returned count {count} for {_options.MaxReadSize} byte request.");
             }
 
-            var data = reader.Opaque(_options.MaxReadSize);
+            var data = reader.Opaque(Math.Min(_options.MaxReadSize, MaxRpcRecordLength));
             if (data.Length != count)
                 throw new NfsException($"READ returned {data.Length} bytes but count was {count}.");
 
