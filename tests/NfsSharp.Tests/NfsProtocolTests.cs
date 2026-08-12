@@ -775,6 +775,44 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_ReadFileAllowsShortResponsesWithLargeConfiguredReadLimit()
+    {
+        const int largeReadLimit = 64 * 1024 * 1024 + 1;
+        await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
+        {
+            AssertNfsProcedure(call, 6);
+            var request = new XdrReader(call.Arguments);
+            Assert.Equal(FixtureHandle, request.Opaque());
+            Assert.Equal(0ul, request.ULong());
+            Assert.Equal((uint)largeReadLimit, request.UInt());
+
+            writer.UInt(NfsV3Status.Ok);
+            WritePostOpAttr(writer, present: false);
+            writer.UInt(1);
+            writer.Bool(true);
+            writer.Opaque([0x5A]);
+        }));
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var options = CreateFixtureOptions(portmap.Port) with { MaxReadSize = largeReadLimit };
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", options, CancellationToken.None);
+        try
+        {
+            await using var output = new MemoryStream();
+            await client.ReadFileAsync(FixtureHandle, output, CancellationToken.None);
+            Assert.Equal([0x5A], output.ToArray());
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
     public async Task NfsV3Client_GetAttrRejectsFileSizesOutsideThePublicModelRange()
     {
         await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
