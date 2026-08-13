@@ -60,7 +60,7 @@ Without `NFSSHARP_RUN_NFSV3_INTEGRATION=1`, the integration tests are skipped an
 
 ## Run the Linux kernel fixture locally
 
-Use a disposable or dedicated Ubuntu 24.04 host. The setup script installs `nfs-kernel-server` and `rpcbind`, creates `/srv/nfssharp-kernel-export`, and writes the isolated configuration files `/etc/exports.d/nfssharp.exports` and `/etc/nfs.conf.d/nfssharp.conf`. It refuses to reuse an existing export directory that it did not create.
+Use a disposable or dedicated Ubuntu 24.04 host. The setup script installs `nfs-kernel-server` and `rpcbind`, creates `/srv/nfssharp-kernel-export`, and writes the isolated configuration files `/etc/exports.d/nfssharp.exports` and `/etc/nfs.conf.d/nfssharp.conf`. It refuses to reuse an existing export directory that it did not create. It also refuses to replace either configuration path unless the existing regular file carries the fixture ownership header; symbolic links, directories, and host-owned files are left untouched.
 
 ```bash
 sudo bash tests/integration/kernel-nfs/setup.sh
@@ -78,7 +78,7 @@ dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj \
   --filter 'Category=Integration'
 ```
 
-The teardown script unexports the directory, stops the kernel NFS service, removes only the two fixture configuration files, and deletes the dedicated export directory after verifying its marker and resolved path. It leaves `rpcbind` and installed Ubuntu packages in place.
+The teardown script does nothing unless the dedicated export carries the fixture marker. It then unexports the directory, stops the kernel NFS service, removes only configuration files that still carry the fixture ownership header, and deletes the export directory after verifying its marker and resolved path. Replaced or administrator-owned configuration files are preserved. It leaves `rpcbind` and installed Ubuntu packages in place.
 
 ## Fixture layout
 
