@@ -116,11 +116,11 @@ The Ganesha image uses Ubuntu 24.04 pinned by OCI digest and installs the Ubuntu
 
 ## M1 completion evidence
 
-M1 is ready to evaluate when milestone issues and CI show evidence for:
+M1 completion is supported by the following milestone and CI evidence:
 
 | Area | Evidence source |
 | --- | --- |
-| Export, mount, metadata, and lifecycle | M1 issues, `NfsV3Client_ListsAdvertisedExportAndAccessGroups`, mount/unmount integration tests, and `NFSv3 integration` CI. |
+| Export, mount, metadata, and lifecycle | M1 issues, `NfsV3Client_ListsAdvertisedExportAndAccessGroups`, mount/unmount integration tests, and `NFSv3 integration (NFS-Ganesha)` CI. |
 | Directory enumeration | READDIR/READDIRPLUS integration tests for empty, small, nested, and paginated directories. |
 | File I/O and persistence | Read, write, stability mode, verifier, and COMMIT integration tests. |
 | Mutations and links | Create/remove, rename, symlink, hard-link, and attribute mutation integration tests. |

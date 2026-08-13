@@ -6,8 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-13
+
 ### Added
 
+- Added public `RpcAuthSys`, `RpcReply`, `RpcReplyParser`, and `MountV3Status` protocol helpers, plus bounded `XdrReader.Opaque(int)` and `SkipOpaque(int)` overloads.
 - Added an Ubuntu 24.04 Linux kernel NFSv3 integration fixture and CI job as a second-server interoperability baseline, including retained server diagnostics and cross-server compatibility documentation.
 
 ### Changed
@@ -16,13 +19,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Validate NFSv3 mutation, durability, and capability procedure result arms with status-preserving fixtures, and reject malformed FSINFO `time_delta` nanoseconds values.
-- Hardened NFSv3 read-side result validation: reject ACCESS grants outside the requested mask, bound READ response data to the requested size, reject non-terminal empty READ responses, and surface unsupported `fattr3` file sizes as protocol exceptions.
-- Validate complete ONC RPC reply envelopes, including XID correlation, accepted and denied failure variants, reply verifier bounds, and invalid discriminators before exposing a procedure result.
-- Hardened NFSv3 RPC record decoding for fragmented and truncated records, and reject non-zero XDR padding bytes.
-
-- Made NFSv3 portmapper discovery fail explicitly for unavailable or invalid TCP mappings instead of falling back to an implicit NFS port, and preserve RPC program/version/procedure rejection context and mount status names in public exceptions.
+- Validated NFSv3 mutation, durability, and capability procedure result arms with status-preserving fixtures, and rejected malformed FSINFO `time_delta` nanoseconds values.
+- Hardened NFSv3 read-side result validation by rejecting ACCESS grants outside the requested mask, bounding READ response data to the requested size, rejecting non-terminal empty READ responses, and surfacing unsupported `fattr3` file sizes as protocol exceptions.
+- Validated complete ONC RPC reply envelopes, including XID correlation, accepted and denied failure variants, reply verifier bounds, and invalid discriminators before exposing a procedure result.
+- Hardened NFSv3 RPC record decoding for fragmented and truncated records, and rejected non-zero XDR padding bytes.
+- Made NFSv3 portmapper discovery fail explicitly for unavailable or invalid TCP mappings instead of falling back to an implicit NFS port, and preserved RPC program/version/procedure rejection context and mount status names in public exceptions.
 - Made NFSv3 unmount transport failures observable while still closing the local NFS connection and retaining idempotent repeated unmount behavior.
+
+### Dependencies
+
+- Updated `Microsoft.Extensions.Logging.Abstractions` to 10.0.11 and `Microsoft.SourceLink.GitHub` to 10.0.400.
+- Updated `actions/setup-dotnet` to v6 for build and release workflows.
 
 ## [1.1.2] - 2026-07-21
 
