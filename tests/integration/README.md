@@ -1,6 +1,11 @@
 # NFSv3 Integration Tests
 
-The integration suite uses a repository-owned NFS-Ganesha container with the in-memory FSAL. It exposes only NFSv3 over TCP and does not mount an NFS file system on the host.
+The integration suite runs the same server-independent assertions against two maintained NFS implementations:
+
+- a repository-owned NFS-Ganesha container with the in-memory FSAL; and
+- the Ubuntu 24.04 Linux kernel NFS server, configured directly on an ephemeral CI runner or a dedicated local Ubuntu host.
+
+Both fixtures expose only NFSv3 over TCP and use explicit AUTH_SYS identities. The Ganesha container does not mount an NFS file system on the host. The kernel fixture exports a dedicated local directory and requires root privileges to install and configure the server.
 
 ## CI evidence
 
@@ -9,11 +14,12 @@ The `CI` workflow publishes NFSv3 evidence separately from the normal build, uni
 | CI job | Purpose | Artifacts |
 | --- | --- | --- |
 | `Build, test, and pack` | Restores, builds, runs non-Docker test coverage, packs NuGet artifacts, and uploads `.trx` test results. | `test-results`, `nuget-packages` |
-| `NFSv3 integration` | Starts the repository NFS-Ganesha server and runs tests marked `Category=Integration`. | `nfs-v3-integration-results` |
+| `NFSv3 integration (NFS-Ganesha)` | Starts the repository NFS-Ganesha server and runs tests marked `Category=Integration`. | `nfs-v3-integration-results` |
+| `NFSv3 integration (Linux kernel)` | Installs and configures Ubuntu's kernel NFS server, then runs the same integration tests. | `nfs-v3-kernel-integration-results` |
 
-The integration artifact includes test results plus `docker compose ps --all` output and NFS server logs captured even when tests fail. A pull request that changes verified NFSv3 behavior should have both CI jobs passing, or the PR should explain why integration coverage is not relevant.
+The integration artifacts include test results, server versions and configuration evidence, RPC registrations, export state, and server logs captured even when tests fail. A pull request that changes verified NFSv3 behavior should have both server jobs passing, or the PR should explain why one is not relevant.
 
-## Run locally
+## Run the NFS-Ganesha fixture locally
 
 Start the server:
 
@@ -51,6 +57,27 @@ docker compose -f compose.integration.yml down --volumes --remove-orphans
 
 Without `NFSSHARP_RUN_NFSV3_INTEGRATION=1`, the integration tests are skipped and the normal unit-test workflow does not require Docker.
 
+## Run the Linux kernel fixture locally
+
+Use a disposable or dedicated Ubuntu 24.04 host. The setup script installs `nfs-kernel-server` and `rpcbind`, creates `/srv/nfssharp-kernel-export`, and writes the isolated configuration files `/etc/exports.d/nfssharp.exports` and `/etc/nfs.conf.d/nfssharp.conf`. It refuses to reuse an existing export directory that it did not create.
+
+```bash
+sudo bash tests/integration/kernel-nfs/setup.sh
+trap 'sudo bash tests/integration/kernel-nfs/teardown.sh' EXIT
+
+export NFSSHARP_RUN_NFSV3_INTEGRATION=1
+export NFSSHARP_NFS_SERVER=127.0.0.1
+export NFSSHARP_NFS_EXPORT=/srv/nfssharp-kernel-export
+export NFSSHARP_NFS_EXPECTED_EXPORT_GROUP='*'
+export NFSSHARP_NFS_UID=0
+export NFSSHARP_NFS_GID=0
+dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj \
+  --configuration Release \
+  --filter 'Category=Integration'
+```
+
+The teardown script unexports the directory, stops the kernel NFS service, removes only the two fixture configuration files, and deletes the dedicated export directory after verifying its marker and resolved path. It leaves `rpcbind` and installed Ubuntu packages in place.
+
 ## Fixture layout
 
 When the integration tests connect, they create an idempotent fixture tree under `nfssharp-fixtures` in the export. Shared fixture paths are treated as read-only test data:
@@ -68,7 +95,7 @@ When the integration tests connect, they create an idempotent fixture tree under
 | `nfssharp-fixtures/no-access` | Permission-denied candidate with mode `000`, when mode bits are enforced by the server and AUTH_SYS identity. |
 | `nfssharp-fixtures/runs/run-*` | Per-test mutable workspace, removed by the fixture cleanup path. |
 
-The repository-owned Ganesha MEM server supports the common file, directory, symlink, hard-link, and mode-bit fixture cases. External servers may expose different behavior for symlink, hard-link, timestamp, or permission enforcement; tests discover those optional capabilities and only assert them when the server accepts the setup.
+Both repository fixtures support the common file, directory, symlink, hard-link, and mode-bit cases. External servers may expose different behavior for links, timestamps, or permission enforcement; tests discover optional capabilities and only assert them when the server accepts the setup.
 
 ## Test environment
 
@@ -78,11 +105,11 @@ The repository-owned Ganesha MEM server supports the common file, directory, sym
 | `NFSSHARP_NFS_SERVER` | `127.0.0.1` | NFS server address. |
 | `NFSSHARP_NFS_EXPORT` | `/export` | NFSv3 export path. |
 | `NFSSHARP_NFS_PORTMAP_PORT` | `111` | Host TCP port used to reach portmapper/rpcbind. Set this when `NFSSHARP_INTEGRATION_PORTMAP_PORT` maps the repository container to a non-default host port. |
-| `NFSSHARP_NFS_EXPECTED_EXPORT_GROUP` | `*` only when server and export use implicit defaults; otherwise unset | Optional access group to assert in mountd export-list results. Leave unset for external servers where the advertised group is server-specific or empty. |
+| `NFSSHARP_NFS_EXPECTED_EXPORT_GROUP` | `*` only when server and export use implicit defaults; otherwise unset | Optional access group to assert in mountd export-list results. Both repository fixtures explicitly use `*`; leave it unset for external servers where the advertised group is server-specific or empty. |
 | `NFSSHARP_NFS_UID` | `0` | AUTH_SYS user ID. |
 | `NFSSHARP_NFS_GID` | `0` | AUTH_SYS primary group ID. |
 
-The image uses Ubuntu 24.04 pinned by OCI digest and installs the Ubuntu package versions of NFS-Ganesha, its in-memory FSAL, and rpcbind. The exported fixture is reached through portmapper v2, mount protocol v3, and NFS protocol v3 over TCP. Tests use AUTH_SYS credentials from `NFSSHARP_NFS_UID` and `NFSSHARP_NFS_GID`; the CI defaults are UID `0` and GID `0`. The container health check verifies portmapper v2, mount protocol v3, and NFS protocol v3 before tests run.
+The Ganesha image uses Ubuntu 24.04 pinned by OCI digest and installs the Ubuntu package versions of NFS-Ganesha, its in-memory FSAL, and rpcbind. The second job pins the runner to Ubuntu 24.04 and installs the distribution's maintained `nfs-kernel-server` package. Both exports are reached through portmapper v2, mount protocol v3, and NFS protocol v3 over TCP. Tests use AUTH_SYS credentials from `NFSSHARP_NFS_UID` and `NFSSHARP_NFS_GID`; CI uses UID `0` and GID `0`, with root squashing disabled only for these isolated fixtures. Each setup verifies the three RPC programs before tests run.
 
 ## M1 completion evidence
 

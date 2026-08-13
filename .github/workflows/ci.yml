@@ -79,8 +79,8 @@ jobs:
             artifacts/packages/*.snupkg
           if-no-files-found: error
 
-  nfs-v3-integration:
-    name: NFSv3 integration
+  nfs-v3-ganesha-integration:
+    name: NFSv3 integration (NFS-Ganesha)
     runs-on: ubuntu-latest
 
     steps:
@@ -130,3 +130,66 @@ jobs:
       - name: Stop NFSv3 test server
         if: always()
         run: docker compose -f compose.integration.yml down --volumes --remove-orphans
+
+  nfs-v3-kernel-integration:
+    name: NFSv3 integration (Linux kernel)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Start Linux kernel NFSv3 server
+        run: sudo bash tests/integration/kernel-nfs/setup.sh
+
+      - name: Run NFSv3 integration tests
+        env:
+          NFSSHARP_RUN_NFSV3_INTEGRATION: "1"
+          NFSSHARP_NFS_SERVER: 127.0.0.1
+          NFSSHARP_NFS_EXPORT: /srv/nfssharp-kernel-export
+          NFSSHARP_NFS_EXPECTED_EXPORT_GROUP: "*"
+          NFSSHARP_NFS_UID: "0"
+          NFSSHARP_NFS_GID: "0"
+        run: >
+          dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj
+          --configuration ${{ env.CONFIGURATION }}
+          --filter "Category=Integration"
+          --logger trx
+          --results-directory TestResults/NfsV3KernelIntegration
+
+      - name: Capture Linux kernel NFSv3 evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p TestResults/NfsV3KernelIntegration
+          {
+            uname -a
+            cat /etc/os-release
+            dpkg-query --show --showformat='${Package} ${Version}\n' nfs-kernel-server nfs-common rpcbind
+          } > TestResults/NfsV3KernelIntegration/server-version.txt 2>&1
+          sudo rpcinfo -p 127.0.0.1 > TestResults/NfsV3KernelIntegration/rpcinfo.txt 2>&1
+          sudo showmount -e 127.0.0.1 > TestResults/NfsV3KernelIntegration/exports.txt 2>&1
+          sudo exportfs -v > TestResults/NfsV3KernelIntegration/exportfs.txt 2>&1
+          sudo cat /proc/fs/nfsd/versions > TestResults/NfsV3KernelIntegration/nfs-versions.txt 2>&1
+          sudo journalctl --no-pager -u rpcbind.service -u nfs-server.service > TestResults/NfsV3KernelIntegration/nfs-server.log 2>&1
+
+      - name: Upload Linux kernel NFSv3 results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nfs-v3-kernel-integration-results
+          path: TestResults/NfsV3KernelIntegration
+          if-no-files-found: error
+
+      - name: Stop Linux kernel NFSv3 server
+        if: always()
+        run: sudo bash tests/integration/kernel-nfs/teardown.sh

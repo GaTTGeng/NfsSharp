@@ -42,7 +42,7 @@ An implemented method without real-server verification remains partial or experi
 | NFSv4.0 COMPOUND operations | **Experimental** | M5 |
 | NFSv4.1 sessions and stateful operations | **Experimental** | M5 |
 | NFSv4.2 SEEK, ALLOCATE, DEALLOCATE, COPY, and CLONE | **Experimental** | M5 |
-| Multi-server interoperability matrix | **Planned** | M1/M7 |
+| Multi-server interoperability matrix | **Partial** | M2/M7 |
 | IPv6 and additional transport support | **Research** | M7 |
 
 ## NFSv3 Behavior Matrix
@@ -96,9 +96,16 @@ Packet normalization may remove transport identifiers or other non-semantic valu
 
 ## Current Integration Evidence
 
-The repository NFSv3 integration job uses the Docker fixture documented in [tests/integration/README.md](../tests/integration/README.md): NFS-Ganesha with the in-memory FSAL on Ubuntu 24.04, portmapper v2, mount protocol v3, NFS protocol v3 over TCP, and AUTH_SYS credentials. CI uploads `.trx` results, `docker compose ps --all`, and server logs as the `nfs-v3-integration-results` artifact.
+The repository runs the shared NFSv3 integration suite against both fixtures documented in [tests/integration/README.md](../tests/integration/README.md). CI retains `.trx` results and server diagnostics even when a test fails.
 
-Only behaviors covered by those real-server tests are described as verified in the NFSv3 matrix. Behaviors that depend on other server implementations, identity mapping, transport failures, unsupported-operation status production, or broader security policy remain partial, experimental, planned, or research items.
+| Server baseline | Server and storage | Explicit wire/security configuration | Intentional behavior differences | CI evidence |
+| --- | --- | --- | --- | --- |
+| NFS-Ganesha | Ubuntu 24.04 container, Ganesha 4.3 package, in-memory FSAL | Portmapper v2, mount v3, NFSv3 over TCP, AUTH_SYS UID/GID `0`, `/export` advertised to `*` | FSSTAT capacity and PATHCONF link limits may be reported as unavailable (`0`). Replacing an existing rename target currently returns `IO` and preserves both files. | `nfs-v3-integration-results` contains `.trx`, Compose state, and server logs. |
+| Linux kernel NFS | Ubuntu 24.04 runner, maintained `nfs-kernel-server` package, runner file system | Portmapper v2, mount v3, NFSv3 over TCP only, AUTH_SYS UID/GID `0`, `insecure`, `no_root_squash`, `/srv/nfssharp-kernel-export` advertised to `*` | Capacity and link-limit fields reflect the backing file system. POSIX replacement rename succeeds and replaces the target. | `nfs-v3-kernel-integration-results` contains `.trx`, OS/package/kernel versions, RPC/export state, enabled NFS versions, and service logs. |
+
+The shared assertions cover discovery and repeated mount/unmount, metadata and ACCESS, directory enumeration and pagination, reads, writes and COMMIT, create/remove/rename/link/attribute mutations, and FSSTAT/FSINFO/PATHCONF queries. Assertions accept only documented protocol-valid differences: optional link/permission capabilities, unavailable zero-valued capacity fields, and the known Ganesha MEM replacement-rename result. They do not generalize either fixture's storage-specific values.
+
+This is a two-server baseline rather than a broad production-support claim. UDP, Kerberos/RPCSEC_GSS, identity mapping beyond the isolated AUTH_SYS credentials, server restart/verifier recovery, larger data sets, cross-file-system operations, unsupported-operation policies, and additional server implementations remain unresolved.
 
 ## Reporting a Gap
 
