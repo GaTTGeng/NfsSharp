@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Validate NFSv3 mutation, durability, and capability procedure result arms with status-preserving fixtures, and reject malformed FSINFO `time_delta` nanoseconds values.
 - Hardened NFSv3 read-side result validation: reject ACCESS grants outside the requested mask, bound READ response data to the requested size, reject non-terminal empty READ responses, and surface unsupported `fattr3` file sizes as protocol exceptions.
 - Validate complete ONC RPC reply envelopes, including XID correlation, accepted and denied failure variants, reply verifier bounds, and invalid discriminators before exposing a procedure result.
 - Hardened NFSv3 RPC record decoding for fragmented and truncated records, and reject non-zero XDR padding bytes.
