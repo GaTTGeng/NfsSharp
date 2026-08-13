@@ -41,6 +41,26 @@ internal static class NfsV3IntegrationEnvironment
 
     public static int PortmapPort => ReadInt32("NFSSHARP_NFS_PORTMAP_PORT", 111);
 
+    public static NfsV3ReplacementRenameOutcome ExpectedReplacementRenameOutcome
+    {
+        get
+        {
+            var value = Environment.GetEnvironmentVariable(
+                "NFSSHARP_NFS_EXPECTED_REPLACEMENT_RENAME_OUTCOME");
+            if (string.IsNullOrWhiteSpace(value))
+                return NfsV3ReplacementRenameOutcome.Unspecified;
+
+            return value.Trim().ToLowerInvariant() switch
+            {
+                "replace-target" => NfsV3ReplacementRenameOutcome.ReplaceTarget,
+                "io-preserves-both" => NfsV3ReplacementRenameOutcome.IoPreservesBoth,
+                _ => throw new InvalidOperationException(
+                    "NFSSHARP_NFS_EXPECTED_REPLACEMENT_RENAME_OUTCOME must be " +
+                    "'replace-target' or 'io-preserves-both'.")
+            };
+        }
+    }
+
     private static bool UsesDefaultExportEndpoint =>
         string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NFSSHARP_NFS_SERVER")) &&
         string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NFSSHARP_NFS_EXPORT"));
@@ -66,4 +86,11 @@ internal static class NfsV3IntegrationEnvironment
             ? parsed
             : throw new InvalidOperationException($"{name} must be a TCP port number.");
     }
+}
+
+internal enum NfsV3ReplacementRenameOutcome
+{
+    Unspecified,
+    ReplaceTarget,
+    IoPreservesBoth
 }

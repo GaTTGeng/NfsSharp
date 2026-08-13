@@ -972,6 +972,7 @@ public sealed class NfsV3IntegrationTests
         await WriteBytesAsync(client, replacementSource, [0xAA, 0xBB], timeout.Token);
         await WriteBytesAsync(client, replacementTarget, [0xCC], timeout.Token);
 
+        var replacementOutcome = NfsV3ReplacementRenameOutcome.ReplaceTarget;
         try
         {
             await client.MoveAsync(replacementSource, replacementTarget, timeout.Token);
@@ -982,7 +983,13 @@ public sealed class NfsV3IntegrationTests
         {
             Assert.Equal(new byte[] { 0xAA, 0xBB }, await ReadBytesAsync(client, replacementSource, timeout.Token));
             Assert.Equal(new byte[] { 0xCC }, await ReadBytesAsync(client, replacementTarget, timeout.Token));
+            replacementOutcome = NfsV3ReplacementRenameOutcome.IoPreservesBoth;
         }
+
+        var expectedReplacementOutcome =
+            NfsV3IntegrationEnvironment.ExpectedReplacementRenameOutcome;
+        if (expectedReplacementOutcome != NfsV3ReplacementRenameOutcome.Unspecified)
+            Assert.Equal(expectedReplacementOutcome, replacementOutcome);
 
         var missingSource = await Assert.ThrowsAsync<NfsException>(
             () => client.MoveAsync(fixture.GetRunPath("missing-source.txt"), fixture.GetRunPath("missing-target.txt"), timeout.Token));
