@@ -337,6 +337,8 @@ public sealed class NfsV3Client : IAsyncDisposable
         var maxFileSize = reader.ULong();
         var timeDeltaSec = reader.UInt();
         var timeDeltaNsec = reader.UInt();
+        if (timeDeltaNsec >= 1_000_000_000)
+            throw new NfsException($"FSINFO returned an invalid time_delta nanoseconds value {timeDeltaNsec}.");
         var properties = reader.UInt();
 
         return new NfsFileSystemInfo

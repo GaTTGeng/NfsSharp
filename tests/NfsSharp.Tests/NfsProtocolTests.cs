@@ -936,6 +936,295 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_MutationResultsPreserveStatusesAndOptionalMetadata()
+    {
+        // RFC 1813 §§3.3.2 and 3.3.8-3.3.15 use WCC data even when optional
+        // pre- and post-operation attributes are unavailable.
+        uint[] procedures = [2, 2, 8, 8, 9, 9, 12, 12, 13, 13, 14, 14, 15, 15, 10, 10];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            return NfsReply(call, writer =>
+            {
+                switch (index)
+                {
+                    case 0:
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteWccData(writer);
+                        break;
+                    case 1:
+                        writer.UInt(NfsV3Status.Access);
+                        WriteWccData(writer);
+                        break;
+                    case 2:
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteDiropResult(writer, [0xC8]);
+                        break;
+                    case 3:
+                        writer.UInt(NfsV3Status.Exist);
+                        WriteWccData(writer);
+                        break;
+                    case 4:
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteDiropResult(writer, [0xC9]);
+                        break;
+                    case 5:
+                        writer.UInt(NfsV3Status.Exist);
+                        WriteWccData(writer);
+                        break;
+                    case 6:
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteWccData(writer);
+                        break;
+                    case 7:
+                        writer.UInt(NfsV3Status.NoEnt);
+                        WriteWccData(writer);
+                        break;
+                    case 8:
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteWccData(writer);
+                        break;
+                    case 9:
+                        writer.UInt(NfsV3Status.NotEmpty);
+                        WriteWccData(writer);
+                        break;
+                    case 10:
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteWccData(writer);
+                        WriteWccData(writer);
+                        break;
+                    case 11:
+                        writer.UInt(NfsV3Status.NoEnt);
+                        WriteWccData(writer);
+                        WriteWccData(writer);
+                        break;
+                    case 12:
+                        writer.UInt(NfsV3Status.Ok);
+                        WritePostOpAttr(writer, present: false);
+                        WriteWccData(writer);
+                        break;
+                    case 13:
+                        writer.UInt(NfsV3Status.Stale);
+                        WritePostOpAttr(writer, present: false);
+                        WriteWccData(writer);
+                        break;
+                    case 14:
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteDiropResult(writer, [0xCA]);
+                        break;
+                    case 15:
+                        writer.UInt(NfsV3Status.Exist);
+                        WriteWccData(writer);
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unexpected mutation fixture request {index}.");
+                }
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            await client.SetAttributesAsync(FixtureHandle, new NfsSetAttributes { Mode = 0x1A4 }, CancellationToken.None);
+            await AssertStatusAsync(NfsV3Status.Access, () => client.SetAttributesAsync(FixtureHandle, new NfsSetAttributes(), CancellationToken.None));
+
+            Assert.Equal([0xC8], (await client.CreateFileAsync(FixtureHandle, "created", null, CancellationToken.None)).Handle);
+            await AssertStatusAsync(NfsV3Status.Exist, () => client.CreateFileAsync(FixtureHandle, "created", null, CancellationToken.None));
+
+            Assert.Equal([0xC9], (await client.CreateDirectoryAsync(FixtureHandle, "directory", null, CancellationToken.None)).Handle);
+            await AssertStatusAsync(NfsV3Status.Exist, () => client.CreateDirectoryAsync(FixtureHandle, "directory", null, CancellationToken.None));
+
+            await client.DeleteFileAsync("removed", CancellationToken.None);
+            await AssertStatusAsync(NfsV3Status.NoEnt, () => client.DeleteFileAsync("missing", CancellationToken.None));
+
+            await client.DeleteDirectoryAsync("removed-directory", recursive: false, CancellationToken.None);
+            await AssertStatusAsync(NfsV3Status.NotEmpty, () => client.DeleteDirectoryAsync("nonempty-directory", recursive: false, CancellationToken.None));
+
+            await client.MoveAsync("from", "to", CancellationToken.None);
+            await AssertStatusAsync(NfsV3Status.NoEnt, () => client.MoveAsync("missing", "to", CancellationToken.None));
+
+            await client.CreateHardLinkAsync([0xD1], FixtureHandle, "hard-link", CancellationToken.None);
+            await AssertStatusAsync(NfsV3Status.Stale, () => client.CreateHardLinkAsync([0xD1], FixtureHandle, "stale-link", CancellationToken.None));
+
+            Assert.Equal([0xCA], (await client.CreateSymLinkAsync(FixtureHandle, "symbolic-link", "target", null, CancellationToken.None)).Handle);
+            await AssertStatusAsync(NfsV3Status.Exist, () => client.CreateSymLinkAsync(FixtureHandle, "symbolic-link", "target", null, CancellationToken.None));
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_WriteAndCommitResultsValidateWireFieldsAndBoundaries()
+    {
+        byte[] writeVerifier = [0, 1, 2, 3, 4, 5, 6, 7];
+        byte[] commitVerifier = [7, 6, 5, 4, 3, 2, 1, 0];
+        uint[] procedures = [7, 7, 7, 7, 21, 21, 21];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            if (index == 4)
+            {
+                var request = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, request.Opaque());
+                Assert.Equal(12ul, request.ULong());
+                Assert.Equal(34u, request.UInt());
+                Assert.Equal(0, request.Remaining);
+            }
+
+            return NfsReply(call, writer =>
+            {
+                writer.UInt(index is 1 or 5 ? NfsV3Status.Stale : NfsV3Status.Ok);
+                WriteWccData(writer);
+                switch (index)
+                {
+                    case 0:
+                        writer.UInt(3);
+                        writer.UInt((uint)NfsWriteStableHow.DataSync);
+                        writer.FixedBytes(writeVerifier);
+                        break;
+                    case 2:
+                        writer.UInt(1);
+                        writer.UInt(99);
+                        writer.FixedBytes(writeVerifier);
+                        break;
+                    case 3:
+                        writer.UInt(1);
+                        writer.UInt((uint)NfsWriteStableHow.FileSync);
+                        writer.FixedBytes([0x01, 0x02, 0x03, 0x04]);
+                        break;
+                    case 4:
+                        writer.FixedBytes(commitVerifier);
+                        break;
+                    case 6:
+                        writer.FixedBytes([0x01, 0x02, 0x03, 0x04]);
+                        break;
+                }
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port) with { MaxRetries = 0 }, CancellationToken.None);
+        try
+        {
+            var write = await client.WriteAtWithResultAsync(FixtureHandle, 4, new byte[] { 0x10, 0x11, 0x12 }, CancellationToken.None);
+            Assert.Equal(3, write.Count);
+            Assert.Equal(NfsWriteStableHow.DataSync, write.Committed);
+            Assert.Equal(writeVerifier, write.WriteVerifier);
+
+            await AssertStatusAsync(NfsV3Status.Stale, () => client.WriteAtWithResultAsync(FixtureHandle, 0, new byte[] { 0x10 }, CancellationToken.None));
+
+            var invalidStability = await Assert.ThrowsAsync<NfsException>(
+                () => client.WriteAtWithResultAsync(FixtureHandle, 0, new byte[] { 0x10 }, CancellationToken.None));
+            Assert.Contains("Invalid committed write stability mode", invalidStability.Message);
+
+            var truncatedWrite = await Assert.ThrowsAsync<NfsException>(
+                () => client.WriteAtWithResultAsync(FixtureHandle, 0, new byte[] { 0x10 }, CancellationToken.None));
+            Assert.Contains("Need 8 bytes", truncatedWrite.Message);
+
+            var commit = await client.CommitWithResultAsync(FixtureHandle, 12, 34, CancellationToken.None);
+            Assert.Equal(commitVerifier, commit.WriteVerifier);
+
+            await AssertStatusAsync(NfsV3Status.Stale, () => client.CommitWithResultAsync(FixtureHandle, 0, 0, CancellationToken.None));
+
+            var truncatedCommit = await Assert.ThrowsAsync<NfsException>(
+                () => client.CommitWithResultAsync(FixtureHandle, 0, 0, CancellationToken.None));
+            Assert.Contains("Need 8 bytes", truncatedCommit.Message);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_CapabilityResultsHandleZeroValuesStatusesAndBoundaries()
+    {
+        uint[] procedures = [18, 18, 19, 19, 19, 20, 20];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            return NfsReply(call, writer =>
+            {
+                writer.UInt(index is 1 or 3 or 6 ? NfsV3Status.Stale : NfsV3Status.Ok);
+                WritePostOpAttr(writer, present: false);
+                switch (index)
+                {
+                    case 0:
+                        for (var field = 0; field < 6; field++)
+                            writer.ULong(0);
+                        writer.UInt(0);
+                        break;
+                    case 2:
+                        for (var field = 0; field < 7; field++)
+                            writer.UInt(0);
+                        writer.ULong(0);
+                        writer.UInt(0);
+                        writer.UInt(0);
+                        writer.UInt(0);
+                        break;
+                    case 4:
+                        for (var field = 0; field < 7; field++)
+                            writer.UInt(0);
+                        writer.ULong(0);
+                        writer.UInt(0);
+                        writer.UInt(1_000_000_000);
+                        writer.UInt(0);
+                        break;
+                    case 5:
+                        writer.UInt(0);
+                        writer.UInt(0);
+                        for (var field = 0; field < 4; field++)
+                            writer.Bool(false);
+                        break;
+                }
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            var stat = await client.GetFileSystemStatAsync(FixtureHandle, CancellationToken.None);
+            Assert.Equal(0ul, stat.TotalBytes);
+            Assert.Equal(TimeSpan.Zero, stat.InvariantUntil);
+            await AssertStatusAsync(NfsV3Status.Stale, () => client.GetFileSystemStatAsync(FixtureHandle, CancellationToken.None));
+
+            var info = await client.GetFileSystemInfoAsync(FixtureHandle, CancellationToken.None);
+            Assert.Equal(0u, info.MaxReadSize);
+            Assert.Equal(TimeSpan.Zero, info.TimeDelta);
+            await AssertStatusAsync(NfsV3Status.Stale, () => client.GetFileSystemInfoAsync(FixtureHandle, CancellationToken.None));
+
+            var invalidDelta = await Assert.ThrowsAsync<NfsException>(
+                () => client.GetFileSystemInfoAsync(FixtureHandle, CancellationToken.None));
+            Assert.Contains("time_delta nanoseconds", invalidDelta.Message);
+
+            var pathConf = await client.GetPathConfAsync(FixtureHandle, CancellationToken.None);
+            Assert.Equal(0u, pathConf.LinkMax);
+            Assert.False(pathConf.NoTrunc);
+            await AssertStatusAsync(NfsV3Status.Stale, () => client.GetPathConfAsync(FixtureHandle, CancellationToken.None));
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
     public void MountV3Status_DescribesKnownValues()
     {
         Assert.Equal("ACCESS", MountV3Status.Describe(MountV3Status.Access));
@@ -1241,6 +1530,26 @@ public class NfsModelsTests
         writer.Bool(present);
         if (present)
             WriteFattr3(writer, NfsType.Reg, 0);
+    }
+
+    private static void WriteWccData(XdrWriter writer)
+    {
+        writer.Bool(false); // pre-operation attributes unavailable
+        WritePostOpAttr(writer, present: false);
+    }
+
+    private static void WriteDiropResult(XdrWriter writer, byte[] fileHandle)
+    {
+        writer.Bool(true);
+        writer.Opaque(fileHandle);
+        WritePostOpAttr(writer, present: false);
+        WriteWccData(writer);
+    }
+
+    private static async Task AssertStatusAsync(uint expectedStatus, Func<Task> operation)
+    {
+        var exception = await Assert.ThrowsAsync<NfsException>(operation);
+        Assert.Equal(expectedStatus, exception.Status);
     }
 
     private static void WriteFattr3(XdrWriter writer, NfsType type, ulong size, ulong fileId = 1)
