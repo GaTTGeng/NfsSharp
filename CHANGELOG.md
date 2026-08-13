@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Added an Ubuntu 24.04 Linux kernel NFSv3 integration fixture and CI job as a second-server interoperability baseline, including retained server diagnostics and cross-server compatibility documentation.
 
+### Changed
+
+- Reconciled the public roadmap with completed M1 and M2 delivery evidence and made M3 reliability and production I/O the current implementation focus without broadening the documented NFS compatibility contract.
+
 ### Fixed
 
 - Validate NFSv3 mutation, durability, and capability procedure result arms with status-preserving fixtures, and reject malformed FSINFO `time_delta` nanoseconds values.

@@ -4,17 +4,26 @@ NfsSharp is evolving into a dependable managed NFS SDK for .NET applications tha
 
 > This document records delivery intent and acceptance criteria, not release dates or a compatibility guarantee. GitHub milestones and issues are the source of truth for work assignment. The [compatibility matrix](nfs-compatibility.md) is the source of truth for supported behavior.
 
-## Current Focus: Close M1, Then Start M2
+## Current Focus: Start M3 Reliability and Production I/O
 
-The repository already has a repeatable NFS-Ganesha NFSv3 integration job, CI artifact collection, and real-server tests for discovery, mount lifecycle, metadata, directory traversal, I/O, mutations, capability queries, cache behavior, cancellation, and a reconnect/retry path. This is enough evidence to reconcile and close **M1: NFSv3 Integration Baseline** once its issue tracker matches that evidence.
+**M1: NFSv3 Integration Baseline** and **M2: NFSv3 Protocol Conformance** are complete. Together they established repeatable real-server integration coverage, bounded XDR and ONC RPC decoding, status-preserving protocol fixtures, explicit portmapper and mount failure behavior, and a two-server NFSv3 interoperability baseline.
 
-The next implementation milestone is **M2: NFSv3 Protocol Conformance**. It turns the existing behavior coverage into procedure-level protocol confidence: reproducible wire fixtures, malformed input limits, portmapper and mount variants, and representative-server checks. M3 reliability work may begin only where it supplies a deterministic fault harness needed by M2; it must not turn into an unbounded production-features stream before M2 has clear procedure semantics.
+The next implementation milestone is **M3: Reliability and Production I/O**. It turns the M1/M2 protocol baseline into deterministic recovery behavior for timeouts, cancellation races, disconnects, server restarts, partial I/O, verifier changes, cache concurrency, and stale handles. M6 public-SDK work remains cross-cutting, while M7 compatibility research may inform support decisions without silently expanding the current compatibility contract.
 
-### Immediate tracker actions
+### M2 completion evidence
 
-1. Reconcile M1 issues [#14](https://github.com/GaTTGeng/NfsSharp/issues/14), [#15](https://github.com/GaTTGeng/NfsSharp/issues/15), [#17](https://github.com/GaTTGeng/NfsSharp/issues/17), and [#19](https://github.com/GaTTGeng/NfsSharp/issues/19) against their current integration tests and compatibility-matrix rows. Close each issue only after its acceptance evidence is linked from the issue.
-2. Close [M1](https://github.com/GaTTGeng/NfsSharp/milestone/1) after those four issues are reconciled and the NFSv3 integration CI job is green on `master`.
-3. Create the M2 issues listed below, label them `protocol` and `compatibility`, and give each a focused RFC section, test fixture, and server-evidence requirement.
+| Workstream | Issue | Pull request | Completion evidence |
+| --- | --- | --- | --- |
+| XDR and RPC TCP record limits | [#50](https://github.com/GaTTGeng/NfsSharp/issues/50) | [#58](https://github.com/GaTTGeng/NfsSharp/pull/58) | Byte fixtures cover fragmentation, truncation, non-zero padding, invalid booleans, opaque-length bounds, and the 64 MiB aggregate record ceiling. |
+| ONC RPC replies and AUTH_SYS boundaries | [#51](https://github.com/GaTTGeng/NfsSharp/issues/51) | [#59](https://github.com/GaTTGeng/NfsSharp/pull/59) | Fixtures distinguish accepted and denied replies, validate XID/verifier/discriminator ordering, preserve RPC failure context, and cover AUTH_SYS machine-name and auxiliary-group limits. |
+| Portmapper and mount variants | [#52](https://github.com/GaTTGeng/NfsSharp/issues/52) | [#60](https://github.com/GaTTGeng/NfsSharp/pull/60) | Fixtures cover unavailable and invalid mappings, RPC rejection context, export-list variants, mount statuses, and observable idempotent unmount cleanup. |
+| Read, lookup, and directory result semantics | [#53](https://github.com/GaTTGeng/NfsSharp/issues/53) | [#61](https://github.com/GaTTGeng/NfsSharp/pull/61) | RFC 1813 fixtures cover success/status/optional arms, READ count and EOF consistency, ACCESS masks, file-size bounds, and READDIR/READDIRPLUS continuation and malformed pages. |
+| Mutation, durability, and capability result semantics | [#54](https://github.com/GaTTGeng/NfsSharp/issues/54) | [#64](https://github.com/GaTTGeng/NfsSharp/pull/64) | Fixtures preserve mutation statuses and WCC arms, validate WRITE/COMMIT fields and boundaries, and cover FSSTAT/FSINFO/PATHCONF zero-valued, status, and malformed results. |
+| Second-server interoperability baseline | [#55](https://github.com/GaTTGeng/NfsSharp/issues/55) | [#65](https://github.com/GaTTGeng/NfsSharp/pull/65) | The shared NFSv3 suite runs against NFS-Ganesha MEM and Ubuntu 24.04 Linux kernel NFS with explicit server-specific expectations and retained failure diagnostics. |
+
+Final M2 validation used NFSv3 over TCP with AUTH_SYS. Release restore, build, and unit tests passed with 92 tests passing and 36 opt-in integration tests skipped; the `Build, test, and pack`, `NFSv3 integration (NFS-Ganesha)`, and `NFSv3 integration (Linux kernel)` jobs passed on the final M2 implementation commit. The [compatibility matrix](nfs-compatibility.md) records the exact covered behavior and retained evidence.
+
+Completing M2 does not promote every tracked capability from partial to supported. UDP, Kerberos/RPCSEC_GSS, recovery and fault injection, identity mapping beyond the isolated AUTH_SYS fixtures, broad production support for all servers, and additional implementations remain assigned to later milestones or explicitly out of scope.
 
 ## Delivery Principles
 
@@ -30,35 +39,36 @@ The next implementation milestone is **M2: NFSv3 Protocol Conformance**. It turn
 
 | Milestone | Status | Outcome | Exit gate |
 | --- | --- | --- | --- |
-| [M1: NFSv3 Integration Baseline](https://github.com/GaTTGeng/NfsSharp/milestone/1) | Closing | Reproducible NFSv3 real-server baseline and evidence trail. | All M1 issues reconciled; CI NFSv3 integration job green; matrix links the covered behavior and remaining gaps. |
-| [M2: NFSv3 Protocol Conformance](https://github.com/GaTTGeng/NfsSharp/milestone/2) | Next | RFC-grounded XDR, ONC RPC, portmapper, mount, and NFSv3 procedure semantics. | Focused fixtures cover valid, boundary, and malformed messages; primary NFSv3 flows run on NFS-Ganesha plus one additional server. |
-| [M3: Reliability and Production I/O](https://github.com/GaTTGeng/NfsSharp/milestone/3) | Planned | Deterministic recovery behavior under real transport and server failures. | Fault-injection suite covers timeout, cancellation, disconnect, restart, partial I/O, cache races, and stale handles; retry contract is documented. |
+| [M1: NFSv3 Integration Baseline](https://github.com/GaTTGeng/NfsSharp/milestone/1) | Completed | Reproducible NFSv3 real-server baseline and evidence trail. | All M1 issues reconciled; CI NFSv3 integration job green; matrix links the covered behavior and remaining gaps. |
+| [M2: NFSv3 Protocol Conformance](https://github.com/GaTTGeng/NfsSharp/milestone/2) | Completed | RFC-grounded XDR, ONC RPC, portmapper, mount, and NFSv3 procedure semantics. | Focused fixtures cover valid, boundary, and malformed messages; primary NFSv3 flows run on NFS-Ganesha plus one additional server. |
+| [M3: Reliability and Production I/O](https://github.com/GaTTGeng/NfsSharp/milestone/3) | Current | Deterministic recovery behavior under real transport and server failures. | Fault-injection suite covers timeout, cancellation, disconnect, restart, partial I/O, cache races, and stale handles; retry contract is documented. |
 | [M4: RPCSEC_GSS and Kerberos](https://github.com/GaTTGeng/NfsSharp/milestone/4) | Planned | Interoperable AUTH_GSS authentication, integrity, and privacy. | Kerberos integration tests prove context creation, rollover, integrity, privacy, expiry, and failure cleanup on supported platforms. |
 | [M5: NFSv4 Stabilization](https://github.com/GaTTGeng/NfsSharp/milestone/5) | Planned | A validated, versioned direct NFSv4 COMPOUND surface. | v4.0, v4.1, and v4.2 are validated independently for their supported operations, state/session lifecycle, recovery, and security; no facade promotion yet. |
 | [M6: Public SDK Hardening](https://github.com/GaTTGeng/NfsSharp/milestone/6) | Cross-cutting | A consumable, diagnosable, package-quality SDK. | Public API review, XML docs, examples, diagnostics, nullable/analyzer checks, package validation, and support policy are complete for each released surface. |
 | [M7: Compatibility Expansion Research](https://github.com/GaTTGeng/NfsSharp/milestone/7) | Research | Evidence-based expansion of support claims. | Published server/transport/framework matrix and an explicit decision for every proposed support tier. |
 
-M6 runs alongside M2–M5 when a public surface changes. M7 informs M2–M5 but does not block a narrowly scoped release unless it changes an advertised compatibility claim.
+M6 runs alongside M3–M5 when a public surface changes. M7 informs M3–M5 but does not block a narrowly scoped release unless it changes an advertised compatibility claim.
 
-## Scope and Suggested Issue Breakdown
+## Delivered Scope and Suggested Next Work
 
-### M1 — NFSv3 Integration Baseline (closing)
+### M1 — NFSv3 Integration Baseline (completed)
 
 **In scope:** retain the Docker NFS-Ganesha fixture, deterministic test materialization, integration CI, test-result/server-log artifacts, and documented behavior evidence.
 
 **Out of scope:** a second server, fault injection beyond the current reconnect coverage, and any new public capability.
 
-**Tracker reconciliation:** #14 directory enumeration, #15 lookup/attributes/access/links, #17 write/COMMIT, and #19 attribute mutation already have matching coverage in `NfsV3IntegrationTests` and matrix rows. Their closing comments should name the test method(s), CI workflow, and any remaining cross-server gaps rather than silently implying universal support.
+**Tracker reconciliation:** [#14](https://github.com/GaTTGeng/NfsSharp/issues/14) directory enumeration, [#15](https://github.com/GaTTGeng/NfsSharp/issues/15) lookup/attributes/access/links, [#17](https://github.com/GaTTGeng/NfsSharp/issues/17) write/COMMIT, and [#19](https://github.com/GaTTGeng/NfsSharp/issues/19) attribute mutation were closed with matching `NfsV3IntegrationTests`, CI, and compatibility-matrix evidence.
 
-### M2 — NFSv3 Protocol Conformance (next)
+### M2 — NFSv3 Protocol Conformance (completed)
 
-Create focused issues in this order:
+Completed workstreams:
 
-1. **XDR and record-marking limits.** Add fixtures for fragmentation, padding, maximum lengths, truncation, invalid booleans/enums, and the 64 MiB RPC-record ceiling.
-2. **ONC RPC reply and authentication semantics.** Cover accepted/denied replies, verifier handling, XID behavior, malformed reply ordering, and AUTH_SYS boundary values.
-3. **Portmapper and mount protocol variants.** Cover unavailable mappings, wrong program/version/procedure, empty and denied exports, mount status mapping, and unmount failure behavior.
-4. **NFSv3 procedure result semantics.** For every supported procedure, test success, expected NFS status, missing optional attributes, count/EOF consistency, cookie-verifier behavior, and response-size boundaries.
-5. **Second-server interoperability baseline.** Run the existing primary workflow against one maintained server distinct from the repository's in-memory NFS-Ganesha fixture (for example Linux kernel NFS), document intentional differences, and add only stable assertions to CI.
+1. **XDR and record-marking limits ([#50](https://github.com/GaTTGeng/NfsSharp/issues/50), [PR #58](https://github.com/GaTTGeng/NfsSharp/pull/58)).** Added bounded framing and XDR fixtures for fragmentation, padding, maximum lengths, truncation, malformed values, and the 64 MiB RPC-record ceiling.
+2. **ONC RPC reply and authentication semantics ([#51](https://github.com/GaTTGeng/NfsSharp/issues/51), [PR #59](https://github.com/GaTTGeng/NfsSharp/pull/59)).** Covered accepted/denied replies, verifier handling, XID behavior, malformed reply ordering, and AUTH_SYS boundary values.
+3. **Portmapper and mount protocol variants ([#52](https://github.com/GaTTGeng/NfsSharp/issues/52), [PR #60](https://github.com/GaTTGeng/NfsSharp/pull/60)).** Covered unavailable mappings, wrong program/version/procedure replies, export-list variants, mount status mapping, and unmount failure behavior.
+4. **Read, lookup, and directory result semantics ([#53](https://github.com/GaTTGeng/NfsSharp/issues/53), [PR #61](https://github.com/GaTTGeng/NfsSharp/pull/61)).** Added success, expected-status, optional-attribute, response-boundary, and directory-continuation fixtures.
+5. **Mutation, durability, and capability result semantics ([#54](https://github.com/GaTTGeng/NfsSharp/issues/54), [PR #64](https://github.com/GaTTGeng/NfsSharp/pull/64)).** Added status-preserving mutation/WCC fixtures and WRITE, COMMIT, FSSTAT, FSINFO, and PATHCONF validation.
+6. **Second-server interoperability baseline ([#55](https://github.com/GaTTGeng/NfsSharp/issues/55), [PR #65](https://github.com/GaTTGeng/NfsSharp/pull/65)).** Runs the primary workflow against Linux kernel NFS in addition to NFS-Ganesha, documents intentional differences, and retains only explicit server-independent or fixture-specific assertions in CI.
 
 **Non-goals:** UDP support, automatic mutation replay, and adding new high-level APIs.
 
