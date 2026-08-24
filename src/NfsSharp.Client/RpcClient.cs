@@ -23,11 +23,12 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     private readonly byte[] _authSysBody;
     private readonly ILogger? _logger;
     private readonly SemaphoreSlim _callLock = new(1, 1);
+    private readonly SemaphoreSlim _connectionStateLock = new(1, 1);
 
     private RpcConnection? _activeConnection;
     private int _activePort;
     private uint _xid;
-    private bool _stopping;
+    private int _stopping;
 
     internal RpcClient(
         RpcTransport transport,
@@ -195,11 +196,29 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             await connection.DisposeAsync();
     }
 
+    internal async ValueTask StopAndCloseActiveConnectionAsync()
+    {
+        await _connectionStateLock.WaitAsync();
+        RpcConnection? connection;
+        try
+        {
+            Volatile.Write(ref _stopping, 1);
+            connection = Interlocked.Exchange(ref _activeConnection, null);
+        }
+        finally
+        {
+            _connectionStateLock.Release();
+        }
+
+        if (connection is not null)
+            await connection.DisposeAsync();
+    }
+
     public async ValueTask DisposeAsync()
     {
-        _stopping = true;
-        await CloseActiveConnectionAsync();
+        await StopAndCloseActiveConnectionAsync();
         _callLock.Dispose();
+        _connectionStateLock.Dispose();
     }
 
     internal static RpcReply DecodeReplyWithContext(
@@ -275,35 +294,45 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
 
     private async Task<RpcConnection?> ReconnectAsync(CancellationToken ct)
     {
-        if (_activePort <= 0 || _stopping)
-            return null;
-
-        _logger?.LogInformation("Reconnecting to NFS server (port={Port})", _activePort);
-        var previous = Interlocked.Exchange(ref _activeConnection, null);
-        if (previous is not null)
+        await _connectionStateLock.WaitAsync(ct);
+        try
         {
-            try
-            {
-                await previous.DisposeAsync();
-            }
-            catch
-            {
-                // Continue with reconnect after best-effort cleanup.
-            }
-        }
+            if (_activePort <= 0 || Volatile.Read(ref _stopping) != 0)
+                return null;
 
-        using var timeoutCts = CreateCallTimeout(ct, out var token);
-        var connection = await _transport.OpenAsync(_activePort, token);
-        _activeConnection = connection;
-        _logger?.LogInformation(
-            "Reconnected to NFS server (generation={Generation})",
-            connection.Generation);
-        return connection;
+            _logger?.LogInformation("Reconnecting to NFS server (port={Port})", _activePort);
+            var previous = Interlocked.Exchange(ref _activeConnection, null);
+            if (previous is not null)
+            {
+                try
+                {
+                    await previous.DisposeAsync();
+                }
+                catch
+                {
+                    // Continue with reconnect after best-effort cleanup.
+                }
+            }
+
+            using var timeoutCts = CreateCallTimeout(ct, out var token);
+            var connection = await _transport.OpenAsync(_activePort, token);
+            _activeConnection = connection;
+            _logger?.LogInformation(
+                "Reconnected to NFS server (generation={Generation})",
+                connection.Generation);
+            return connection;
+        }
+        finally
+        {
+            _connectionStateLock.Release();
+        }
     }
 
     private async Task RefreshAfterTimeoutAsync(RpcConnection connection, CancellationToken ct)
     {
-        if (!ReferenceEquals(connection, _activeConnection) || _activePort <= 0 || _stopping)
+        if (!ReferenceEquals(connection, _activeConnection) ||
+            _activePort <= 0 ||
+            Volatile.Read(ref _stopping) != 0)
             return;
 
         try

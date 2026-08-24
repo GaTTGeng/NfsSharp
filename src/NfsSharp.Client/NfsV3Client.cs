@@ -115,7 +115,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         finally
         {
-            await _rpcClient.CloseActiveConnectionAsync();
+            await _rpcClient.StopAndCloseActiveConnectionAsync();
         }
     }
 

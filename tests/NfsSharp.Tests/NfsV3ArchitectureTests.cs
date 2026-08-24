@@ -159,6 +159,17 @@ public sealed class NfsV3ArchitectureTests
             () => cancelledRpc.CallAsync(100003, 3, 1, [], cancellation.Token));
     }
 
+    [Fact]
+    public async Task RpcClient_ExplicitStopClosesTheConnectionAndPreventsFurtherCalls()
+    {
+        await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), NfsClientOptions.Default);
+
+        await rpc.StopAndCloseActiveConnectionAsync();
+
+        await Assert.ThrowsAsync<NfsException>(
+            () => rpc.CallAsync(100003, 3, 1, [], CancellationToken.None));
+    }
+
     [Theory]
     [InlineData(100003u, 3u, 1u, true)]
     [InlineData(100003u, 3u, 7u, false)]
