@@ -17,7 +17,7 @@ The solution is `NfsSharp.sln`. Library projects target `net8.0`, `net9.0`, and 
 - Use nullable reference types, async APIs, `CancellationToken` support, and `IAsyncDisposable` patterns consistently with nearby code.
 - Avoid adding dependencies unless they are necessary and compatible with every supported target framework.
 - Do not add credentials, tokens, server addresses, or other environment-specific values to tracked files.
-- Do not include the assistant's name or identifying marker in repository content, commit messages, branch names, or pull-request text.
+- Do not include any AI tool or assistant name, brand, or identifying marker in repository content, commit messages, branch names, or pull-request text.
 - Update documentation and `CHANGELOG.md` when a public behavior, compatibility claim, or supported scope changes.
 
 ## Protocol and Client Changes
