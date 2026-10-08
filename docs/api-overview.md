@@ -15,7 +15,7 @@ The recommended entry point for applications is `NfsSharp.Client.NfsClient`, con
 
 | Type | Purpose |
 | --- | --- |
-| `NfsClientBuilder` | Fluent configuration for credentials, privileged source ports, timeouts, retry behavior, transfer sizes, directory caching, TCP options, logging, and RPCSEC_GSS hooks. |
+| `NfsClientBuilder` | Fluent configuration for credentials, privileged source ports, timeouts, retry behavior, bounded RPC concurrency, transfer sizes, directory caching, TCP options, logging, and RPCSEC_GSS hooks. |
 | `NfsClient` | Stateful convenience facade for connect, export listing, mount, directory traversal, file I/O, metadata, links, mutations, and unmount. |
 | `NfsV3Client` | Direct NFSv3 mounted client for export-relative and file-handle-oriented operations. |
 | `NfsV4Client` | Experimental direct COMPOUND-oriented NFSv4.0, NFSv4.1, and NFSv4.2 surface. |
@@ -23,6 +23,8 @@ The recommended entry point for applications is `NfsSharp.Client.NfsClient`, con
 NFSv3 over TCP is the primary supported protocol. The NFSv4 surface is experimental and does not yet carry the same compatibility and integration guarantees.
 
 NFSv3 transient transport retries are conservative: automatic reconnect/retry is limited to retry-safe discovery, mount negotiation, read-only NFS procedures, and `COMMIT`. Mutating procedures such as `SETATTR`, `WRITE`, `CREATE`, `REMOVE`, `RENAME`, and link creation surface the transport failure to the caller instead of being replayed automatically.
+
+AUTH_SYS NFSv3 calls can be outstanding concurrently on one TCP connection. The default bound is 32 and can be changed with `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` or `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`. Replies are matched by XID. RPCSEC_GSS calls remain serialized while per-request sequence-window and reply-verifier validation are incomplete.
 
 ## NFSv3 operation groups
 

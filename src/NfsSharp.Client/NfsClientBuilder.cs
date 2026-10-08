@@ -20,6 +20,7 @@ public sealed class NfsClientBuilder
     private int _readdirCount = 32 * 1024;
     private NfsWriteStableHow _stableHow = NfsWriteStableHow.FileSync;
     private int _maxRetries = 2;
+    private int _maxOutstandingRpcCallsPerConnection = 32;
     private TimeSpan _retryDelay = TimeSpan.FromSeconds(1);
     private bool _enableDirectoryCache;
     private TimeSpan _directoryCacheTtl = TimeSpan.FromSeconds(30);
@@ -101,6 +102,13 @@ public sealed class NfsClientBuilder
         return this;
     }
 
+    /// <summary>Sets the maximum number of simultaneous RPC calls on one TCP connection.</summary>
+    public NfsClientBuilder WithMaxOutstandingRpcCallsPerConnection(int maxCalls)
+    {
+        _maxOutstandingRpcCallsPerConnection = maxCalls;
+        return this;
+    }
+
     public NfsClientBuilder WithRetryDelay(TimeSpan delay)
     {
         _retryDelay = delay;
@@ -169,6 +177,7 @@ public sealed class NfsClientBuilder
         ReaddirCount = _readdirCount,
         StableHow = _stableHow,
         MaxRetries = _maxRetries,
+        MaxOutstandingRpcCallsPerConnection = _maxOutstandingRpcCallsPerConnection,
         RetryDelay = _retryDelay,
         EnableDirectoryCache = _enableDirectoryCache,
         DirectoryCacheTtl = _directoryCacheTtl,
