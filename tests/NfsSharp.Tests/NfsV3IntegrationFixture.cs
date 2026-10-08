@@ -108,18 +108,21 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         await SetupLock.WaitAsync(ct);
         try
         {
+            // Directory skeleton first (root, empty, nested, and the per-test runs area) so file writes have parents.
             await EnsureDirectoryAsync(client, RootDirectory, 0x1ED, ct);
             await EnsureDirectoryAsync(client, EmptyDirectory, 0x1ED, ct);
             await EnsureDirectoryAsync(client, "nfssharp-fixtures/nested", 0x1ED, ct);
             await EnsureDirectoryAsync(client, NestedDirectory, 0x1ED, ct);
             await EnsureDirectoryAsync(client, MutableRunsDirectory, 0x1ED, ct);
 
+            // Deterministic file contents covering empty, text, binary, unicode names, and a length boundary.
             await EnsureFileAsync(client, EmptyFile, ct);
             await EnsureFileAsync(client, SmallFile, ct);
             await EnsureFileAsync(client, NestedFile, ct);
             await EnsureFileAsync(client, UnicodeFile, ct);
             await EnsureFileAsync(client, BoundaryFile, ct);
 
+            // Optional features are probed last; each returns false instead of failing setup on unsupported servers.
             var supportsSymlinks = await EnsureSymbolicLinkAsync(client, ct);
             var supportsHardLinks = await EnsureHardLinkAsync(client, ct);
             var restrictedModeApplied = await EnsureRestrictedPermissionCaseAsync(client, ct);
@@ -183,6 +186,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
 
     private static async Task<bool> EnsureSymbolicLinkAsync(NfsV3Client client, CancellationToken ct)
     {
+        // An existing path is reused only when it already resolves to the expected target; anything else is replaced.
         if (await client.FileExistsAsync(SymlinkPath, ct))
         {
             try
@@ -205,12 +209,14 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         }
         catch (NfsException ex) when (IsOptionalFixtureUnsupported(ex))
         {
+            // The server does not support symlinks; tests gated on SupportsSymbolicLinks will skip.
             return false;
         }
     }
 
     private static async Task<bool> EnsureHardLinkAsync(NfsV3Client client, CancellationToken ct)
     {
+        // A hard link is verified by matching fileid with its source rather than trusting the path alone.
         var source = await client.GetAttributesAsync(SmallFilePath, ct);
         if (await client.FileExistsAsync(HardLinkPath, ct))
         {
@@ -236,6 +242,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         NfsV3Client client,
         CancellationToken ct)
     {
+        // Build the restricted tree with a usable mode first, then lock it down to mode 0 and verify the server kept it.
         await EnsureDirectoryAsync(client, RestrictedDirectory, 0x1C0, ct);
         await EnsureFileAsync(client, RestrictedFile, ct);
 

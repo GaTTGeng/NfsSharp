@@ -66,9 +66,11 @@ public sealed class NfsV4Client : IAsyncDisposable
         options ??= NfsClientOptions.Default;
         options.Validate();
 
+        // Resolve first; every later socket open reuses this address.
         var ip = await ResolveAddressAsync(server, ct);
         var client = new NfsV4Client(ip, options, minorVersion);
 
+        // Portmapper is optional; without it NFSv4 conventionally listens on 2049.
         var nfsPort = options.PortmapPort > 0
             ? await client.DiscoverNfsPortAsync(ip, options, ct)
             : DefaultNfsPort;
@@ -94,12 +96,14 @@ public sealed class NfsV4Client : IAsyncDisposable
     public async Task<NfsV4CompoundResponse> CompoundAsync(NfsV4CompoundRequest request, CancellationToken ct)
     {
         request.MinorVersion = _minorVersion;
+        // Serialize COMPOUNDs: this client has no XID demultiplexing and shares one stream.
         await _rpcLock.WaitAsync(ct);
         try
         {
             using var timeoutCts = CreateCallTimeout(ct, out var token);
             var xid = unchecked(++_xid);
 
+            // CALL envelope (RFC 5531) followed by the COMPOUND body.
             var writer = new XdrWriter();
             writer.UInt(xid);
             writer.UInt(0); // CALL
@@ -118,6 +122,7 @@ public sealed class NfsV4Client : IAsyncDisposable
             await SendRecordAsync(conn.Stream, writer.ToArray(), token);
             var reply = await RecvRecordAsync(conn.Stream, token);
 
+            // Correlate by XID, then decode the positional per-operation results.
             return DecodeCompoundResponse(RpcReplyParser.Decode(reply, xid).Body);
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
@@ -150,6 +155,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>PUTROOTFH + LOOKUP path, then READ.</summary>
     public async Task<byte[]> ReadAsync(string path, ulong offset, uint count, CancellationToken ct)
     {
+        // v4.1+ READs carry the open stateid; v4.0 and anonymous access use the all-zero stateid.
         var ops = new List<NfsV4Operation>();
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
         foreach (var part in SplitPath(path))
@@ -217,6 +223,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
         foreach (var part in SplitPath(fromDir))
             ops.Add(MakeLookupOp(part));
+        // SAVEFH parks the source directory; RENAME needs both source and target dirs current.
         ops.Add(MakeOp(NfsV4Op.SaveFh));
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
         foreach (var part in SplitPath(toDir))
@@ -246,6 +253,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>OPEN + WRITE + COMMIT + CLOSE, split across two COMPOUND calls (open/getfh, then putfh/write/commit/close).</summary>
     public async Task<int> OpenWriteCloseAsync(string path, ulong offset, ReadOnlyMemory<byte> data, NfsWriteStableHow stableHow, CancellationToken ct)
     {
+        // Phase 1: walk to the parent directory, OPEN the leaf for write, and capture its file handle.
         var ops = new List<NfsV4Operation>();
 
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
@@ -260,12 +268,14 @@ public sealed class NfsV4Client : IAsyncDisposable
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "open-write-close", Operations = ops }, ct);
         EnsureCompoundOk(resp, "OPEN");
 
+        // OPEN result carries the stateid required by WRITE/CLOSE; GETFH yields the open file handle.
         var openResult = resp.Results[ops.Count - 2];
         var stateId = NfsV4StateId.Decode(openResult.Data!);
         var fh = resp.Results[^1].Data!.Opaque();
 
         _currentFh = fh;
 
+        // Phase 2: reuse the handle/stateid in a second COMPOUND that writes, commits, and closes.
         var writeOps = new List<NfsV4Operation>();
         writeOps.Add(MakeOp(NfsV4Op.Putfh, w => w.Opaque(fh)));
         writeOps.Add(MakeWriteOp(offset, data.ToArray(), stableHow, stateId));
@@ -275,6 +285,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         var writeResp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "write-commit-close", Operations = writeOps }, ct);
         EnsureCompoundOk(writeResp, "WRITE/COMMIT/CLOSE");
 
+        // WRITE is the second operation (after PUTFH), so its result is at index 1.
         var writeResult = writeResp.Results[1];
         return (int)writeResult.Data!.UInt();
     }
@@ -315,6 +326,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>NFSv4.0 client id negotiation: SETCLIENTID followed by SETCLIENTID_CONFIRM.</summary>
     private async Task SetClientIdAsync(CancellationToken ct)
     {
+        // Step 1: SETCLIENTID returns the server-assigned clientid plus a confirm verifier.
         var ops = new List<NfsV4Operation>();
         ops.Add(MakeSetClientIdOp());
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "setclientid", Operations = ops }, ct);
@@ -324,6 +336,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         _clientId = result.ULong();
         result.FixedBytes(8); // setclientid_confirm verifier
 
+        // Step 2: confirm the id; until this succeeds the server may reclaim it after a restart.
         var confirmOps = new List<NfsV4Operation>();
         confirmOps.Add(MakeOp(NfsV4Op.SetClientIdConfirm, w => { w.ULong(_clientId); w.FixedBytes(_clientVerifier); }));
         var confirmResp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "setclientid-confirm", Operations = confirmOps }, ct);
@@ -333,6 +346,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>NFSv4.1+ session negotiation: EXCHANGE_ID followed by CREATE_SESSION.</summary>
     private async Task EstablishSessionAsync(CancellationToken ct)
     {
+        // Step 1: EXCHANGE_ID registers the client and returns clientid/sequence id.
         var ops = new List<NfsV4Operation>();
         ops.Add(MakeExchangeIdOp());
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "exchange_id", Operations = ops }, ct);
@@ -342,6 +356,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         _clientId = result.ULong();
         _sequenceId = result.ULong();
 
+        // Step 2: CREATE_SESSION binds channels; compound calls are unusable until it completes.
         var createOps = new List<NfsV4Operation>();
         createOps.Add(MakeCreateSessionOp());
         var createResp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "create_session", Operations = createOps }, ct);
@@ -415,6 +430,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
         foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
+        // SAVEFH parks the source handle while the destination path is walked from the root again.
         ops.Add(MakeOp(NfsV4Op.SaveFh));
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
         foreach (var part in SplitPath(dstPath))
@@ -441,6 +457,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
         foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
+        // Same SAVEFH pattern as COPY: keep the source current while the target path is walked.
         ops.Add(MakeOp(NfsV4Op.SaveFh));
         ops.Add(MakeOp(NfsV4Op.PutRootFh));
         foreach (var part in SplitPath(dstPath))
@@ -632,6 +649,7 @@ public sealed class NfsV4Client : IAsyncDisposable
 
     private void EncodeCompoundRequest(XdrWriter writer, NfsV4CompoundRequest request)
     {
+        // COMPOUND header: tag, minor version, op count; then each op followed by its args.
         writer.Str(request.Tag);
         writer.UInt(request.MinorVersion);
         writer.UInt((uint)request.Operations.Count);
@@ -645,6 +663,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     }
 
     private NfsV4CompoundResponse DecodeCompoundResponse(XdrReader reader)
+        // Results stay positional and align 1:1 with the request operations.
         => NfsV4CompoundResponse.Decode(reader);
 
     /// <summary>Decode the fattr4 subset this client understands; values are read in attribute-number order gated by the bitmap.</summary>
@@ -714,6 +733,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>Ask the portmapper for the NFSv4 TCP port; falls back to 2049 when unmapped.</summary>
     private async Task<int> DiscoverNfsPortAsync(IPAddress ip, NfsClientOptions options, CancellationToken ct)
     {
+        // Portmap GETPORT runs on its own short-lived connection, not the NFS stream.
         await using var pm = await OpenAsync(options.PortmapPort, ct);
         var writer = new XdrWriter();
         writer.UInt(ProgNfs);
@@ -722,12 +742,14 @@ public sealed class NfsV4Client : IAsyncDisposable
         writer.UInt(0);
         var reader = await CallRawAsync(pm, ProgPortmap, 2, 3, writer.ToArray(), ct);
         var port = (int)reader.UInt();
+        // Zero means "not registered"; NFSv4 commonly still listens on the well-known port.
         return port > 0 ? port : DefaultNfsPort;
     }
 
     /// <summary>One raw RPC call on an arbitrary connection (used for portmap lookups, not NFS COMPOUND).</summary>
     private async Task<XdrReader> CallRawAsync(Conn conn, uint prog, uint vers, uint proc, byte[] args, CancellationToken ct)
     {
+        // Minimal CALL envelope with AUTH_SYS; no retries because this path is setup-only.
         var xid = unchecked(++_xid);
         var writer = new XdrWriter();
         writer.UInt(xid);
@@ -795,6 +817,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         using var aggregate = new MemoryStream();
         var header = new byte[4];
         var last = false;
+        // Fragments continue until the last-fragment bit is set in the record marker.
         while (!last)
         {
             await stream.ReadExactlyAsync(header, ct);
@@ -867,6 +890,7 @@ public sealed class NfsV4Client : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Close the shared stream first so any in-flight COMPOUND fails fast.
         if (_nfs is not null)
         {
             await _nfs.DisposeAsync();

@@ -394,6 +394,7 @@ public sealed class NfsV4CompoundResponse
     {
         ArgumentNullException.ThrowIfNull(reader);
 
+        // COMPOUND4res wire order: overall status, echoed tag, then the per-op result array.
         var response = new NfsV4CompoundResponse
         {
             Status = reader.UInt(),
@@ -403,12 +404,14 @@ public sealed class NfsV4CompoundResponse
         var count = checked((int)reader.UInt());
         for (var i = 0; i < count; i++)
         {
+            // Every result begins with its operation number and per-op status.
             var op = (NfsV4Op)reader.UInt();
             var status = reader.UInt();
             response.Results.Add(new NfsV4OperationResult
             {
                 Op = op,
                 Status = status,
+                // Non-OK results carry no payload on the wire; only OK ops need bytes captured.
                 Data = status == NfsV4Status.Ok
                     ? CaptureOperationResult(op, reader, i == count - 1)
                     : null
@@ -425,8 +428,10 @@ public sealed class NfsV4CompoundResponse
     private static XdrReader CaptureOperationResult(NfsV4Op op, XdrReader reader, bool isLast)
     {
         var writer = new XdrWriter();
+        // Mirror each op's result layout exactly so the COMPOUND reader lands on the next op header.
         switch (op)
         {
+            // Void results (no fields beyond status): capture nothing and stay in sync.
             case NfsV4Op.Lookup:
             case NfsV4Op.Putfh:
             case NfsV4Op.PutRootFh:
@@ -438,6 +443,7 @@ public sealed class NfsV4CompoundResponse
                 CaptureStateId(writer, reader);
                 break;
             case NfsV4Op.Commit:
+                // writeverf is a fixed 8-byte opaque with no length prefix.
                 CaptureFixedBytes(writer, reader, 8);
                 break;
             case NfsV4Op.Clone:
@@ -446,6 +452,7 @@ public sealed class NfsV4CompoundResponse
                 CaptureCopyResult(writer, reader);
                 break;
             case NfsV4Op.Create:
+                // cinfo4 for the parent, then the created object's attribute bitmap.
                 CaptureChangeInfo(writer, reader);
                 CaptureBitmap(writer, reader);
                 break;
@@ -459,6 +466,7 @@ public sealed class NfsV4CompoundResponse
                 CaptureOpenResult(writer, reader);
                 break;
             case NfsV4Op.Read:
+                // eof flag, then the data as a length-prefixed opaque.
                 CaptureBool(writer, reader);
                 CaptureOpaque(writer, reader);
                 break;
@@ -466,9 +474,11 @@ public sealed class NfsV4CompoundResponse
                 CaptureReadDir(writer, reader);
                 break;
             case NfsV4Op.Remove:
+                // cinfo4 for the parent directory.
                 CaptureChangeInfo(writer, reader);
                 break;
             case NfsV4Op.Rename:
+                // Two cinfo4 values: source parent, then target parent.
                 CaptureChangeInfo(writer, reader);
                 CaptureChangeInfo(writer, reader);
                 break;
@@ -476,14 +486,17 @@ public sealed class NfsV4CompoundResponse
                 CaptureSecInfo(writer, reader);
                 break;
             case NfsV4Op.SetClientId:
+                // clientid4 assigner, then the 8-byte non-opaque callback verifier.
                 CaptureULong(writer, reader);
                 CaptureFixedBytes(writer, reader, 8);
                 break;
             case NfsV4Op.Seek:
+                // eof flag, then the offset of the located hole/data boundary.
                 CaptureBool(writer, reader);
                 CaptureULong(writer, reader);
                 break;
             case NfsV4Op.Write:
+                // count, committed stability level, and the 8-byte write verifier.
                 CaptureUInt(writer, reader);
                 CaptureUInt(writer, reader);
                 CaptureFixedBytes(writer, reader, 8);
@@ -531,6 +544,7 @@ public sealed class NfsV4CompoundResponse
 
     private static void CaptureBitmap(XdrWriter writer, XdrReader reader)
     {
+        // bitmap4: word count followed by that many 32-bit words.
         var count = CaptureUInt(writer, reader);
         for (var i = 0; i < count; i++)
             CaptureUInt(writer, reader);
@@ -538,6 +552,7 @@ public sealed class NfsV4CompoundResponse
 
     private static void CaptureFattr(XdrWriter writer, XdrReader reader)
     {
+        // fattr4: attribute bitmap, then the opaque values blob it describes.
         CaptureBitmap(writer, reader);
         CaptureOpaque(writer, reader);
     }
@@ -552,6 +567,7 @@ public sealed class NfsV4CompoundResponse
 
     private static void CaptureStateId(XdrWriter writer, XdrReader reader)
     {
+        // stateid4 is seqid + 12 "other" bytes, re-encoded so the capture stays 16 bytes total.
         CaptureUInt(writer, reader);
         CaptureFixedBytes(writer, reader, 12);
     }
@@ -570,16 +586,20 @@ public sealed class NfsV4CompoundResponse
     private static void CaptureOpenDelegation(XdrWriter writer, XdrReader reader)
     {
         var delegationType = CaptureUInt(writer, reader);
+        // Payload size varies by delegation type; the type must be known to stay framed.
         switch (delegationType)
         {
             case 0:
+                // OPEN_DELEGATE_NONE carries no further fields.
                 return;
             case 1:
+                // READ delegation: stateid, recall flag, then the ace.
                 CaptureStateId(writer, reader);
                 CaptureBool(writer, reader);
                 CaptureNfsAce(writer, reader);
                 return;
             case 2:
+                // WRITE delegation adds a space limit before the ace.
                 CaptureStateId(writer, reader);
                 CaptureBool(writer, reader);
                 CaptureSpaceLimit(writer, reader);
@@ -597,6 +617,7 @@ public sealed class NfsV4CompoundResponse
     private static void CaptureOpenNoneDelegation(XdrWriter writer, XdrReader reader)
     {
         var why = CaptureUInt(writer, reader);
+        // OPEN_DELEGATE_NONE_EXT reasons 1 (space) and 2 (lock) append a false-warning bool.
         if (why is 1 or 2)
             CaptureBool(writer, reader);
     }
@@ -604,6 +625,7 @@ public sealed class NfsV4CompoundResponse
     private static void CaptureSpaceLimit(XdrWriter writer, XdrReader reader)
     {
         var limitBy = CaptureUInt(writer, reader);
+        // Discriminate space_limit4: NFILES is one hyper, BYTES_AVAIL is the nbytes hyper.
         switch (limitBy)
         {
             case 1:
@@ -631,6 +653,7 @@ public sealed class NfsV4CompoundResponse
     private static void CaptureReadDir(XdrWriter writer, XdrReader reader)
     {
         CaptureFixedBytes(writer, reader, 8);
+        // Entries are a true-flagged list; the terminating false flag carries no entry payload.
         while (CaptureBool(writer, reader))
         {
             CaptureULong(writer, reader);
@@ -647,6 +670,7 @@ public sealed class NfsV4CompoundResponse
         for (var i = 0; i < count; i++)
         {
             var flavor = CaptureUInt(writer, reader);
+            // Only RPCSEC_GSS (flavor 6) appends extra fields; other flavors end at the flavor value.
             if (flavor == 6)
             {
                 CaptureOpaque(writer, reader);
@@ -659,10 +683,12 @@ public sealed class NfsV4CompoundResponse
     /// <summary>Captures COPY4res: callback stateids, count, committed, verifier, and flags.</summary>
     private static void CaptureCopyResult(XdrWriter writer, XdrReader reader)
     {
+        // Variable-length callback stateid list first; its count frames the rest of the result.
         var callbackCount = CaptureUInt(writer, reader);
         for (var i = 0; i < callbackCount; i++)
             CaptureStateId(writer, reader);
 
+        // Then count (hyper), committed, the 8-byte verifier, and the trailing boolean flags.
         CaptureULong(writer, reader);
         CaptureUInt(writer, reader);
         CaptureFixedBytes(writer, reader, 8);

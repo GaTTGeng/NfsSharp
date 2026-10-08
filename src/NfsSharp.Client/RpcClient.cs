@@ -70,6 +70,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     internal async Task ConnectAsync(int port, CancellationToken ct)
     {
         var connection = await _transport.OpenAsync(port, ct);
+        // Publish the new generation atomically; dispose whatever it replaced afterwards.
         var previous = Interlocked.Exchange(ref _activeConnection, connection);
         _activePort = port;
         if (previous is not null)
@@ -84,6 +85,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         byte[] arguments,
         CancellationToken ct)
     {
+        // Resolve a healthy connection up front so the first attempt never starts on a dead generation.
         var connection = await RequireHealthyConnectionAsync(ct);
         for (var attempt = 1; attempt <= _retryPolicy.MaxAttempts; attempt++)
         {
@@ -106,11 +108,13 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                     _retryPolicy.MaxAttempts,
                     program,
                     procedure);
+                // First retry-safe attempt after reconnect; non-idempotent procedures never replay.
                 connection = await ReconnectAsync(connection, ct) ?? connection;
                 await _retryPolicy.DelayAsync(ct);
             }
             catch (Exception ex) when (NfsRetryPolicy.IsTransient(ex) && attempt < _retryPolicy.MaxAttempts)
             {
+                // Transient but not retry-safe: surface the failure rather than replaying a mutation.
                 _logger?.LogWarning(
                     ex,
                     "RPC call failed transiently without automatic retry because the procedure is not retry-safe (prog={Program}, proc={Procedure})",
@@ -122,6 +126,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                                                          !_stopSource.IsCancellationRequested &&
                                                          _options.CommandTimeout > TimeSpan.Zero)
             {
+                // Command timeout (not caller/stop cancellation) is reported as a domain error.
                 _logger?.LogError(
                     ex,
                     "RPC call timed out after {Timeout} (prog={Program}, proc={Procedure})",
@@ -146,6 +151,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     {
         for (var attempt = 1; attempt <= _retryPolicy.MaxAttempts; attempt++)
         {
+            // Each attempt owns a fresh short-lived connection; setup calls must not share the NFS stream.
             RpcConnection? connection = null;
             try
             {
@@ -188,6 +194,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             }
             finally
             {
+                // Always release the per-attempt connection, success or failure.
                 if (connection is not null)
                     await connection.DisposeAsync();
             }
@@ -358,6 +365,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         }
         finally
         {
+            // Unregister the waiter first so the receive loop cannot complete a recycled XID late.
             if (pending is not null)
                 connection.RemovePending(xid, pending);
             if (gssLockAcquired)
@@ -376,6 +384,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         if (connection.IsHealthy)
             return connection;
 
+        // Unhealthy generation: swap in a fresh connection or surface the original failure.
         return await ReconnectAsync(connection, ct)
                ?? throw connection.Failure
                       ?? new NfsException($"RPC connection generation {connection.Generation} is unavailable.");
@@ -384,12 +393,15 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     /// <summary>Replace a failed connection with a new generation, or return null when stopping.</summary>
     private async Task<RpcConnection?> ReconnectAsync(RpcConnection failedConnection, CancellationToken ct)
     {
+        // Serialize reconnects so concurrent failures cannot open competing generations.
         await _connectionStateLock.WaitAsync(ct);
         try
         {
+            // Stopping or never-connected clients have nothing to reconnect to.
             if (_activePort <= 0 || Volatile.Read(ref _stopping) != 0)
                 return null;
 
+            // Another caller may have already replaced the failed generation; reuse theirs.
             var active = _activeConnection;
             if (active is { IsHealthy: true } && !ReferenceEquals(active, failedConnection))
                 return active;
@@ -410,6 +422,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
 
             using var timeoutCts = CreateCallTimeout(ct, out var token);
             var connection = await _transport.OpenAsync(_activePort, token);
+            // Install the new generation only after the open succeeds so callers never observe a half-built connection.
             _activeConnection = connection;
             _logger?.LogInformation(
                 "Reconnected to NFS server (generation={Generation})",

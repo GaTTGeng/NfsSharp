@@ -112,6 +112,7 @@ public sealed class XdrReader
     /// <summary>Reads an opaque value constrained to <paramref name="maxLength"/> bytes.</summary>
     public byte[] Opaque(int maxLength)
     {
+        // Cap the untrusted length prefix before any allocation or copy.
         var length = CheckedLength(UInt(), maxLength);
         Ensure(length);
         var data = _buffer.AsSpan(_position, length).ToArray();
@@ -159,6 +160,7 @@ public sealed class XdrReader
     /// <summary>Validates an untrusted opaque length against a caller-supplied cap.</summary>
     private static int CheckedLength(uint value, int maxLength)
     {
+        // Caller cap must itself be sane and cannot exceed the global allocation ceiling.
         if (maxLength < 0 || maxLength > MaxOpaqueLength)
             throw new ArgumentOutOfRangeException(nameof(maxLength));
         if (value > maxLength)
@@ -182,6 +184,7 @@ public sealed class XdrReader
 
     private void Ensure(int count)
     {
+        // Reject reads that would run past the buffer so a truncated message fails as XDR, not IndexOutOfRange.
         if (count < 0 || count > Remaining)
             throw new NfsException($"Malformed XDR payload. Need {count} bytes, only {Remaining} left.");
     }

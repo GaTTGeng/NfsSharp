@@ -178,30 +178,36 @@ public sealed record NfsClientOptions
 
     public void Validate()
     {
+        // Hard-fail structural problems first: a null group list would break encoding later.
         if (AuxiliaryGroups is null)
             throw new NfsException("AuxiliaryGroups cannot be null.");
         if (PortmapPort is <= 0 or > 65535)
             throw new NfsException($"Invalid portmap port: {PortmapPort}.");
         if (CommandTimeout < TimeSpan.Zero)
             throw new NfsException("CommandTimeout cannot be negative.");
+        // Transfer-size and readdir caps must be positive or no request could ever make progress.
         if (MaxReadSize <= 0)
             throw new NfsException("MaxReadSize must be greater than zero.");
         if (MaxWriteSize <= 0)
             throw new NfsException("MaxWriteSize must be greater than zero.");
         if (ReaddirCount <= 0)
             throw new NfsException("ReaddirCount must be greater than zero.");
+        // Reject undefined enum values instead of sending an unknown stable_how on the wire.
         if (!Enum.IsDefined(typeof(NfsWriteStableHow), StableHow))
             throw new NfsException($"Invalid write stability mode: {StableHow}.");
+        // Retry counts may be zero (no retries) but never negative; delays may likewise be zero.
         if (MaxRetries < 0)
             throw new NfsException("MaxRetries cannot be negative.");
         if (MaxOutstandingRpcCallsPerConnection <= 0)
             throw new NfsException("MaxOutstandingRpcCallsPerConnection must be greater than zero.");
         if (RetryDelay < TimeSpan.Zero)
             throw new NfsException("RetryDelay cannot be negative.");
+        // Dependent checks: intervals only matter when the feature that uses them is enabled.
         if (EnableDirectoryCache && DirectoryCacheTtl <= TimeSpan.Zero)
             throw new NfsException("DirectoryCacheTtl must be greater than zero when directory caching is enabled.");
         if (TcpKeepAlive && KeepAliveInterval < TimeSpan.Zero)
             throw new NfsException("KeepAliveInterval cannot be negative.");
+        // Re-check the AUTH_SYS gids cap here so misconfiguration fails before any RPC is sent.
         if (AuxiliaryGroups.Count > RpcAuthSys.MaxAuxiliaryGroups)
             throw new NfsException($"AUTH_SYS supports at most {RpcAuthSys.MaxAuxiliaryGroups} auxiliary groups.");
     }
@@ -217,16 +223,19 @@ public sealed record NfsWriteResult
 
     public NfsWriteResult(int count, NfsWriteStableHow committed, byte[] writeVerifier)
     {
+        // Validate every field before publishing any of them on the immutable record.
         if (count < 0)
             throw new NfsException("WRITE count cannot be negative.");
         if (!Enum.IsDefined(typeof(NfsWriteStableHow), committed))
             throw new NfsException($"Invalid committed write stability mode: {committed}.");
         ArgumentNullException.ThrowIfNull(writeVerifier);
+        // Empty is allowed only for local no-op results; a real WRITE always returns 8 verifier bytes.
         if (writeVerifier.Length is not (0 or 8))
             throw new NfsException("WRITE verifier must be empty for local no-op results or exactly 8 bytes.");
 
         Count = count;
         Committed = committed;
+        // Defensive copy so later caller mutation cannot change the stored verifier.
         _writeVerifier = writeVerifier.ToArray();
     }
 
@@ -246,9 +255,11 @@ public sealed record NfsCommitResult
     public NfsCommitResult(byte[] writeVerifier)
     {
         ArgumentNullException.ThrowIfNull(writeVerifier);
+        // COMMIT always returns a full 8-byte verifier on the wire; unlike WRITE there is no empty case.
         if (writeVerifier.Length != 8)
             throw new NfsException("COMMIT verifier must be exactly 8 bytes.");
 
+        // Defensive copy so later caller mutation cannot change the stored verifier.
         _writeVerifier = writeVerifier.ToArray();
     }
 

@@ -32,6 +32,7 @@ internal sealed class PortmapClient
             NfsRpcConstants.PmapGetPort,
             writer.ToArray(),
             ct);
+        // Reply is a single uint port; 0 means the program/version is not registered for TCP.
         var port = reader.UInt();
         if (port > ushort.MaxValue)
         {

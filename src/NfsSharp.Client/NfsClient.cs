@@ -63,6 +63,7 @@ public sealed class NfsClient : IAsyncDisposable
     /// <summary>Mount an export from the connected server.</summary>
     public async Task MountDeviceAsync(string exportPath, CancellationToken ct = default)
     {
+        // Replace any previous mount so only one export stays open at a time.
         if (_mounted is not null)
             await UnMountDeviceAsync(ct);
 
@@ -75,6 +76,7 @@ public sealed class NfsClient : IAsyncDisposable
         if (_mounted is null)
             return;
 
+        // Clear the field first so concurrent operations fail fast instead of racing the teardown.
         var mounted = _mounted;
         _mounted = null;
 
@@ -84,6 +86,7 @@ public sealed class NfsClient : IAsyncDisposable
         }
         finally
         {
+            // Dispose even when UMNT failed so sockets are always released.
             await mounted.DisposeAsync();
         }
     }

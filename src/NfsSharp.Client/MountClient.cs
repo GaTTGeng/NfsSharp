@@ -24,6 +24,7 @@ internal sealed class MountClient
             NfsRpcConstants.MountMnt,
             writer.ToArray(),
             ct);
+        // MNT reply: mountstat3 first; only Ok carries the export-root file handle.
         var status = reader.UInt();
         if (status != MountV3Status.Ok)
         {
@@ -51,6 +52,7 @@ internal sealed class MountClient
         {
             var path = reader.Str();
             var groups = new List<string>();
+            // Inner list ends with a false boolean before the next export entry.
             while (reader.Bool())
                 groups.Add(reader.Str());
             exports.Add(new NfsExport(path, groups));

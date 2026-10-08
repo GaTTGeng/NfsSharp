@@ -18,10 +18,12 @@ public static class RpcAuthSys
     {
         ArgumentNullException.ThrowIfNull(machineName);
         ArgumentNullException.ThrowIfNull(auxiliaryGroups);
+        // The wire format hard-caps gids[] at MaxAuxiliaryGroups; reject before encoding.
         if (auxiliaryGroups.Count > MaxAuxiliaryGroups)
             throw new NfsException($"AUTH_SYS supports at most {MaxAuxiliaryGroups} auxiliary groups.");
 
         var machineNameBytes = System.Text.Encoding.UTF8.GetBytes(machineName);
+        // Cap the opaque length first; the loop below then trims to a character boundary.
         var machineNameLength = Math.Min(machineNameBytes.Length, MaxMachineNameLength);
         // Back up off UTF-8 continuation bytes (0b10xxxxxx) so truncation never splits a character.
         while (machineNameLength > 0 && machineNameLength < machineNameBytes.Length &&
@@ -30,6 +32,7 @@ public static class RpcAuthSys
             machineNameLength--;
         }
 
+        // RFC 5531 body order: stamp, machine name, uid, gid, then the gids array with its count.
         var writer = new XdrWriter();
         writer.UInt(stamp);
         writer.Opaque(machineNameBytes.AsSpan(0, machineNameLength));

@@ -142,6 +142,7 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
             TargetName = targetName,
         };
 
+        // Optional explicit credentials; without them Negotiate falls back to the process identity.
         if (credentials?.UserName is not null)
         {
             options.Credential = new System.Net.NetworkCredential(
@@ -151,6 +152,7 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
         }
 
         _auth = new System.Net.Security.NegotiateAuthentication(options);
+        // An empty input yields the first handshake token to ship in RPCSEC_GSS_CREATE.
         var token = _auth.GetOutgoingBlob(ReadOnlySpan<byte>.Empty, out _);
         return Task.FromResult(token ?? Array.Empty<byte>());
     }
@@ -160,10 +162,12 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
         if (_auth is null)
             throw new InvalidOperationException("Context not initiated.");
 
+        // Feed the server token back through the handshake; Completed means establishment is done.
         var token = _auth.GetOutgoingBlob(serverToken, out var statusCode);
         if (statusCode == System.Net.Security.NegotiateAuthenticationStatusCode.Completed)
             _established = true;
 
+        // A null token means no further round trip is required.
         return Task.FromResult(token ?? Array.Empty<byte>());
     }
 
@@ -192,6 +196,7 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
         }
         catch
         {
+            // A bad MIC surfaces as an exception; report it as a failed verification instead of throwing.
             return false;
         }
     }

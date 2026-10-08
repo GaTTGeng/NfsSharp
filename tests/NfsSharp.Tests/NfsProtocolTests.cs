@@ -431,16 +431,20 @@ public class NfsModelsTests
     [Fact]
     public async Task NfsV3Client_PreservesRpcProgramVersionAndProcedureRejections()
     {
+        // Three independent MSG_ACCEPTED rejections: PROGRAM_UNAVAILABLE, PROGRAM_MISMATCH, PROCEDURE_UNAVAILABLE.
+        // Each must surface the full prog/vers/proc call context so failures are diagnosable from the message alone.
         await using var programUnavailable = new RpcFixtureServer(1, call =>
             RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.ProgramUnavailable));
 
         var programException = await Assert.ThrowsAsync<NfsException>(
             () => NfsV3Client.ListExportsAsync("127.0.0.1", CreateFixtureOptions(programUnavailable.Port), CancellationToken.None));
 
+        // PMAP GETPORT context is embedded in the failure text even though the call never reaches the mount program.
         Assert.Contains("prog=100000, vers=2, proc=3", programException.Message);
         Assert.Contains("program unavailable", programException.Message);
         await programUnavailable.WaitForRequestsAsync();
 
+        // PROGRAM_MISMATCH carries the server's supported low/high version range as the result arm.
         await using var versionMismatch = new RpcFixtureServer(1, call =>
             RpcFixtureServer.AcceptedReply(
                 call.Xid,
@@ -517,6 +521,7 @@ public class NfsModelsTests
     [Fact]
     public async Task NfsV3Client_ListsEmptyAndGroupVariantExportReplies()
     {
+        // MOUNT EXPORT reply as a linked list of (value_follows, value) pairs; a leading false means an empty list.
         await using var emptyMount = new RpcFixtureServer(1, call =>
             RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.Bool(false)));
         await using var emptyPortmap = CreateMountPortmap(emptyMount.Port);
@@ -527,6 +532,8 @@ public class NfsModelsTests
         await emptyPortmap.WaitForRequestsAsync();
         await emptyMount.WaitForRequestsAsync();
 
+        // One export "/data" with a two-element group list ("*" wildcard plus a named group),
+        // then two terminators: one ends the group list, the next ends the export list.
         await using var groupsMount = new RpcFixtureServer(1, call =>
             RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer =>
             {
@@ -554,6 +561,7 @@ public class NfsModelsTests
     // Two scenarios: a failed MOUNT preserves mountstat3 on the exception, and an unmount RPC failure is surfaced even though the connection stays usable.
     public async Task NfsV3Client_PreservesMountStatusAndUnmountTransportFailure()
     {
+        // Scenario 1: MOUNT MNT succeeds at the RPC layer but returns mountstat3=ACCESS; the status must survive on NfsException.
         await using var deniedMount = new RpcFixtureServer(1, call =>
             RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(MountV3Status.Access)));
         await using var deniedPortmap = new RpcFixtureServer(2, (call, index) =>
@@ -567,6 +575,8 @@ public class NfsModelsTests
         await deniedPortmap.WaitForRequestsAsync();
         await deniedMount.WaitForRequestsAsync();
 
+        // Scenario 2: mount succeeds (MNT returns the fixture root handle), then the UMNT RPC fails.
+        // The NFS endpoint is scripted to throw if any call arrives; only mount/unmount traffic is expected here.
         await using var nfs = new RpcFixtureServer(
             1,
             _ => throw new InvalidOperationException("NFS should not receive an RPC call."),
@@ -586,6 +596,7 @@ public class NfsModelsTests
         var unmountException = await Assert.ThrowsAsync<NfsException>(() => client.UnmountAsync(CancellationToken.None));
 
         Assert.Contains("procedure unavailable", unmountException.Message);
+        // A failed unmount must not poison the connection: a second unmount attempt is still served.
         await client.UnmountAsync(CancellationToken.None);
         await portmap.WaitForRequestsAsync();
         await mount.WaitForRequestsAsync();
@@ -596,18 +607,21 @@ public class NfsModelsTests
     public async Task NfsV3Client_ReadSideProceduresDecodeOptionalMetadataAndExpectedStatuses()
     {
         // RFC 1813 §§3.3.1 and 3.3.3-3.3.6 define these status-discriminated result arms.
+        // Each procedure is scripted twice: once as an OK reply with its full payload, once as its failure status.
         uint[] procedures = [1, 1, 3, 3, 4, 4, 5, 5, 6, 6];
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
         {
             AssertNfsProcedure(call, procedures[index]);
             return index switch
             {
+                // GETATTR OK: fattr3 with type/size/fileid asserted below.
                 0 => NfsReply(call, writer =>
                 {
                     writer.UInt(NfsV3Status.Ok);
                     WriteFattr3(writer, NfsType.Reg, 7, fileId: 42);
                 }),
                 1 => NfsReply(call, writer => writer.UInt(NfsV3Status.NoEnt)),
+                // LOOKUP OK: file handle plus two absent post_op_attr (optional metadata stays null).
                 2 => NfsReply(call, writer =>
                 {
                     writer.UInt(NfsV3Status.Ok);
@@ -616,6 +630,7 @@ public class NfsModelsTests
                     WritePostOpAttr(writer, present: false);
                 }),
                 3 => NfsReply(call, writer => writer.UInt(NfsV3Status.NoEnt)),
+                // ACCESS OK: absent post_op_attr then the granted access bitmap.
                 4 => NfsReply(call, writer =>
                 {
                     writer.UInt(NfsV3Status.Ok);
@@ -623,6 +638,7 @@ public class NfsModelsTests
                     writer.UInt((uint)NfsAccessMode.Read);
                 }),
                 5 => NfsReply(call, writer => writer.UInt(NfsV3Status.Access)),
+                // READLINK OK: absent post_op_attr then the symlink target path.
                 6 => NfsReply(call, writer =>
                 {
                     writer.UInt(NfsV3Status.Ok);
@@ -630,6 +646,7 @@ public class NfsModelsTests
                     writer.Str("target/file");
                 }),
                 7 => NfsReply(call, writer => writer.UInt(NfsV3Status.Inval)),
+                // READ OK: absent post_op_attr, count=3, eof=true, then a 3-byte data opaque.
                 8 => NfsReply(call, writer =>
                 {
                     writer.UInt(NfsV3Status.Ok);
@@ -649,6 +666,7 @@ public class NfsModelsTests
             "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
         try
         {
+            // Success and failure arms are exercised back to back so each procedure keeps its paired fixture order.
             var attr = await client.GetAttributesAsync(FixtureHandle, CancellationToken.None);
             Assert.Equal(NfsType.Reg, attr.Type);
             Assert.Equal(7, attr.Size);
@@ -658,6 +676,7 @@ public class NfsModelsTests
                 () => client.GetAttributesAsync(FixtureHandle, CancellationToken.None));
             Assert.Equal(NfsV3Status.NoEnt, getattrFailure.Status);
 
+            // LOOKUP preserves the handle and treats absent post_op_attr as a null attribute.
             var lookup = await client.LookupAsync(FixtureHandle, "entry", CancellationToken.None);
             Assert.Equal([0xA1], lookup.Handle);
             Assert.Null(lookup.Attr);
@@ -666,6 +685,7 @@ public class NfsModelsTests
                 () => client.LookupAsync(FixtureHandle, "missing", CancellationToken.None));
             Assert.Equal(NfsV3Status.NoEnt, lookupFailure.Status);
 
+            // The granted mask is intersected with the request: only Read remains even though Lookup was also asked for.
             var granted = await client.AccessAsync(
                 FixtureHandle, NfsAccessMode.Read | NfsAccessMode.Lookup, CancellationToken.None);
             Assert.Equal(NfsAccessMode.Read, granted);
@@ -680,6 +700,7 @@ public class NfsModelsTests
                 () => client.ReadLinkAsync(FixtureHandle, CancellationToken.None));
             Assert.Equal(NfsV3Status.Inval, readLinkFailure.Status);
 
+            // A short READ body is fine: the count field, not the caller buffer size, bounds the copied bytes.
             var buffer = new byte[4];
             var read = await client.ReadAtAsync(FixtureHandle, 0, buffer, 0, buffer.Length, CancellationToken.None);
             Assert.Equal(3, read.BytesRead);
@@ -701,6 +722,7 @@ public class NfsModelsTests
     [Fact]
     public async Task NfsV3Client_AccessRejectsResponseGrantsOutsideRequestedMask()
     {
+        // Server grants MODIFY even though only Read was requested; the client must reject the inconsistency.
         await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
         {
             AssertNfsProcedure(call, 4);
@@ -731,6 +753,7 @@ public class NfsModelsTests
     public async Task NfsV3Client_ReadRejectsInconsistentCountsAndNonTerminalEmptyResponses()
     {
         // RFC 1813 §3.3.6 requires count and data to describe the same READ result.
+        // Three malformed replies: count above the request size, opaque longer than count, empty non-terminal read.
         await using var nfs = new RpcFixtureServer(3, (call, index) =>
         {
             AssertNfsProcedure(call, 6);
@@ -740,17 +763,17 @@ public class NfsModelsTests
                 WritePostOpAttr(writer, present: false);
                 switch (index)
                 {
-                    case 0:
+                    case 0: // count=3 for a 2-byte request
                         writer.UInt(3);
                         writer.Bool(true);
                         writer.Opaque([0x01, 0x02, 0x03]);
                         break;
-                    case 1:
+                    case 1: // count=2 but the opaque carries 3 bytes
                         writer.UInt(2);
                         writer.Bool(true);
                         writer.Opaque([0x04, 0x05, 0x06]);
                         break;
-                    case 2:
+                    case 2: // eof=false with zero bytes: a non-terminal page that cannot advance the file offset
                         writer.UInt(0);
                         writer.Bool(false);
                         writer.Opaque([]);
@@ -767,6 +790,7 @@ public class NfsModelsTests
             "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
         try
         {
+            // Each failure maps to a distinct validation message so the exact wire defect is identifiable.
             var countFailure = await Assert.ThrowsAsync<NfsException>(
                 () => client.ReadAtAsync(FixtureHandle, 0, new byte[2], 0, 2, CancellationToken.None));
             Assert.Contains("count 3 for 2 byte request", countFailure.Message);
@@ -775,6 +799,7 @@ public class NfsModelsTests
                 () => client.ReadAtAsync(FixtureHandle, 0, new byte[2], 0, 2, CancellationToken.None));
             Assert.Contains("XDR opaque length is too large", dataFailure.Message);
 
+            // ReadFileAsync streams until eof; a zero-byte non-terminal reply must fail instead of spinning forever.
             await using var output = new MemoryStream();
             var progressFailure = await Assert.ThrowsAsync<NfsException>(
                 () => client.ReadFileAsync(FixtureHandle, output, CancellationToken.None));
@@ -792,10 +817,12 @@ public class NfsModelsTests
     // A short READ body is valid when MaxReadSize is large; only the returned count limits the data.
     public async Task NfsV3Client_ReadFileAllowsShortResponsesWithLargeConfiguredReadLimit()
     {
+        // MaxReadSize is deliberately above 64 MiB so the reply of 1 byte is a short body relative to the request.
         const int largeReadLimit = 64 * 1024 * 1024 + 1;
         await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
         {
             AssertNfsProcedure(call, 6);
+            // The READ request must carry handle, offset 0, and the full configured count.
             var request = new XdrReader(call.Arguments);
             Assert.Equal(FixtureHandle, request.Opaque());
             Assert.Equal(0ul, request.ULong());
@@ -815,6 +842,7 @@ public class NfsModelsTests
             "127.0.0.1", "/export", options, CancellationToken.None);
         try
         {
+            // Only the returned count (1 byte) is written; eof=true ends the streaming loop.
             await using var output = new MemoryStream();
             await client.ReadFileAsync(FixtureHandle, output, CancellationToken.None);
             Assert.Equal([0x5A], output.ToArray());
@@ -831,6 +859,7 @@ public class NfsModelsTests
     // fattr3 size is unsigned 64-bit on the wire, but the public model exposes Int64; values above that range must be rejected.
     public async Task NfsV3Client_GetAttrRejectsFileSizesOutsideThePublicModelRange()
     {
+        // Wire size of 2^64-1 cannot be represented by the Int64 public model and must be rejected at decode time.
         await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
         {
             AssertNfsProcedure(call, 1);
@@ -860,6 +889,7 @@ public class NfsModelsTests
     public async Task NfsV3Client_DirectoryResultsContinueCookiesAndRejectMalformedPages()
     {
         // RFC 1813 §§3.3.16-3.3.17 require cookie/verifier continuation for non-terminal pages.
+        // Two multi-page traversals (READDIR and READDIRPLUS) followed by status and paging-defect cases.
         byte[] readDirVerifier = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
         byte[] readDirPlusVerifier = [0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27];
         uint[] procedures = [16, 16, 17, 17, 16, 17, 16, 17];
@@ -868,10 +898,12 @@ public class NfsModelsTests
             AssertNfsProcedure(call, procedures[index]);
             switch (index)
             {
+                // Page 1 of READDIR: starts at cookie 0 with a zeroed verifier, ends at cookie 11.
                 case 0:
                     AssertReadDirRequest(call, expectedCookie: 0, new byte[8], plus: false);
                     return NfsReply(call, writer => WriteReadDirResult(
                         writer, readDirVerifier, [(1ul, "first", 11ul)], eof: false));
+                // Page 2 continues with the verifier echoed from page 1 and the prior entry cookie.
                 case 1:
                     AssertReadDirRequest(call, expectedCookie: 11, readDirVerifier, plus: false);
                     return NfsReply(call, writer => WriteReadDirResult(
@@ -884,13 +916,16 @@ public class NfsModelsTests
                     AssertReadDirRequest(call, expectedCookie: 33, readDirPlusVerifier, plus: true);
                     return NfsReply(call, writer => WriteReadDirPlusResult(
                         writer, readDirPlusVerifier, [(4ul, "fourth", 44ul)], eof: true));
+                // Status arms surface as NfsException without any client-side cookie bookkeeping.
                 case 4:
                     return NfsReply(call, writer => writer.UInt(NfsV3Status.BadCookie));
                 case 5:
                     return NfsReply(call, writer => writer.UInt(NfsV3Status.NotDir));
+                // Empty non-terminal page: no entries and eof=false cannot advance the cookie.
                 case 6:
                     return NfsReply(call, writer => WriteReadDirResult(
                         writer, new byte[8], [], eof: false));
+                // Entry whose cookie repeats the page start (0), so the page is stalled.
                 case 7:
                     return NfsReply(call, writer => WriteReadDirPlusResult(
                         writer, new byte[8], [(5ul, "stalled", 0ul)], eof: false));
@@ -905,12 +940,14 @@ public class NfsModelsTests
             "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
         try
         {
+            // Both paginated traversals must stitch pages via cookie/verifier and yield entry fileids in order.
             var entries = await client.ReadDirAsync(FixtureHandle, CancellationToken.None);
             Assert.Collection(
                 entries,
                 entry => Assert.Equal(new NfsEntry("first", 1), entry),
                 entry => Assert.Equal(new NfsEntry("second", 2), entry));
 
+            // READDIRPLUS entries without attributes/handles decode as nulls rather than default values.
             var plusEntries = await client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None);
             Assert.Collection(
                 plusEntries,
@@ -956,6 +993,7 @@ public class NfsModelsTests
     {
         // RFC 1813 §§3.3.2 and 3.3.8-3.3.15 use WCC data even when optional
         // pre- and post-operation attributes are unavailable.
+        // Eight mutation procedures, each scripted as an OK reply then a typical failure status.
         uint[] procedures = [2, 2, 8, 8, 9, 9, 12, 12, 13, 13, 14, 14, 15, 15, 10, 10];
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
         {
@@ -964,6 +1002,7 @@ public class NfsModelsTests
             {
                 switch (index)
                 {
+                    // SETATTR: bare WCC data on both arms (no handle/attr payload).
                     case 0:
                         writer.UInt(NfsV3Status.Ok);
                         WriteWccData(writer);
@@ -972,6 +1011,7 @@ public class NfsModelsTests
                         writer.UInt(NfsV3Status.Access);
                         WriteWccData(writer);
                         break;
+                    // CREATE / SYMLINK: diropres3 carries handle + post_op_attr on success, WCC on failure.
                     case 2:
                         writer.UInt(NfsV3Status.Ok);
                         WriteDiropResult(writer, [0xC8]);
@@ -988,6 +1028,7 @@ public class NfsModelsTests
                         writer.UInt(NfsV3Status.Exist);
                         WriteWccData(writer);
                         break;
+                    // REMOVE / RMDIR / RENAME: WCC-only results; RENAME carries two cinfo structures.
                     case 6:
                         writer.UInt(NfsV3Status.Ok);
                         WriteWccData(writer);
@@ -1014,6 +1055,7 @@ public class NfsModelsTests
                         WriteWccData(writer);
                         WriteWccData(writer);
                         break;
+                    // LINK: absent post_op_attr for the source plus WCC for the new name's directory.
                     case 12:
                         writer.UInt(NfsV3Status.Ok);
                         WritePostOpAttr(writer, present: false);
@@ -1044,9 +1086,11 @@ public class NfsModelsTests
             "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
         try
         {
+            // Each mutation is called twice: once succeeding, once hitting its scripted status.
             await client.SetAttributesAsync(FixtureHandle, new NfsSetAttributes { Mode = 0x1A4 }, CancellationToken.None);
             await AssertStatusAsync(NfsV3Status.Access, () => client.SetAttributesAsync(FixtureHandle, new NfsSetAttributes(), CancellationToken.None));
 
+            // CREATE and MKDIR return the new object's handle on success.
             Assert.Equal([0xC8], (await client.CreateFileAsync(FixtureHandle, "created", null, CancellationToken.None)).Handle);
             await AssertStatusAsync(NfsV3Status.Exist, () => client.CreateFileAsync(FixtureHandle, "created", null, CancellationToken.None));
 
@@ -1062,6 +1106,7 @@ public class NfsModelsTests
             await client.MoveAsync("from", "to", CancellationToken.None);
             await AssertStatusAsync(NfsV3Status.NoEnt, () => client.MoveAsync("missing", "to", CancellationToken.None));
 
+            // LINK failure uses STALE to prove the source-handle status is preserved.
             await client.CreateHardLinkAsync([0xD1], FixtureHandle, "hard-link", CancellationToken.None);
             await AssertStatusAsync(NfsV3Status.Stale, () => client.CreateHardLinkAsync([0xD1], FixtureHandle, "stale-link", CancellationToken.None));
 
@@ -1082,10 +1127,12 @@ public class NfsModelsTests
     {
         byte[] writeVerifier = [0, 1, 2, 3, 4, 5, 6, 7];
         byte[] commitVerifier = [7, 6, 5, 4, 3, 2, 1, 0];
+        // Four WRITE replies (valid, status, bad stability enum, short verifier) and three COMMIT replies.
         uint[] procedures = [7, 7, 7, 7, 21, 21, 21];
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
         {
             AssertNfsProcedure(call, procedures[index]);
+            // COMMIT request layout is checked on the wire: handle, offset, and count, with nothing trailing.
             if (index == 4)
             {
                 var request = new XdrReader(call.Arguments);
@@ -1101,25 +1148,25 @@ public class NfsModelsTests
                 WriteWccData(writer);
                 switch (index)
                 {
-                    case 0:
+                    case 0: // Valid writeres3: count, committed, and a full 8-byte writeverf.
                         writer.UInt(3);
                         writer.UInt((uint)NfsWriteStableHow.DataSync);
                         writer.FixedBytes(writeVerifier);
                         break;
-                    case 2:
+                    case 2: // committed=99 is outside the stable_how enum.
                         writer.UInt(1);
                         writer.UInt(99);
                         writer.FixedBytes(writeVerifier);
                         break;
-                    case 3:
+                    case 3: // writeverf truncated to 4 bytes.
                         writer.UInt(1);
                         writer.UInt((uint)NfsWriteStableHow.FileSync);
                         writer.FixedBytes([0x01, 0x02, 0x03, 0x04]);
                         break;
-                    case 4:
+                    case 4: // Valid commit: a full 8-byte writeverf after the shared WCC data.
                         writer.FixedBytes(commitVerifier);
                         break;
-                    case 6:
+                    case 6: // commit writeverf truncated to 4 bytes.
                         writer.FixedBytes([0x01, 0x02, 0x03, 0x04]);
                         break;
                 }
@@ -1128,6 +1175,7 @@ public class NfsModelsTests
         await using var mount = CreateMountedExportServer();
         await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
 
+        // MaxRetries=0 so malformed replies surface immediately instead of being retried.
         var client = await NfsV3Client.ConnectAsync(
             "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port) with { MaxRetries = 0 }, CancellationToken.None);
         try
@@ -1168,6 +1216,7 @@ public class NfsModelsTests
     // Zero-valued FSSTAT/FSINFO/PATHCONF fields must round-trip as zero; time_delta nanoseconds above 999,999,999 are rejected.
     public async Task NfsV3Client_CapabilityResultsHandleZeroValuesStatusesAndBoundaries()
     {
+        // FSSTAT, FSINFO (twice), and PATHCONF, each paired with a STALE failure except the invalid time_delta case.
         uint[] procedures = [18, 18, 19, 19, 19, 20, 20];
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
         {
@@ -1178,12 +1227,12 @@ public class NfsModelsTests
                 WritePostOpAttr(writer, present: false);
                 switch (index)
                 {
-                    case 0:
+                    case 0: // FSSTAT: six unsigned hyper fields, then tbytes-encoded time_delta seconds as zero.
                         for (var field = 0; field < 6; field++)
                             writer.ULong(0);
                         writer.UInt(0);
                         break;
-                    case 2:
+                    case 2: // FSINFO: all-zero sizes/limits, zero time_delta, and zero properties.
                         for (var field = 0; field < 7; field++)
                             writer.UInt(0);
                         writer.ULong(0);
@@ -1191,7 +1240,7 @@ public class NfsModelsTests
                         writer.UInt(0);
                         writer.UInt(0);
                         break;
-                    case 4:
+                    case 4: // time_delta nanoseconds = 1e9 is one past the legal maximum (999,999,999).
                         for (var field = 0; field < 7; field++)
                             writer.UInt(0);
                         writer.ULong(0);
@@ -1199,7 +1248,7 @@ public class NfsModelsTests
                         writer.UInt(1_000_000_000);
                         writer.UInt(0);
                         break;
-                    case 5:
+                    case 5: // PATHCONF: zero linkmax/namelength plus four false boolean flags.
                         writer.UInt(0);
                         writer.UInt(0);
                         for (var field = 0; field < 4; field++)
@@ -1215,6 +1264,7 @@ public class NfsModelsTests
             "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
         try
         {
+            // Zero on the wire must stay zero in the public model (no "unset" sentinel substitution).
             var stat = await client.GetFileSystemStatAsync(FixtureHandle, CancellationToken.None);
             Assert.Equal(0ul, stat.TotalBytes);
             Assert.Equal(TimeSpan.Zero, stat.InvariantUntil);
@@ -1225,6 +1275,7 @@ public class NfsModelsTests
             Assert.Equal(TimeSpan.Zero, info.TimeDelta);
             await AssertStatusAsync(NfsV3Status.Stale, () => client.GetFileSystemInfoAsync(FixtureHandle, CancellationToken.None));
 
+            // time_delta is a nfstime3; nanoseconds outside [0, 999999999] are not a valid duration.
             var invalidDelta = await Assert.ThrowsAsync<NfsException>(
                 () => client.GetFileSystemInfoAsync(FixtureHandle, CancellationToken.None));
             Assert.Contains("time_delta nanoseconds", invalidDelta.Message);
@@ -1285,12 +1336,15 @@ public class NfsModelsTests
     [Fact]
     public void NfsClientOptions_RejectsInvalidRetryAndCacheOptions()
     {
+        // Each case feeds one invalid field into Validate(); every one must throw before any connection is attempted.
         Assert.Throws<NfsException>(
             () => new NfsClientOptions { CommandTimeout = TimeSpan.FromMilliseconds(-1) }.Validate());
 
+        // stable_how outside the enum range is rejected at option-validation time, not on the wire.
         Assert.Throws<NfsException>(
             () => new NfsClientOptions { StableHow = (NfsWriteStableHow)99 }.Validate());
 
+        // Retry and concurrency limits must be non-negative and at least one, respectively.
         Assert.Throws<NfsException>(
             () => new NfsClientOptions { MaxRetries = -1 }.Validate());
 
@@ -1300,6 +1354,7 @@ public class NfsModelsTests
         Assert.Throws<NfsException>(
             () => new NfsClientOptions { RetryDelay = TimeSpan.FromMilliseconds(-1) }.Validate());
 
+        // A directory cache without a positive TTL cannot serve a coherent entry.
         Assert.Throws<NfsException>(
             () => new NfsClientOptions
             {
@@ -1499,6 +1554,7 @@ public class NfsModelsTests
         byte[] expectedVerifier,
         bool plus)
     {
+        // Request payload: handle, start cookie, cookieverf, dircount; READDIRPLUS also carries maxcount.
         var reader = new XdrReader(call.Arguments);
         Assert.Equal(FixtureHandle, reader.Opaque());
         Assert.Equal(expectedCookie, reader.ULong());
@@ -1556,6 +1612,7 @@ public class NfsModelsTests
 
     private static void WritePostOpAttr(XdrWriter writer, bool present)
     {
+        // post_op_attr is a presence flag; false means the optional attributes are simply absent.
         writer.Bool(present);
         if (present)
             WriteFattr3(writer, NfsType.Reg, 0);
@@ -1570,6 +1627,7 @@ public class NfsModelsTests
 
     private static void WriteDiropResult(XdrWriter writer, byte[] fileHandle)
     {
+        // diropres3: handle presence + handle, post_op_attr for the new object, then WCC for its parent directory.
         writer.Bool(true);
         writer.Opaque(fileHandle);
         WritePostOpAttr(writer, present: false);
@@ -1703,6 +1761,7 @@ public class NfsModelsTests
     [Fact]
     public void NfsV4Bitmap_Of_EncodesAttributeNumbersIntoMaskWords()
     {
+        // Attribute numbers 1 (type), 2 (mode), and 33 (owner_group) pack into two 32-bit mask words.
         var bitmap = NfsV4Bitmap.Of(
             NfsV4Attr.Type,
             NfsV4Attr.Mode,
@@ -1712,12 +1771,15 @@ public class NfsModelsTests
         Assert.True(bitmap.HasAttr(NfsV4Attr.Mode));
         Assert.True(bitmap.HasAttr(NfsV4Attr.OwnerGroup));
         Assert.False(bitmap.HasAttr(NfsV4Attr.Size));
+        // Word 0 covers attrs 0-31 (bits 1 and 2); word 1 covers attrs 32-63 (bit 1 => attr 33).
         Assert.Equal([1u << 1, (1u << 1) | (1u << 5)], bitmap.Masks);
 
+        // Masks is a defensive copy: mutating the returned array must not affect the bitmap.
         var masks = bitmap.Masks;
         masks[0] = 0;
         Assert.True(bitmap.HasAttr(NfsV4Attr.Type));
 
+        // Wire form is count-prefixed words followed by the big-endian mask words themselves.
         var writer = new XdrWriter();
         bitmap.Encode(writer);
         var reader = new XdrReader(writer.ToArray());
@@ -1741,8 +1803,10 @@ public class NfsModelsTests
         };
         var expected = data.ToArray();
         var stateId = new NfsV4StateId(data);
+        // Mutating the constructor input after construction must not change the encoded state.
         data[0] = 0xFF;
 
+        // Wire layout is a 4-byte sequence id (big-endian) followed by the 12-byte "other" field.
         var writer = new XdrWriter();
         stateId.Encode(writer);
         var reader = new XdrReader(writer.ToArray());
@@ -1751,6 +1815,7 @@ public class NfsModelsTests
         Assert.Equal(expected[4..], reader.FixedBytes(12));
         Assert.Equal(0, reader.Remaining);
 
+        // Decode the same layout back and confirm the round trip preserves every byte.
         writer = new XdrWriter();
         writer.UInt(0x01020304u);
         writer.FixedBytes(expected[4..]);
@@ -1758,6 +1823,7 @@ public class NfsModelsTests
         var decoded = NfsV4StateId.Decode(new XdrReader(writer.ToArray()));
         Assert.Equal(expected, decoded.Data);
 
+        // The Data property returns a fresh copy each time.
         var returned = decoded.Data;
         returned[4] = 0xFF;
         Assert.Equal(expected, decoded.Data);
@@ -2265,10 +2331,12 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
 
     private async Task ServeAsync(int expectedRequests, Func<RpcFixtureCall, int, byte[]> reply, bool readRequests)
     {
+        // Accepts connections until the scripted call count is exhausted; one connection may carry several calls.
         var index = 0;
         while (index < expectedRequests)
         {
             using var client = await _listener.AcceptTcpClientAsync();
+            // readRequests=false mode only counts connections (used when the client is not expected to send anything).
             if (!readRequests)
             {
                 index++;
@@ -2284,6 +2352,7 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
                 }
                 catch (EndOfStreamException)
                 {
+                    // Client closed the connection early; accept a replacement for the remaining calls.
                     break;
                 }
 
@@ -2295,6 +2364,7 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
 
     private static async Task<RpcFixtureCall> ReadCallAsync(Stream stream)
     {
+        // Decodes an RPC CALL envelope: xid, msg_type, rpcvers, program/version/procedure, then credential and verifier.
         var record = await ReadRecordAsync(stream);
         var reader = new XdrReader(record);
         var xid = reader.UInt();
@@ -2307,11 +2377,13 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
         reader.SkipOpaque();
         reader.UInt(); // verifier flavor
         reader.SkipOpaque();
+        // Everything after the auth fields is the procedure-specific argument payload.
         return new RpcFixtureCall(xid, program, version, procedure, reader.ReadRemainingBytes());
     }
 
     private static async Task<byte[]> ReadRecordAsync(Stream stream)
     {
+        // RFC 5531 record marking: fragments carry a high-bit "last" flag plus a 31-bit length.
         using var result = new MemoryStream();
         var last = false;
         var header = new byte[4];

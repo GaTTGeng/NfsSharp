@@ -116,6 +116,7 @@ public sealed partial class NfsV3Client
     {
         ValidateWritableStream(output);
         NfsV3ProtocolClient.ValidateHandle(fileFh);
+        // Chunked READ loop sized by the negotiated per-request limit.
         var buffer = new byte[_options.MaxReadSize];
         ulong offset = 0;
         while (true)
@@ -127,6 +128,7 @@ public sealed partial class NfsV3Client
                 offset += (ulong)count;
             }
             if (eof) break;
+            // Non-EOF with no data would spin forever; treat it as a protocol error.
             if (count == 0) throw new NfsException("READ returned a non-terminal response without data.");
         }
     }
@@ -158,6 +160,7 @@ public sealed partial class NfsV3Client
         NfsV3ProtocolClient.ValidateHandle(fileFh);
         var buffer = new byte[_options.MaxWriteSize];
         ulong offset = 0;
+        // Outer loop drains the input stream; inner loop retries partial WRITEs until the chunk is fully stored.
         while (true)
         {
             var read = await input.ReadAsync(buffer.AsMemory(), ct);
@@ -167,6 +170,7 @@ public sealed partial class NfsV3Client
             {
                 var result = await _protocolClient.WriteAsync(
                     fileFh, offset, buffer.AsMemory(written, read - written), ct);
+                // A zero-count WRITE makes no progress and would loop forever.
                 if (result.Count <= 0) throw new NfsException("WRITE made no progress.");
                 written += result.Count;
                 offset += (ulong)result.Count;
@@ -183,6 +187,7 @@ public sealed partial class NfsV3Client
         NfsLookup file;
         try
         {
+            // Existing file: truncate to zero so the write replaces rather than patches content.
             file = await LookupAsync(parent, name, ct);
             await SetFileSizeAsync(file.Handle, 0, ct);
         }
@@ -277,6 +282,7 @@ public sealed partial class NfsV3Client
     {
         if (recursive)
         {
+            // Depth-first: every child must be gone before the directory itself can be RMDIR'd.
             var directory = await LookupAsync(parentHandle, name, ct);
             foreach (var entry in await ReadDirAsync(directory.Handle, ct))
             {

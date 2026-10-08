@@ -25,6 +25,7 @@ internal sealed class RpcSecGssSession
         var body = new XdrWriter();
         body.UInt((uint)context.ContextHandle.Length);
         body.Opaque(context.ContextHandle);
+        // Sequence numbers must strictly increase; RpcClient serializes GSS calls around this increment.
         body.UInt(context.Mechanism.NextSeqNum++);
         body.UInt((uint)context.Service);
         writer.Opaque(body.ToArray());
@@ -53,7 +54,9 @@ internal sealed class RpcSecGssSession
     {
         var mechanism = _options.GssMechanism
                         ?? throw new InvalidOperationException("A GSS mechanism was not configured.");
+        // Default target principal follows the conventional nfs/<host> service name.
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
+        // Phase 1: local GSS context initiation produces the token the server must consume.
         var token = await mechanism.InitiateContextAsync(targetName, _options.GssCredentials, ct);
 
         // CREATE arguments: procedure, GSS token, requested service, sequence-window hint.
@@ -71,10 +74,12 @@ internal sealed class RpcSecGssSession
             0,
             arguments.ToArray(),
             ct);
+        // Phase 2: decode the CREATE result before publishing any session state.
         var status = reader.UInt();
         if (status != 0)
             throw new NfsException($"RPCSEC_GSS_CREATE failed (stat={status}).");
 
+        // Publish the context only after the full reply decodes, so later CALLs never sign with a partial session.
         _context = new RpcSecGssContext
         {
             ContextHandle = reader.Opaque(),

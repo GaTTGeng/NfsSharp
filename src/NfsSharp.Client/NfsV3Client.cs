@@ -66,6 +66,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         };
         try
         {
+            // Phase 1: ask portmap for mountd and nfsd TCP ports before any NFS traffic.
             var mountPort = await client._portmapClient.GetTcpPortAsync(
                 NfsRpcConstants.ProgMount, NfsRpcConstants.VerMount, ct);
             var nfsPort = await client._portmapClient.GetTcpPortAsync(
@@ -73,8 +74,11 @@ public sealed partial class NfsV3Client : IAsyncDisposable
             PortmapClient.EnsureMapped(mountPort, "mountd");
             PortmapClient.EnsureMapped(nfsPort, "NFS");
             client._mountPort = mountPort;
+            // Phase 2: MNT returns the export-root handle every path walk starts from.
             client._rootFh = await client._mountClient.MountAsync(mountPort, exportPath, ct);
+            // Phase 3: open the long-lived NFS connection used for file operations.
             await client._rpcClient.ConnectAsync(nfsPort, ct);
+            // Phase 4: optional RPCSEC_GSS context must exist before authenticated calls.
             if (options.GssMechanism is not null)
                 await client._gssSession.EstablishAsync(server, client._rpcClient, ct);
             client._logger?.LogInformation(
@@ -84,6 +88,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         catch
         {
+            // Partial setup must not leak sockets or a half-open RPC client.
             await client._rpcClient.DisposeAsync();
             throw;
         }
@@ -110,6 +115,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
     /// <summary>Unmount the export and close the active NFS connection.</summary>
     public async Task UnmountAsync(CancellationToken ct)
     {
+        // Idempotent guard: concurrent dispose/unmount must not send UMNT twice.
         if (_unmounted) return;
         _unmounted = true;
         _logger?.LogInformation("Unmounting NFS export {Export}", _exportPath);
@@ -120,6 +126,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         finally
         {
+            // Always tear down the RPC connection, even when UMNT itself failed.
             await _rpcClient.StopAndCloseActiveConnectionAsync();
         }
     }
@@ -199,9 +206,11 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         _disposed = true;
         try
         {
+            // Best-effort UMNT with a short deadline so dispose cannot hang on a sick server.
             using var source = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await UnmountAsync(source.Token);
         }
+        // Unmount failed or timed out: still drop the live connection before full dispose.
         catch { await _rpcClient.CloseActiveConnectionAsync(); }
         finally { await _rpcClient.DisposeAsync(); }
     }

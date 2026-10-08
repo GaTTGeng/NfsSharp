@@ -40,6 +40,7 @@ internal sealed class NfsV3ProtocolClient
         writer.Str(name);
         var reader = await CallAsync(NfsRpcConstants.NfsLookup, writer, ct);
         EnsureOk(reader.UInt(), $"LOOKUP \"{name}\" failed");
+        // LOOKUP reply: object handle, its post_op_attr, then the directory's post_op_attr.
         var handle = reader.Opaque();
         var attributes = ReadPostOpAttr(reader);
         ReadPostOpAttr(reader); // dir_attributes (post_op_attr) — currently unused
@@ -79,6 +80,7 @@ internal sealed class NfsV3ProtocolClient
         ValidateHandle(fileHandle);
         var reader = await CallAsync(NfsRpcConstants.NfsFsinfo, HandleArguments(fileHandle), ct);
         EnsureOk(reader.UInt(), "FSINFO failed");
+        // FSINFO reply: post_op_attr, transfer-size triplets, time_delta, then property bits.
         ReadPostOpAttr(reader);
         var maxReadSize = reader.UInt();
         var preferredReadSize = reader.UInt();
@@ -90,6 +92,7 @@ internal sealed class NfsV3ProtocolClient
         var maxFileSize = reader.ULong();
         var seconds = reader.UInt();
         var nanoseconds = reader.UInt();
+        // time_delta is a normalized duration; a nanosecond field of 1s or more is malformed.
         if (nanoseconds >= 1_000_000_000)
             throw new NfsException($"FSINFO returned an invalid time_delta nanoseconds value {nanoseconds}.");
         var properties = reader.UInt();
@@ -175,6 +178,7 @@ internal sealed class NfsV3ProtocolClient
         writer.UInt(count);
         var reader = await CallAsync(NfsRpcConstants.NfsCommit, writer, ct);
         EnsureOk(reader.UInt(), "COMMIT failed");
+        // COMMIT reply: wcc_data followed by the 8-byte write verifier identifying the server's stable store.
         ReadWccData(reader);
         return new NfsCommitResult(reader.FixedBytes(8));
     }
@@ -256,6 +260,7 @@ internal sealed class NfsV3ProtocolClient
     internal async Task<List<NfsEntryPlus>> ReadDirectoryPlusAsync(byte[] directoryHandle, CancellationToken ct)
     {
         ValidateHandle(directoryHandle);
+        // Serve from cache when enabled and fresh; callers receive a defensive clone.
         if (_directoryCache.TryGet(directoryHandle, out var cached))
             return cached;
 
@@ -268,6 +273,7 @@ internal sealed class NfsV3ProtocolClient
         // READDIRPLUS is paged via the opaque cookie; loop until the server reports eof.
         while (true)
         {
+            // Remember the request cookie so a non-advancing page can be rejected below.
             var requestCookie = cookie;
             var pageCount = 0;
             var writer = HandleArguments(directoryHandle);
@@ -278,6 +284,7 @@ internal sealed class NfsV3ProtocolClient
             var reader = await CallAsync(NfsRpcConstants.NfsReadDirPlus, writer, ct);
             EnsureOk(reader.UInt(), "READDIRPLUS failed");
             ReadPostOpAttr(reader);
+            // Echo the returned verifier on every subsequent page of this listing.
             verifier = reader.FixedBytes(8);
             while (reader.Bool())
             {
@@ -296,6 +303,7 @@ internal sealed class NfsV3ProtocolClient
                 break;
         }
 
+        // Store only when no mutation raced the read; otherwise the listing is returned uncached.
         _directoryCache.Store(directoryHandle, entries, cacheGeneration);
         return entries;
     }
@@ -310,6 +318,7 @@ internal sealed class NfsV3ProtocolClient
         // Same cookie-paging loop as READDIRPLUS; results are never cached here.
         while (true)
         {
+            // Remember the request cookie so a stuck server page can be detected below.
             var requestCookie = cookie;
             var pageCount = 0;
             var writer = HandleArguments(directoryHandle);
@@ -319,6 +328,7 @@ internal sealed class NfsV3ProtocolClient
             var reader = await CallAsync(NfsRpcConstants.NfsReadDir, writer, ct);
             EnsureOk(reader.UInt(), "READDIR failed");
             ReadPostOpAttr(reader);
+            // The returned verifier must be echoed on every subsequent page of this listing.
             verifier = reader.FixedBytes(8);
             while (reader.Bool())
             {
@@ -361,12 +371,14 @@ internal sealed class NfsV3ProtocolClient
         var reader = await CallAsync(NfsRpcConstants.NfsRead, writer, ct);
         EnsureOk(reader.UInt(), "READ failed");
         ReadPostOpAttr(reader);
+        // Reply order: count, eof flag, then the data opaque.
         var count = reader.UInt();
         var eof = reader.Bool();
         if (count > destination.Length)
             throw new NfsException($"READ returned count {count} for {destination.Length} byte request.");
         // Cap the opaque length we are willing to decode as a defense against oversized replies.
         var data = reader.Opaque(Math.Min(destination.Length, MaxRpcRecordLength));
+        // count and the data payload must agree; a mismatch means a corrupt reply.
         if (data.Length != count)
             throw new NfsException($"READ returned {data.Length} bytes but count was {count}.");
         data.CopyTo(destination);
@@ -382,6 +394,7 @@ internal sealed class NfsV3ProtocolClient
     {
         ct.ThrowIfCancellationRequested();
         ValidateHandle(fileHandle);
+        // Zero-length WRITE is a no-op; skip the round trip and report the requested stability.
         if (data.Length == 0)
             return new NfsWriteResult(0, _options.StableHow, Array.Empty<byte>());
         if (data.Length > _options.MaxWriteSize)
@@ -390,6 +403,7 @@ internal sealed class NfsV3ProtocolClient
                 $"WRITE request length {data.Length} exceeds MaxWriteSize {_options.MaxWriteSize}.");
         }
 
+        // WRITE args: handle, offset, count, stable_how, then the data opaque.
         var writer = HandleArguments(fileHandle);
         writer.ULong(offset);
         writer.UInt((uint)data.Length);
@@ -398,6 +412,7 @@ internal sealed class NfsV3ProtocolClient
         var reader = await CallAsync(NfsRpcConstants.NfsWrite, writer, ct);
         EnsureOk(reader.UInt(), "WRITE failed");
         ReadWccData(reader);
+        // Reply: wcc_data, written count, the stability actually committed, and the write verifier.
         var count = reader.UInt();
         var committed = (NfsWriteStableHow)reader.UInt();
         var verifier = reader.FixedBytes(8);
@@ -459,6 +474,7 @@ internal sealed class NfsV3ProtocolClient
         WriteSattrGuard3(writer, guardCtime);
         var reader = await CallAsync(NfsRpcConstants.NfsSetAttr, writer, ct);
         EnsureOk(reader.UInt(), "SETATTR failed");
+        // wcc_data reports before/after metadata; attributes cached for this handle are now stale.
         ReadWccData(reader);
         _directoryCache.InvalidateForMutation(fileHandle);
     }
@@ -549,6 +565,7 @@ internal sealed class NfsV3ProtocolClient
     /// <summary>Decode the diropok3 result shared by CREATE, MKDIR, SYMLINK, and MKNOD.</summary>
     private static NfsLookup ReadDiropOk(XdrReader reader)
     {
+        // A false handle flag yields an empty handle (some servers omit it on failure paths).
         var handle = reader.Bool() ? reader.Opaque() : Array.Empty<byte>();
         var attributes = ReadPostOpAttr(reader);
         ReadWccData(reader);
@@ -562,6 +579,7 @@ internal sealed class NfsV3ProtocolClient
     /// <summary>Decode fattr3 in wire order (timestamps last).</summary>
     private static NfsFattr ReadFattr3(XdrReader reader)
     {
+        // Wire order is fixed: type/mode/nlink/uid/gid, size/used, rdev, fsid/fileid, then atime/mtime/ctime.
         var type = (NfsType)reader.UInt();
         var mode = reader.UInt();
         var linkCount = reader.UInt();
@@ -618,6 +636,7 @@ internal sealed class NfsV3ProtocolClient
     /// <summary>Encode sattr3 in wire order; each optional field carries its own presence flag.</summary>
     private static void WriteSattr3(XdrWriter writer, NfsSetAttributes attributes)
     {
+        // Fixed wire order: mode, uid, gid, size, atime, mtime — each as set_size3/set_time3.
         WriteOptionalUInt(writer, attributes.Mode);
         WriteOptionalUInt(writer, attributes.Uid);
         WriteOptionalUInt(writer, attributes.Gid);

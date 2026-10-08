@@ -46,14 +46,17 @@ public static class RpcReplyParser
     public static RpcReply Decode(byte[] message, uint expectedXid)
     {
         var reader = new XdrReader(message);
+        // Match the reply to the outstanding call before interpreting anything else.
         var xid = reader.UInt();
         if (xid != expectedXid)
             throw new NfsException($"RPC xid mismatch. Expected {expectedXid}, got {xid}.");
 
+        // Only REPLY messages are legal here; a CALL would mean a mis-framed stream.
         var messageType = reader.UInt();
         if (messageType != Reply)
             throw new NfsException($"Unexpected RPC message type: {messageType}.");
 
+        // Branch on reply_stat: MSG_ACCEPTED continues into accept_stat, MSG_DENIED into reject_stat.
         return reader.UInt() switch
         {
             MsgAccepted => DecodeAccepted(reader),
@@ -65,18 +68,22 @@ public static class RpcReplyParser
     /// <summary>Decodes MSG_ACCEPTED: reply verifier, then accept_stat; only SUCCESS exposes a body.</summary>
     private static RpcReply DecodeAccepted(XdrReader reader)
     {
+        // Consume the reply verifier first; every MSG_ACCEPTED carries it regardless of accept_stat.
         var verifierFlavor = reader.UInt();
         var verifier = reader.Opaque(MaxAuthBodyLength);
+        // AUTH_NONE must carry a zero-length verifier body; anything else is malformed.
         if (verifierFlavor == AuthNone && verifier.Length != 0)
             throw new NfsException("Malformed RPC reply verifier: AUTH_NONE must be empty.");
 
         switch (reader.UInt())
         {
             case Success:
+                // SUCCESS is the only accept_stat that carries a procedure result payload.
                 return new RpcReply(verifierFlavor, verifier, reader);
             case ProgUnavail:
                 throw new NfsException("RPC call rejected: program unavailable.");
             case ProgMismatch:
+                // Mismatch replies append a low/high version range; read it before throwing.
                 ThrowProgramMismatch(reader, "RPC call rejected: program version mismatch");
                 break;
             case ProcUnavail:
@@ -95,6 +102,7 @@ public static class RpcReplyParser
     /// <summary>Decodes MSG_DENIED: RPC version mismatch or an auth_stat authentication failure.</summary>
     private static RpcReply DecodeDenied(XdrReader reader)
     {
+        // reject_stat selects the payload: RPC_MISMATCH carries versions, AUTH_ERROR carries auth_stat.
         switch (reader.UInt())
         {
             case RpcMismatch:
@@ -102,6 +110,7 @@ public static class RpcReplyParser
                 break;
             case AuthError:
                 var authStatus = reader.UInt();
+                // auth_stat is a closed 1..14 range in RFC 5531; anything else is not mappable.
                 if (authStatus is < 1 or > 14)
                     throw new NfsException($"Invalid RPC auth_stat discriminator: {authStatus}.");
                 throw new NfsException($"RPC message denied: authentication error ({DescribeAuthStatus(authStatus)}; auth_stat={authStatus}).");
@@ -115,6 +124,7 @@ public static class RpcReplyParser
     /// <summary>Throws with the low/high version range carried by a mismatch reply.</summary>
     private static void ThrowProgramMismatch(XdrReader reader, string prefix)
     {
+        // Both mismatch forms end with the supported version range before the failure surfaces.
         var low = reader.UInt();
         var high = reader.UInt();
         throw new NfsException($"{prefix} (supported range {low}..{high}).");

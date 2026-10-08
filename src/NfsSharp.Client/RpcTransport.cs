@@ -213,6 +213,7 @@ internal sealed class RpcConnection : IAsyncDisposable
 
         UpdateHighWaterMark(Interlocked.Increment(ref _pendingCallCount));
 
+        // Re-check after insert: a concurrent FailConnection must not leave this waiter stranded.
         var failure = _failure;
         if (Volatile.Read(ref _disposed) != 0 || failure is not null)
         {
@@ -309,6 +310,7 @@ internal sealed class RpcConnection : IAsyncDisposable
     {
         try
         {
+            // Single reader demultiplexing concurrent CALLs; exits only on lifetime cancellation.
             while (!_lifetime.IsCancellationRequested)
             {
                 var record = await RpcTransport.ReceiveRecordAsync(
@@ -322,11 +324,13 @@ internal sealed class RpcConnection : IAsyncDisposable
                 var xid = BinaryPrimitives.ReadUInt32BigEndian(record);
                 if (_pendingCalls.TryRemove(xid, out var pending))
                 {
+                    // Claiming the waiter here also owns the pending-count decrement.
                     Interlocked.Decrement(ref _pendingCallCount);
                     pending.TrySetResult(record);
                 }
                 else
                 {
+                    // Unmatched replies are late or duplicate; drop them without failing the connection.
                     _logger?.LogDebug(
                         "Discarded unmatched RPC reply (xid={Xid}, generation={Generation})",
                         xid,
@@ -340,6 +344,7 @@ internal sealed class RpcConnection : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Any receive error poisons the shared stream: fail every in-flight call so callers reconnect.
             FailConnection(new NfsException(
                 $"RPC receive failed on connection generation {Generation}.", ex));
         }
@@ -347,6 +352,7 @@ internal sealed class RpcConnection : IAsyncDisposable
 
     private void EnsureReceiveLoopStarted()
     {
+        // Lazy single-reader start: the first sent CALL owns demultiplexing for the connection lifetime.
         lock (_receiveSync)
             _receiveLoop ??= ReceiveLoopAsync();
     }
@@ -354,9 +360,11 @@ internal sealed class RpcConnection : IAsyncDisposable
     /// <summary>Poison the connection and fail every pending call with the same cause.</summary>
     private void FailConnection(Exception failure)
     {
+        // First failure wins the CAS; later callers keep the original cause for diagnostics.
         if (Interlocked.CompareExchange(ref _failure, failure, null) is not null)
             return;
 
+        // Stop the receive loop and any blocked sends before tearing streams down.
         _lifetime.Cancel();
         try
         {
@@ -376,6 +384,7 @@ internal sealed class RpcConnection : IAsyncDisposable
             // Socket disposal is best-effort.
         }
 
+        // Drain every waiter with the same failure so no caller hangs on a reply that will never arrive.
         foreach (var item in _pendingCalls.ToArray())
         {
             if (_pendingCalls.TryRemove(item.Key, out var pending))
