@@ -30,10 +30,13 @@ public sealed class NfsClient : IAsyncDisposable
         _options.Validate();
     }
 
+    /// <summary>True after <see cref="ConnectAsync(string, CancellationToken)"/> stored a server address.</summary>
     public bool IsConnected => !string.IsNullOrWhiteSpace(_server);
 
+    /// <summary>True while an export is mounted and operations can run.</summary>
     public bool IsMounted => _mounted is not null;
 
+    /// <summary>File handle for the mounted export root.</summary>
     public byte[] RootHandle => RequireMounted().RootHandle;
 
     /// <summary>Store the server address for later export listing or mounting.</summary>
@@ -85,120 +88,156 @@ public sealed class NfsClient : IAsyncDisposable
         }
     }
 
+    /// <summary>LOOKUP an export-relative path in the mounted export.</summary>
     public Task<NfsLookup> LookupAsync(string path, CancellationToken ct = default) =>
         RequireMounted().LookupPathAsync(path, ct);
 
+    /// <summary>LOOKUP a file path and reject directories (NFSv3 has no explicit OPEN).</summary>
     public Task<NfsLookup> OpenFileAsync(string path, CancellationToken ct = default) =>
         RequireMounted().OpenFileAsync(path, ct);
 
+    /// <summary>CREATE a file and return its handle.</summary>
     public Task<NfsLookup> CreateAndOpenFileAsync(string path, NfsSetAttributes? attributes = null, CancellationToken ct = default) =>
         RequireMounted().CreateAndOpenFileAsync(path, attributes, ct);
 
+    /// <summary>READ a file handle at a specific offset.</summary>
     public Task<(int BytesRead, bool Eof)> ReadAtAsync(byte[] fileHandle, ulong offset, byte[] buffer, int bufferOffset, int count, CancellationToken ct = default) =>
         RequireMounted().ReadAtAsync(fileHandle, offset, buffer, bufferOffset, count, ct);
 
+    /// <summary>WRITE to a file handle at a specific offset.</summary>
     public Task<int> WriteAtAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         return RequireMounted().WriteAtAsync(fileHandle, offset, data, ct);
     }
 
+    /// <summary>WRITE and return count, stability, and verifier.</summary>
     public Task<NfsWriteResult> WriteAtWithResultAsync(byte[] fileHandle, ulong offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         return RequireMounted().WriteAtWithResultAsync(fileHandle, offset, data, ct);
     }
 
+    /// <summary>READDIR for an export-relative path.</summary>
     public Task<List<NfsEntry>> GetItemListAsync(string path, CancellationToken ct = default) =>
         RequireMounted().GetItemListAsync(path, ct);
 
+    /// <summary>GETATTR for an export-relative path.</summary>
     public Task<NfsFattr> GetItemAttributesAsync(string path, CancellationToken ct = default) =>
         RequireMounted().GetAttributesAsync(path, ct);
 
+    /// <summary>Return true when an export-relative path exists.</summary>
     public Task<bool> FileExistsAsync(string path, CancellationToken ct = default) =>
         RequireMounted().FileExistsAsync(path, ct);
 
+    /// <summary>Return true when an export-relative path exists and is a directory.</summary>
     public Task<bool> IsDirectoryAsync(string path, CancellationToken ct = default) =>
         RequireMounted().IsDirectoryAsync(path, ct);
 
+    /// <summary>READ an export-relative path into a stream.</summary>
     public Task ReadAsync(string sourceRemotePath, Stream destination, CancellationToken ct = default) =>
         RequireMounted().ReadFileAsync(sourceRemotePath, destination, ct);
 
+    /// <summary>READ an export-relative path into a local file.</summary>
     public Task ReadAsync(string sourceRemotePath, string destinationLocalPath, CancellationToken ct = default) =>
         RequireMounted().ReadFileAsync(sourceRemotePath, destinationLocalPath, ct);
 
+    /// <summary>Create or truncate a file, then WRITE stream content to it.</summary>
     public Task<NfsLookup> WriteAsync(string destinationRemotePath, Stream source, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         return RequireMounted().WriteFileAsync(destinationRemotePath, source, ct);
     }
 
+    /// <summary>WRITE a local file to an export-relative path.</summary>
     public Task<NfsLookup> WriteAsync(string destinationRemotePath, string sourceLocalPath, CancellationToken ct = default) =>
         RequireMounted().WriteFileAsync(destinationRemotePath, sourceLocalPath, ct);
 
+    /// <summary>CREATE an export-relative file.</summary>
     public Task<NfsLookup> CreateFileAsync(string path, CancellationToken ct = default) =>
         RequireMounted().CreateFileAsync(path, ct);
 
+    /// <summary>MKDIR for an export-relative path.</summary>
     public Task<NfsLookup> CreateDirectoryAsync(string path, CancellationToken ct = default) =>
         RequireMounted().CreateDirectoryAsync(path, ct);
 
+    /// <summary>REMOVE an export-relative file.</summary>
     public Task DeleteFileAsync(string path, CancellationToken ct = default) =>
         RequireMounted().DeleteFileAsync(path, ct);
 
+    /// <summary>RMDIR an export-relative directory (recursive by default).</summary>
     public Task DeleteDirectoryAsync(string path, bool recursive = true, CancellationToken ct = default) =>
         RequireMounted().DeleteDirectoryAsync(path, recursive, ct);
 
+    /// <summary>RENAME/MOVE an export-relative path.</summary>
     public Task MoveAsync(string sourcePath, string targetPath, CancellationToken ct = default) =>
         RequireMounted().MoveAsync(sourcePath, targetPath, ct);
 
+    /// <summary>SYMLINK — create a symbolic link at an export-relative path.</summary>
     public Task<NfsLookup> CreateSymLinkAsync(string linkPath, string targetPath, CancellationToken ct = default) =>
         RequireMounted().CreateSymLinkAsync(linkPath, targetPath, ct);
 
+    /// <summary>LINK — create a hard link at an export-relative path.</summary>
     public Task CreateHardLinkAsync(string existingFilePath, string linkPath, CancellationToken ct = default) =>
         RequireMounted().CreateHardLinkAsync(existingFilePath, linkPath, ct);
 
+    /// <summary>READDIRPLUS for an export-relative path.</summary>
     public Task<List<NfsEntryPlus>> ReadDirPlusAsync(string path, CancellationToken ct = default) =>
         RequireMounted().ReadDirPlusAsync(path, ct);
 
+    /// <summary>SETATTR mode (CHMOD) for an export-relative path.</summary>
     public Task ChmodAsync(string path, uint mode, CancellationToken ct = default) =>
         RequireMounted().ChmodAsync(path, mode, ct);
 
+    /// <summary>SETATTR uid/gid (CHOWN) for an export-relative path.</summary>
     public Task ChownAsync(string path, uint uid, uint gid, CancellationToken ct = default) =>
         RequireMounted().ChownAsync(path, uid, gid, ct);
 
+    /// <summary>SETATTR access/modify times (UTIMES) for an export-relative path.</summary>
     public Task UtimesAsync(string path, DateTime? atime, DateTime? mtime, CancellationToken ct = default) =>
         RequireMounted().UtimesAsync(path, atime, mtime, ct);
 
+    /// <summary>SETATTR size for an export-relative path.</summary>
     public Task SetFileSizeAsync(string path, ulong size, CancellationToken ct = default) =>
         RequireMounted().SetFileSizeAsync(path, size, ct);
 
+    /// <summary>SETATTR for an export-relative path.</summary>
     public Task SetAttributesAsync(string path, NfsSetAttributes attributes, CancellationToken ct = default) =>
         RequireMounted().SetAttributesAsync(path, attributes, ct);
 
+    /// <summary>Guarded SETATTR for an export-relative path.</summary>
     public Task SetAttributesGuardedAsync(string path, NfsSetAttributes attributes, NfsTimestamp guardCtime, CancellationToken ct = default) =>
         RequireMounted().SetAttributesGuardedAsync(path, attributes, guardCtime, ct);
 
+    /// <summary>ACCESS check on an export-relative path. Returns the granted access mask.</summary>
     public Task<NfsAccessMode> AccessAsync(string path, NfsAccessMode desired, CancellationToken ct = default) =>
         RequireMounted().AccessAsync(path, desired, ct);
 
+    /// <summary>READLINK — read the target of an export-relative symbolic link path.</summary>
     public Task<string> ReadLinkAsync(string path, CancellationToken ct = default) =>
         RequireMounted().ReadLinkAsync(path, ct);
 
+    /// <summary>COMMIT an export-relative file.</summary>
     public Task CommitAsync(string path, ulong offset, uint count, CancellationToken ct = default) =>
         RequireMounted().CommitAsync(path, offset, count, ct);
 
+    /// <summary>COMMIT an export-relative file and return the server write verifier.</summary>
     public Task<NfsCommitResult> CommitWithResultAsync(string path, ulong offset, uint count, CancellationToken ct = default) =>
         RequireMounted().CommitWithResultAsync(path, offset, count, ct);
 
+    /// <summary>FSSTAT for an export-relative path — storage capacity and availability.</summary>
     public Task<NfsFileSystemStat> GetFileSystemStatAsync(string path = ".", CancellationToken ct = default) =>
         RequireMounted().GetFileSystemStatAsync(path, ct);
 
+    /// <summary>FSINFO for an export-relative path — transfer preferences and feature flags.</summary>
     public Task<NfsFileSystemInfo> GetFileSystemInfoAsync(string path = ".", CancellationToken ct = default) =>
         RequireMounted().GetFileSystemInfoAsync(path, ct);
 
+    /// <summary>PATHCONF for an export-relative path — POSIX path constraints.</summary>
     public Task<NfsPathConf> GetPathConfAsync(string path = ".", CancellationToken ct = default) =>
         RequireMounted().GetPathConfAsync(path, ct);
 
+    /// <summary>Dispose the mounted client without requiring an explicit unmount first.</summary>
     public async ValueTask DisposeAsync()
     {
         var mounted = _mounted;
@@ -218,6 +257,7 @@ public sealed class NfsClient : IAsyncDisposable
 
     private static void EnsureSupportedVersion(NfsVersion version)
     {
+        // The enum advertises V2/V41 for future use, but only NFSv3 is implemented today.
         if (version != NfsVersion.V3)
             throw new NotSupportedException("NfsSharp.Client currently implements NFSv3. NFSv2 and NFSv4.1 are not implemented.");
     }

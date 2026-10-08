@@ -235,7 +235,7 @@ public enum NfsV4FType : uint
     NamedAttr = 9,
 }
 
-/// <summary>NFSv4 bitmap for attribute numbers.</summary>
+/// <summary>NFSv4 bitmap4 for attribute numbers.</summary>
 public sealed class NfsV4Bitmap
 {
     private readonly uint[] _masks;
@@ -246,6 +246,7 @@ public sealed class NfsV4Bitmap
         _masks = masks.ToArray();
     }
 
+    /// <summary>Whether the given attribute number is set in the bitmap.</summary>
     public bool HasAttr(uint attrNum)
     {
         var word = attrNum / 32;
@@ -253,8 +254,10 @@ public sealed class NfsV4Bitmap
         return word < _masks.Length && (_masks[word] & (1u << (int)bit)) != 0;
     }
 
+    /// <summary>Copy of the 32-bit mask words.</summary>
     public uint[] Masks => _masks.ToArray();
 
+    /// <summary>Encodes bitmap4: a word count followed by the big-endian masks.</summary>
     public void Encode(XdrWriter writer)
     {
         writer.UInt((uint)_masks.Length);
@@ -262,6 +265,7 @@ public sealed class NfsV4Bitmap
             writer.UInt(mask);
     }
 
+    /// <summary>Decodes bitmap4: a word count followed by the masks.</summary>
     public static NfsV4Bitmap Decode(XdrReader reader)
     {
         var count = (int)reader.UInt();
@@ -271,6 +275,7 @@ public sealed class NfsV4Bitmap
         return new NfsV4Bitmap(masks);
     }
 
+    /// <summary>Builds a bitmap from individual attribute numbers.</summary>
     public static NfsV4Bitmap Of(params uint[] attrs)
     {
         ArgumentNullException.ThrowIfNull(attrs);
@@ -384,6 +389,7 @@ public sealed class NfsV4CompoundResponse
     public uint Status { get; set; }
     public List<NfsV4OperationResult> Results { get; set; } = new();
 
+    /// <summary>Decodes COMPOUND4res: status, tag echo, then the per-operation result array.</summary>
     public static NfsV4CompoundResponse Decode(XdrReader reader)
     {
         ArgumentNullException.ThrowIfNull(reader);
@@ -412,6 +418,10 @@ public sealed class NfsV4CompoundResponse
         return response;
     }
 
+    /// <summary>
+    /// Copies one operation's result payload into a standalone reader so callers can decode it
+    /// later while this method keeps the COMPOUND reader positioned at the next operation.
+    /// </summary>
     private static XdrReader CaptureOperationResult(NfsV4Op op, XdrReader reader, bool isLast)
     {
         var writer = new XdrWriter();
@@ -479,6 +489,7 @@ public sealed class NfsV4CompoundResponse
                 CaptureFixedBytes(writer, reader, 8);
                 break;
             default:
+                // Only the final result can be left opaque; earlier ones must be sized to stay in sync.
                 if (!isLast)
                     throw new NfsException($"Cannot decode non-final NFSv4 operation result payload for {op}.");
                 writer.Raw(reader.ReadRemainingBytes());
@@ -531,6 +542,7 @@ public sealed class NfsV4CompoundResponse
         CaptureOpaque(writer, reader);
     }
 
+    /// <summary>Captures change_info4: atomic flag, then before/after directory change values.</summary>
     private static void CaptureChangeInfo(XdrWriter writer, XdrReader reader)
     {
         CaptureBool(writer, reader);
@@ -544,6 +556,7 @@ public sealed class NfsV4CompoundResponse
         CaptureFixedBytes(writer, reader, 12);
     }
 
+    /// <summary>Captures OPEN4res: stateid, cinfo, rflags, attr bitmap, and delegation.</summary>
     private static void CaptureOpenResult(XdrWriter writer, XdrReader reader)
     {
         CaptureStateId(writer, reader);
@@ -553,6 +566,7 @@ public sealed class NfsV4CompoundResponse
         CaptureOpenDelegation(writer, reader);
     }
 
+    /// <summary>Captures open_delegation_type4, whose payload varies by delegation type.</summary>
     private static void CaptureOpenDelegation(XdrWriter writer, XdrReader reader)
     {
         var delegationType = CaptureUInt(writer, reader);
@@ -579,6 +593,7 @@ public sealed class NfsV4CompoundResponse
         }
     }
 
+    /// <summary>Captures OPEN_DELEGATE_NONE; why 1 (space) or 2 (lock) adds a false-warning bool.</summary>
     private static void CaptureOpenNoneDelegation(XdrWriter writer, XdrReader reader)
     {
         var why = CaptureUInt(writer, reader);
@@ -603,6 +618,7 @@ public sealed class NfsV4CompoundResponse
         }
     }
 
+    /// <summary>Captures nfsace4: type, flag, access mask, and who string.</summary>
     private static void CaptureNfsAce(XdrWriter writer, XdrReader reader)
     {
         CaptureUInt(writer, reader);
@@ -611,6 +627,7 @@ public sealed class NfsV4CompoundResponse
         CaptureString(writer, reader);
     }
 
+    /// <summary>Captures READDIR4res: cookieverf, entries as a true-flagged list, then eof.</summary>
     private static void CaptureReadDir(XdrWriter writer, XdrReader reader)
     {
         CaptureFixedBytes(writer, reader, 8);
@@ -623,6 +640,7 @@ public sealed class NfsV4CompoundResponse
         CaptureBool(writer, reader); // eof
     }
 
+    /// <summary>Captures SECINFO4res; flavor 6 (RPCSEC_GSS) carries OID, service, and QOP.</summary>
     private static void CaptureSecInfo(XdrWriter writer, XdrReader reader)
     {
         var count = CaptureUInt(writer, reader);
@@ -638,6 +656,7 @@ public sealed class NfsV4CompoundResponse
         }
     }
 
+    /// <summary>Captures COPY4res: callback stateids, count, committed, verifier, and flags.</summary>
     private static void CaptureCopyResult(XdrWriter writer, XdrReader reader)
     {
         var callbackCount = CaptureUInt(writer, reader);
@@ -709,6 +728,7 @@ public enum NfsV4OpenShareAccess : uint
     Both = 3,
 }
 
+/// <summary>NFSv4 OPEN share_deny values.</summary>
 [Flags]
 public enum NfsV4OpenShareDeny : uint
 {
@@ -718,6 +738,7 @@ public enum NfsV4OpenShareDeny : uint
     Both = 3,
 }
 
+/// <summary>NFSv4 OPEN claim types (open_claim_type4).</summary>
 public enum NfsV4OpenClaimType : uint
 {
     Null = 0,
@@ -726,6 +747,7 @@ public enum NfsV4OpenClaimType : uint
     DelegatePrev = 3,
 }
 
+/// <summary>NFSv4 CREATE createmode4 values.</summary>
 public enum NfsV4CreateMode : uint
 {
     Unchecked = 0,
@@ -736,12 +758,16 @@ public enum NfsV4CreateMode : uint
 /// <summary>NFSv4 stateid — 128-bit opaque identifier for file state.</summary>
 public sealed class NfsV4StateId
 {
+    /// <summary>All-zero stateid used as an explicit "no state" value.</summary>
     public static readonly NfsV4StateId Zero = new(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    /// <summary>Anonymous stateid (all zeros) for share access without an OPEN.</summary>
     public static readonly NfsV4StateId Anonymous = new(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    /// <summary>Special stateid (all ones) for operations without explicit state.</summary>
     public static readonly NfsV4StateId Special = new(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
 
     private readonly byte[] _data;
 
+    /// <summary>Copy of the 16 stateid bytes.</summary>
     public byte[] Data => _data.ToArray();
 
     public NfsV4StateId(byte[] data)
@@ -752,12 +778,14 @@ public sealed class NfsV4StateId
         _data = data.ToArray();
     }
 
+    /// <summary>Encodes stateid4 as a 32-bit seqid followed by 12 "other" bytes (RFC 7530).</summary>
     public void Encode(XdrWriter writer)
     {
         writer.UInt(BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(0, 4)));
         writer.FixedBytes(_data.AsSpan(4, 12));
     }
 
+    /// <summary>Decodes stateid4: 32-bit seqid then 12 "other" bytes (RFC 7530).</summary>
     public static NfsV4StateId Decode(XdrReader reader)
     {
         var data = new byte[16];

@@ -1,5 +1,9 @@
 namespace NfsSharp.Tests;
 
+/// <summary>
+/// Marks a test as an opt-in NFSv3 integration fact: skipped unless NFSSHARP_RUN_NFSV3_INTEGRATION=1
+/// is set in the environment (see NfsV3IntegrationEnvironment).
+/// </summary>
 public sealed class NfsV3IntegrationFactAttribute : FactAttribute
 {
     public NfsV3IntegrationFactAttribute()
@@ -9,6 +13,10 @@ public sealed class NfsV3IntegrationFactAttribute : FactAttribute
     }
 }
 
+/// <summary>
+/// Reads the NFSv3 integration environment (NFSSHARP_NFS_*): server, export path, uid/gid,
+/// portmap port, expected export group, and optional server-behavior expectations.
+/// </summary>
 internal static class NfsV3IntegrationEnvironment
 {
     public static bool IsEnabled =>
@@ -88,6 +96,10 @@ internal static class NfsV3IntegrationEnvironment
     }
 }
 
+/// <summary>
+/// Server-dependent RENAME-over-existing-target behavior: either the target is replaced,
+/// or both names survive (POSIX I/O-only semantics observed on some servers).
+/// </summary>
 internal enum NfsV3ReplacementRenameOutcome
 {
     Unspecified,

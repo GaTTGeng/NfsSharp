@@ -8,6 +8,7 @@ using Xunit.Abstractions;
 
 namespace NfsSharp.Tests;
 
+/// <summary>XDR primitive encode/decode round-trips and rejection of malformed wire values.</summary>
 public class XdrTests
 {
     private readonly ITestOutputHelper _output;
@@ -146,6 +147,7 @@ public class XdrTests
     }
 
     [Fact]
+    // The declared length is checked against the size limit before any buffer is allocated.
     public void XdrReader_RejectsOpaqueLengthsAboveLimitBeforeAllocation()
     {
         var writer = new XdrWriter();
@@ -156,6 +158,7 @@ public class XdrTests
     }
 }
 
+/// <summary>RPC reply envelope decoding: accept/reject arms, status mapping, and verifier validation.</summary>
 public class RpcReplyParserTests
 {
     private const uint Xid = 0x10203040;
@@ -312,6 +315,7 @@ public class RpcReplyParserTests
 
     private static XdrWriter AcceptedReply(uint acceptStatus, uint verifierFlavor = 0, byte[]? verifier = null)
     {
+        // Minimal MSG_ACCEPTED reply carrying only the accept_stat discriminator (plus optional verifier).
         var fixture = new XdrWriter();
         fixture.UInt(Xid);
         fixture.UInt(1);
@@ -334,6 +338,7 @@ public class RpcReplyParserTests
     }
 }
 
+/// <summary>AUTH_SYS credential encoding: unsigned ids, the 16-group limit, and machine-name truncation.</summary>
 public class RpcAuthSysTests
 {
     [Fact]
@@ -355,6 +360,7 @@ public class RpcAuthSysTests
     }
 
     [Fact]
+    // The AUTH_SYS machine name is capped at 255 UTF-8 bytes and must be cut on a character boundary (128 two-byte chars fit in 254 bytes).
     public void Encode_TruncatesMachineNameAtUtf8CharacterBoundary()
     {
         var encoded = RpcAuthSys.Encode(0, new string('\u00E9', 128), 0, 0, []);
@@ -373,6 +379,10 @@ public class RpcAuthSysTests
     }
 }
 
+/// <summary>
+/// NFSv3 client behavior driven by scripted RPC fixtures (portmap/mount discovery, status mapping,
+/// wire-field validation), plus public model construction and NFSv4 compound wire-format checks.
+/// </summary>
 public class NfsModelsTests
 {
     [Fact]
@@ -389,6 +399,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // A missing NFS registration must fail explicitly; the client must not silently fall back to the well-known port 2049.
     public async Task NfsV3Client_PortmapUnavailableNfsServiceDoesNotFallBackTo2049()
     {
         await using var portmap = new RpcFixtureServer(2, (call, index) =>
@@ -472,6 +483,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Unknown reply_stat values are rejected before any MSG_DENIED body is interpreted.
     public async Task NfsV3Client_RejectsUnexpectedRpcReplyStatusWithoutDecodingDeniedBody()
     {
         await using var portmap = new RpcFixtureServer(1, call => RpcFixtureServer.ReplyWithStatus(call.Xid, 2));
@@ -485,6 +497,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Invokes the private DecodeRpcReplyWithContext via reflection to assert the prog/vers/proc context is embedded in failures.
     public void NfsV3Client_RpcReplyFailuresIncludeRawCallContext()
     {
         var method = typeof(NfsV3Client).GetMethod(
@@ -538,6 +551,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Two scenarios: a failed MOUNT preserves mountstat3 on the exception, and an unmount RPC failure is surfaced even though the connection stays usable.
     public async Task NfsV3Client_PreservesMountStatusAndUnmountTransportFailure()
     {
         await using var deniedMount = new RpcFixtureServer(1, call =>
@@ -775,6 +789,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // A short READ body is valid when MaxReadSize is large; only the returned count limits the data.
     public async Task NfsV3Client_ReadFileAllowsShortResponsesWithLargeConfiguredReadLimit()
     {
         const int largeReadLimit = 64 * 1024 * 1024 + 1;
@@ -813,6 +828,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // fattr3 size is unsigned 64-bit on the wire, but the public model exposes Int64; values above that range must be rejected.
     public async Task NfsV3Client_GetAttrRejectsFileSizesOutsideThePublicModelRange()
     {
         await using var nfs = new RpcFixtureServer(1, call => NfsReply(call, writer =>
@@ -1061,6 +1077,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Rejects write replies whose committed field is not a valid stable_how, and verifier fields shorter than 8 bytes.
     public async Task NfsV3Client_WriteAndCommitResultsValidateWireFieldsAndBoundaries()
     {
         byte[] writeVerifier = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -1148,6 +1165,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Zero-valued FSSTAT/FSINFO/PATHCONF fields must round-trip as zero; time_delta nanoseconds above 999,999,999 are rejected.
     public async Task NfsV3Client_CapabilityResultsHandleZeroValuesStatusesAndBoundaries()
     {
         uint[] procedures = [18, 18, 19, 19, 19, 20, 20];
@@ -1294,6 +1312,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Only idempotent NFS procedures (reads and metadata queries) are retry-safe; mutations and UMNT are not.
     public void NfsV3Client_CanRetryTransient_AllowsOnlyRetrySafeProcedures()
     {
         Assert.True(NfsV3Client.CanRetryTransient(100000, 2, 3)); // PMAP GETPORT
@@ -1349,6 +1368,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Reflection reaches the private EnsureDirectoryReadProgress guard that rejects non-terminal pages which never advance the cookie.
     public void NfsV3Client_DirectoryPaging_RejectsNonterminalPagesWithoutProgress()
     {
         var method = typeof(NfsV3Client).GetMethod(
@@ -1380,6 +1400,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // A truncated RPC record wrapped in NfsException must still classify as transient so the client can reconnect and retry.
     public void NfsV3Client_IsTransient_RecognizesWrappedTruncatedRecord()
     {
         var truncated = new NfsException("Truncated RPC record.", new EndOfStreamException());
@@ -1428,6 +1449,7 @@ public class NfsModelsTests
 
     private static RpcFixtureServer CreateNfsPortmap(int mountPort, int nfsPort) => new(
         2,
+        // PMAP GETPORT: first call resolves mountd, second resolves nfsd.
         (call, index) =>
         {
             Assert.Equal(100000u, call.Program);
@@ -1441,6 +1463,7 @@ public class NfsModelsTests
 
     private static RpcFixtureServer CreateMountedExportServer() => new(
         2,
+        // MOUNT MNT then MOUNT UMNT; the fixture handle stands in for the root filehandle.
         (call, index) =>
         {
             Assert.Equal(100005u, call.Program);
@@ -1464,6 +1487,7 @@ public class NfsModelsTests
 
     private static void AssertNfsProcedure(RpcFixtureCall call, uint procedure)
     {
+        // Every fixture reply first verifies the NFSv3 program/version/procedure triple on the wire.
         Assert.Equal(100003u, call.Program);
         Assert.Equal(3u, call.Version);
         Assert.Equal(procedure, call.Procedure);
@@ -1485,6 +1509,7 @@ public class NfsModelsTests
         Assert.Equal(0, reader.Remaining);
     }
 
+    // Builds a READDIR/READDIRPLUS result: cookieverf, a linked list of entries, then a false marker and eof flag.
     private static void WriteReadDirResult(
         XdrWriter writer,
         byte[] cookieVerifier,
@@ -1536,6 +1561,7 @@ public class NfsModelsTests
             WriteFattr3(writer, NfsType.Reg, 0);
     }
 
+    // WRITE and COMMIT replies always start with WCC data; the method-specific result fields follow.
     private static void WriteWccData(XdrWriter writer)
     {
         writer.Bool(false); // pre-operation attributes unavailable
@@ -1556,6 +1582,7 @@ public class NfsModelsTests
         Assert.Equal(expectedStatus, exception.Status);
     }
 
+    // fattr3 wire layout: type, mode, nlink, uid, gid, size, used, rdev, fsid, fileid, then three nfstime3 pairs.
     private static void WriteFattr3(XdrWriter writer, NfsType type, ulong size, ulong fileId = 1)
     {
         writer.UInt((uint)type);
@@ -1592,6 +1619,7 @@ public class NfsModelsTests
             RpcFixtureServer.Success,
             writer => writer.UInt((uint)mountPort)));
 
+    // Creates an NfsV3Client without connecting: reflection reaches the non-public constructor used for unit-level API tests.
     private static NfsV3Client CreateNfsV3Client()
     {
         var ctor = typeof(NfsV3Client).GetConstructor(
@@ -1645,6 +1673,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // The nanosecond field is preserved verbatim; round-tripping through DateTime truncates to 100ns ticks.
     public void NfsTimestamp_PreservesRawNanosecondsAndConvertsToUtcDateTime()
     {
         var timestamp = new NfsTimestamp(1_704_158_645, 123_456_789);
@@ -1700,6 +1729,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // NfsV4StateId must snapshot its input and expose a defensive copy so callers cannot mutate encoded state.
     public void NfsV4StateId_EncodesAndDecodesFixedStateIdFields()
     {
         var data = new byte[]
@@ -1799,6 +1829,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // RENAME carries two cinfo structures (source and target directories) in a single result payload.
     public void NfsV4CompoundResponse_CapturesRemoveAndRenameChangeInfoPayloads()
     {
         var fileHandle = new byte[] { 0xAA, 0xBB, 0xCC };
@@ -1849,6 +1880,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // OPEN_DELEGATE_NONE_EXT adds a why-no-delegation reason and optional push/pull flags after the delegation type.
     public void NfsV4CompoundResponse_CapturesOpenNoneExtendedDelegation()
     {
         var stateIdData = new byte[]
@@ -1900,6 +1932,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Write delegations carry a second stateid, recall flag, and space limit (blocks or bytes) before the delegated ACE.
     public void NfsV4CompoundResponse_CapturesOpenWriteDelegationBlockLimit()
     {
         var stateIdData = new byte[]
@@ -1972,6 +2005,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // OPEN4_NOCREATE claims encode the claim type immediately after the opentype, before the claim name.
     public void NfsV4Client_OpenNoCreate_EncodesClaimImmediatelyAfterOpenType()
     {
         var client = CreateNfsV4Client();
@@ -1996,6 +2030,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // NFSv4.2 COPY uses consecutive stateids for source and destination; both are sent as "current" (all-zero) placeholders here.
     public void NfsV4Client_Copy_EncodesNfsV42CopyArgumentsInWireOrder()
     {
         var client = CreateNfsV4Client(minorVersion: 2);
@@ -2058,6 +2093,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // SECINFO's RPCSEC_GSS flavor carries a variable-length opaque OID that must be skipped when collecting flavor ids.
     public void NfsV4Client_SecInfo_DecodesRpcSecGssOpaqueOid()
     {
         var writer = new XdrWriter();
@@ -2089,6 +2125,7 @@ public class NfsModelsTests
     }
 
     [Fact]
+    // Defensive copies: mutating the source or the returned verifier array must not change the stored result.
     public void NfsWriteAndCommitResults_CarryVerifierData()
     {
         var verifier = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
@@ -2134,8 +2171,13 @@ public class NfsModelsTests
     }
 }
 
+/// <summary>
+/// Loopback TCP RPC fixture that serves a scripted number of calls and records decoded requests.
+/// Replies are XDR-encoded MSG_ACCEPTED or MSG_DENIED envelopes, optionally with procedure payloads.
+/// </summary>
 internal sealed class RpcFixtureServer : IAsyncDisposable
 {
+    // accept_stat values from RFC 5531 used when building accepted replies.
     public const uint Success = 0;
     public const uint ProgramUnavailable = 1;
     public const uint ProgramMismatch = 2;
@@ -2298,4 +2340,5 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
     }
 }
 
+/// <summary>Decoded RPC call header plus the remaining procedure arguments, as captured by RpcFixtureServer.</summary>
 internal sealed record RpcFixtureCall(uint Xid, uint Program, uint Version, uint Procedure, byte[] Arguments);

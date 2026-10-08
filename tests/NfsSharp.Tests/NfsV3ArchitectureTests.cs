@@ -7,6 +7,10 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Tests;
 
+/// <summary>
+/// Architectural seams of the NFSv3 stack in isolation: protocol client vs facade, path resolution,
+/// directory-cache coherence, and RPC transport/client/connection behavior (multiplexing, retries, faults).
+/// </summary>
 public sealed class NfsV3ArchitectureTests
 {
     [Fact]
@@ -59,6 +63,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // The cache must hand out clones so callers cannot corrupt stored entries, and must invalidate the parent directory of a mutated path.
     public void DirectoryCache_ClonesResultsAndInvalidatesContainingDirectory()
     {
         var options = NfsClientOptions.Default with
@@ -84,6 +89,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A readdir that started before a mutation may complete after it; its stale snapshot must not overwrite the invalidated entry.
     public void DirectoryCache_DoesNotPublishReadThatRacedWithMutation()
     {
         var options = NfsClientOptions.Default with { EnableDirectoryCache = true };
@@ -240,6 +246,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // The XID counter wraps through int.MinValue; a wrapped XID still held by a pending call must be skipped to avoid reply misrouting.
     public async Task RpcClient_XidWraparoundSkipsAnIdStillPendingOnTheConnection()
     {
         var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
@@ -266,6 +273,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A protocol-level decode failure poisons the connection: every outstanding call fails and the next call reconnects.
     public async Task RpcClient_MalformedReplyFailsEveryCallOnThatConnection()
     {
         var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
@@ -307,6 +315,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A per-call command timeout must not cancel sibling in-flight calls on the same connection.
     public async Task RpcClient_OneCommandTimeoutDoesNotInterruptAnotherOutstandingCall()
     {
         var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
@@ -351,6 +360,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A receive-loop failure while another call is blocked in a write must fail every pending call with "receive failed", not a misleading timeout.
     public async Task RpcConnection_ReceiveFailureDuringWritePropagatesConnectionFailure()
     {
         var stream = new FaultingRpcStream(blockedWriteNumber: 4);
@@ -374,6 +384,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A replacement connection that failed after being swapped in must not be reused; reconnect again until a healthy one is obtained.
     public async Task RpcClient_ReconnectRefreshesAnAlreadyFailedReplacementConnection()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -500,6 +511,7 @@ public sealed class NfsV3ArchitectureTests
         uint program, uint version, uint procedure, bool expected) =>
         Assert.Equal(expected, NfsRetryPolicy.CanRetry(program, version, procedure));
 
+    // Records the last CALL envelope fields so tests can assert program/version/procedure and argument layout.
     private sealed class RecordingRpcClient(byte[] response) : IRpcCallClient
     {
         internal uint Program { get; private set; }
@@ -537,6 +549,7 @@ public sealed class NfsV3ArchitectureTests
         return writer.ToArray();
     }
 
+    // Injects faults at chosen write numbers and can fail reads on demand, simulating stalled or broken TCP peers.
     private sealed class FaultingRpcStream(int blockedWriteNumber) : Stream
     {
         private readonly TaskCompletionSource<bool> _blockedWrite = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -587,6 +600,7 @@ public sealed class NfsV3ArchitectureTests
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
+    // Multiplexed RPC stream: tracks request XIDs/tags and lets tests reply out of order, duplicate, or with unknown XIDs.
     private sealed class MultiplexingTestStream(bool autoReplyAfterTwoRequests) : Stream
     {
         private readonly object _writeSync = new();
@@ -719,6 +733,7 @@ public sealed class NfsV3ArchitectureTests
         public override void Write(byte[] buffer, int offset, int count) => WriteAsync(buffer.AsMemory(offset, count)).GetAwaiter().GetResult();
     }
 
+    // Scriptable duplex stream: feeds a fixed reply buffer (optionally stalling) and captures written frames.
     private sealed class ScriptedDuplexStream(
         byte[] input,
         int maxReadSize = int.MaxValue,

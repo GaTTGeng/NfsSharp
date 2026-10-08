@@ -271,6 +271,7 @@ public sealed partial class NfsV3Client
             $"RENAME \"{sourcePath}\" to \"{targetPath}\" failed", ct);
     }
 
+    /// <summary>Remove a directory, descending into children first when recursive.</summary>
     private async Task DeleteDirectoryAsync(
         byte[] parentHandle, string name, bool recursive, CancellationToken ct)
     {
@@ -291,6 +292,7 @@ public sealed partial class NfsV3Client
         await RemoveAsync(NfsRpcConstants.NfsRmdir, parentHandle, name, $"RMDIR \"{name}\" failed", ct);
     }
 
+    /// <summary>REMOVE or RMDIR entry in a directory, selected by procedure.</summary>
     private Task RemoveAsync(uint procedure, byte[] parent, string name, string message, CancellationToken ct) =>
         _protocolClient.RemoveAsync(procedure, parent, name, message, ct);
 

@@ -2,6 +2,7 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>MOUNT protocol v3 client used to obtain the export-root file handle (RFC 1813).</summary>
 internal sealed class MountClient
 {
     private readonly RpcClient _rpcClient;
@@ -11,6 +12,7 @@ internal sealed class MountClient
         _rpcClient = rpcClient;
     }
 
+    /// <summary>MNT — mount an export and return the file handle of its root directory.</summary>
     internal async Task<byte[]> MountAsync(int mountPort, string exportPath, CancellationToken ct)
     {
         var writer = new XdrWriter();
@@ -33,6 +35,7 @@ internal sealed class MountClient
         return reader.Opaque();
     }
 
+    /// <summary>EXPORT — list exported paths and the groups allowed to mount each.</summary>
     internal async Task<IReadOnlyList<NfsExport>> ListExportsAsync(int mountPort, CancellationToken ct)
     {
         var reader = await _rpcClient.CallWithOwnedConnectionAsync(
@@ -42,6 +45,7 @@ internal sealed class MountClient
             NfsRpcConstants.MountExport,
             Array.Empty<byte>(),
             ct);
+        // EXPORT result is nested boolean-terminated lists: (path, groups...) then false.
         var exports = new List<NfsExport>();
         while (reader.Bool())
         {
@@ -55,6 +59,7 @@ internal sealed class MountClient
         return exports;
     }
 
+    /// <summary>UMNT — drop the server-side mount record for an export.</summary>
     internal async Task UnmountAsync(int mountPort, string exportPath, CancellationToken ct)
     {
         var writer = new XdrWriter();

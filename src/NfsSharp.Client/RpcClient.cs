@@ -5,8 +5,10 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>Issues ONC RPC CALLs and returns the decoded procedure result.</summary>
 internal interface IRpcCallClient
 {
+    /// <summary>Send one RPC CALL and return the procedure result payload.</summary>
     Task<XdrReader> CallAsync(
         uint program,
         uint version,
@@ -15,6 +17,7 @@ internal interface IRpcCallClient
         CancellationToken ct);
 }
 
+/// <summary>ONC RPC CALL/REPLY client multiplexing outstanding calls over one TCP connection.</summary>
 internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
 {
     private readonly RpcTransport _transport;
@@ -47,6 +50,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         _logger = options.Logger;
     }
 
+    /// <summary>Wrap an already-connected stream instead of opening a socket.</summary>
     internal RpcClient(Stream stream, NfsClientOptions options)
         : this(
             new RpcTransport(IPAddress.Loopback, options),
@@ -62,6 +66,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             recordCompletionTimeout: options.CommandTimeout);
     }
 
+    /// <summary>Connect to <paramref name="port"/> and install the connection as the active one.</summary>
     internal async Task ConnectAsync(int port, CancellationToken ct)
     {
         var connection = await _transport.OpenAsync(port, ct);
@@ -71,6 +76,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             await previous.DisposeAsync();
     }
 
+    /// <summary>Send one RPC CALL on the active connection and return the procedure result payload.</summary>
     public async Task<XdrReader> CallAsync(
         uint program,
         uint version,
@@ -91,6 +97,8 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                                        program == NfsRpcConstants.ProgNfs &&
                                        version == NfsRpcConstants.VerNfs)
             {
+                // A failed CALL may leave the shared stream unusable; retry only
+                // retry-safe NFSv3 procedures, and do so on a fresh connection.
                 _logger?.LogWarning(
                     ex,
                     "RPC call failed transiently (attempt {Attempt}/{MaxAttempts}, prog={Program}, proc={Procedure})",
@@ -127,6 +135,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         throw new NfsException("RPC call failed after all retry attempts.");
     }
 
+    /// <summary>Run one RPC on a dedicated short-lived connection (portmap/MOUNT setup calls).</summary>
     internal async Task<XdrReader> CallWithOwnedConnectionAsync(
         int port,
         uint program,
@@ -187,6 +196,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         throw new NfsException("RPC call failed after all retry attempts.");
     }
 
+    /// <summary>Send one RPC CALL without retries (non-idempotent setup such as RPCSEC_GSS CREATE).</summary>
     internal async Task<XdrReader> CallRawAsync(
         uint program,
         uint version,
@@ -220,6 +230,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         RpcConnection? connection;
         try
         {
+            // Block concurrent reconnects before tearing the connection down.
             Volatile.Write(ref _stopping, 1);
             connection = Interlocked.Exchange(ref _activeConnection, null);
         }
@@ -238,6 +249,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         await StopAndCloseActiveConnectionAsync();
     }
 
+    /// <summary>Decode a REPLY envelope, annotating failures with the CALL's program/procedure.</summary>
     internal static RpcReply DecodeReplyWithContext(
         byte[] reply,
         uint xid,
@@ -257,6 +269,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         }
     }
 
+    /// <summary>Build, send, and await a single CALL, correlating the REPLY by XID.</summary>
     private async Task<XdrReader> CallOnceAsync(
         RpcConnection connection,
         uint program,
@@ -270,6 +283,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         var queuedAt = Stopwatch.GetTimestamp();
         await connection.WaitForCallSlotAsync(token);
         var queueDelay = Stopwatch.GetElapsedTime(queuedAt);
+        // RPCSEC_GSS sequence numbers must be sent in order, so authenticated calls are serialized.
         var ownsGssLock = _gssSession.IsEstablished;
         var gssLockAcquired = false;
         uint xid = 0;
@@ -283,11 +297,14 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             }
 
             using var timeoutCts = CreateCallTimeout(ct, out var callToken);
+            // Register the waiter before writing so a fast REPLY cannot arrive unclaimed;
+            // a rare XID collision with an in-flight call allocates another XID.
             do
             {
                 xid = unchecked((uint)Interlocked.Increment(ref _xid));
             } while (!connection.TryRegister(xid, out pending));
 
+            // CALL header (RFC 5531): xid, msg_type=CALL(0), rpcvers=2, then program, version, procedure.
             var writer = new XdrWriter();
             writer.UInt(xid);
             writer.UInt(0);
@@ -296,6 +313,9 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             writer.UInt(version);
             writer.UInt(procedure);
 
+            // Credential then verifier: RPCSEC_GSS (RFC 2203) wraps the context handle
+            // and seals the arguments with a MIC; otherwise AUTH_SYS (flavor 1) with an
+            // AUTH_NONE (flavor 0) verifier.
             if (_gssSession.IsEstablished)
             {
                 writer.UInt((uint)RpcSecGssFlavor.Gss);
@@ -349,6 +369,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     private RpcConnection RequireActiveConnection() =>
         _activeConnection ?? throw new NfsException("NFS connection is not established.");
 
+    /// <summary>Return the active connection, reconnecting first if a receive failure marked it unhealthy.</summary>
     private async Task<RpcConnection> RequireHealthyConnectionAsync(CancellationToken ct)
     {
         var connection = RequireActiveConnection();
@@ -360,6 +381,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                       ?? new NfsException($"RPC connection generation {connection.Generation} is unavailable.");
     }
 
+    /// <summary>Replace a failed connection with a new generation, or return null when stopping.</summary>
     private async Task<RpcConnection?> ReconnectAsync(RpcConnection failedConnection, CancellationToken ct)
     {
         await _connectionStateLock.WaitAsync(ct);

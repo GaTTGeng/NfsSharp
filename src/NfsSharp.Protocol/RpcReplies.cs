@@ -20,9 +20,10 @@ public sealed class RpcReply
     public XdrReader Body { get; }
 }
 
-/// <summary>Decodes and validates ONC RPC reply envelopes.</summary>
+/// <summary>Decodes and validates ONC RPC reply envelopes (RFC 5531).</summary>
 public static class RpcReplyParser
 {
+    // reply_stat / accept_stat / reject_stat / auth_stat discriminators (RFC 5531).
     private const uint Reply = 1;
     private const uint MsgAccepted = 0;
     private const uint MsgDenied = 1;
@@ -35,6 +36,7 @@ public static class RpcReplyParser
     private const uint RpcMismatch = 0;
     private const uint AuthError = 1;
     private const uint AuthNone = 0;
+    // RFC 5531 caps opaque_auth bodies at 400 bytes.
     private const int MaxAuthBodyLength = 400;
 
     /// <summary>
@@ -60,6 +62,7 @@ public static class RpcReplyParser
         };
     }
 
+    /// <summary>Decodes MSG_ACCEPTED: reply verifier, then accept_stat; only SUCCESS exposes a body.</summary>
     private static RpcReply DecodeAccepted(XdrReader reader)
     {
         var verifierFlavor = reader.UInt();
@@ -89,6 +92,7 @@ public static class RpcReplyParser
         throw new InvalidOperationException("Unreachable RPC reply state.");
     }
 
+    /// <summary>Decodes MSG_DENIED: RPC version mismatch or an auth_stat authentication failure.</summary>
     private static RpcReply DecodeDenied(XdrReader reader)
     {
         switch (reader.UInt())
@@ -108,6 +112,7 @@ public static class RpcReplyParser
         throw new InvalidOperationException("Unreachable RPC reply state.");
     }
 
+    /// <summary>Throws with the low/high version range carried by a mismatch reply.</summary>
     private static void ThrowProgramMismatch(XdrReader reader, string prefix)
     {
         var low = reader.UInt();
@@ -115,6 +120,7 @@ public static class RpcReplyParser
         throw new NfsException($"{prefix} (supported range {low}..{high}).");
     }
 
+    /// <summary>Maps RFC 5531 auth_stat values to readable names.</summary>
     private static string DescribeAuthStatus(uint status) => status switch
     {
         1 => "bad credentials",

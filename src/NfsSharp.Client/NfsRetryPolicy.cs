@@ -3,6 +3,7 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>Decides which transient RPC failures may be retried and how long to wait.</summary>
 internal sealed class NfsRetryPolicy
 {
     private readonly NfsClientOptions _options;
@@ -12,17 +13,24 @@ internal sealed class NfsRetryPolicy
         _options = options;
     }
 
+    /// <summary>First attempt plus the configured number of retries.</summary>
     internal int MaxAttempts => Math.Max(1, _options.MaxRetries + 1);
 
+    /// <summary>Fixed delay between attempts (no backoff).</summary>
     internal Task DelayAsync(CancellationToken ct) =>
         _options.RetryDelay > TimeSpan.Zero
             ? Task.Delay(_options.RetryDelay, ct)
             : Task.CompletedTask;
 
+    /// <summary>Transport-level failures that are safe to treat as transient.</summary>
     internal static bool IsTransient(Exception ex) =>
         ex is SocketException or IOException or ObjectDisposedException ||
         ex is NfsException { InnerException: Exception inner } && IsTransient(inner);
 
+    /// <summary>
+    /// Only idempotent procedures may be replayed automatically; mutating ops
+    /// (WRITE, REMOVE, RENAME, ...) must surface the failure to the caller.
+    /// </summary>
     internal static bool CanRetry(uint program, uint version, uint procedure) =>
         (program, version, procedure) switch
         {

@@ -99,20 +99,23 @@ public sealed record NfsPathConf
     public bool CasePreserving { get; init; }
 }
 
-/// <summary>NFS timestamp preserving raw seconds and nanoseconds precision.</summary>
+/// <summary>NFS timestamp preserving raw nfstime3 seconds and nanoseconds precision.</summary>
 public readonly record struct NfsTimestamp(uint Seconds, uint Nanoseconds)
 {
+    /// <summary>Converts to UTC, scaling nanoseconds to 100 ns DateTime ticks.</summary>
     public DateTime ToDateTimeUtc() =>
         DateTimeOffset.FromUnixTimeSeconds(Seconds)
             .AddTicks(Nanoseconds / 100)
             .UtcDateTime;
 
+    /// <summary>Builds a wire timestamp from a DateTime, treating unspecified kinds as UTC.</summary>
     public static NfsTimestamp FromDateTime(DateTime value)
     {
         var utc = value.Kind == DateTimeKind.Unspecified
             ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
             : value.ToUniversalTime();
         var dto = new DateTimeOffset(utc);
+        // Reverse the tick scaling: sub-tick precision in the wire nanoseconds is lost.
         return new NfsTimestamp(
             checked((uint)dto.ToUnixTimeSeconds()),
             checked((uint)((dto.Ticks % TimeSpan.TicksPerSecond) * 100)));
@@ -147,10 +150,15 @@ public sealed record NfsClientOptions
     public TimeSpan CommandTimeout { get; init; } = TimeSpan.FromSeconds(30);
     public bool UsePrivilegedSourcePort { get; init; } = true;
     public int PortmapPort { get; init; } = 111;
+    /// <summary>Client cap for NFSv3 READ transfer size.</summary>
     public int MaxReadSize { get; init; } = 128 * 1024;
+    /// <summary>Client cap for NFSv3 WRITE transfer size.</summary>
     public int MaxWriteSize { get; init; } = 128 * 1024;
+    /// <summary>READDIR/READDIRPLUS dircount hint in bytes.</summary>
     public int ReaddirCount { get; init; } = 32 * 1024;
+    /// <summary>Default stable_how value sent with WRITE requests.</summary>
     public NfsWriteStableHow StableHow { get; init; } = NfsWriteStableHow.FileSync;
+    /// <summary>Retries after the first attempt for retryable RPC failures.</summary>
     public int MaxRetries { get; init; } = 2;
     /// <summary>Maximum RPCs that may be outstanding on one TCP connection.</summary>
     public int MaxOutstandingRpcCallsPerConnection { get; init; } = 32;
@@ -161,7 +169,9 @@ public sealed record NfsClientOptions
     public TimeSpan KeepAliveInterval { get; init; } = TimeSpan.FromSeconds(30);
     public bool TcpNoDelay { get; init; } = true;
     public ILogger? Logger { get; init; }
+    /// <summary>Optional GSS mechanism enabling RPCSEC_GSS instead of AUTH_SYS.</summary>
     public IRpcSecGssMechanism? GssMechanism { get; init; }
+    /// <summary>RPCSEC_GSS service level requested when a GSS mechanism is configured.</summary>
     public RpcSecGssService GssService { get; init; } = RpcSecGssService.Integrity;
     public GssCredentials? GssCredentials { get; init; }
     public string? GssTargetName { get; init; }
@@ -224,6 +234,7 @@ public sealed record NfsWriteResult
 
     public NfsWriteStableHow Committed { get; }
 
+    /// <summary>Write verifier; a fresh copy per call so callers cannot mutate the stored value.</summary>
     public byte[] WriteVerifier => _writeVerifier.ToArray();
 }
 
@@ -241,6 +252,7 @@ public sealed record NfsCommitResult
         _writeVerifier = writeVerifier.ToArray();
     }
 
+    /// <summary>Write verifier; a fresh copy per call so callers cannot mutate the stored value.</summary>
     public byte[] WriteVerifier => _writeVerifier.ToArray();
 }
 
@@ -258,9 +270,11 @@ public sealed class NfsException : Exception
         Status = status;
     }
 
+    /// <summary>True when the NFS status is NOENT (no such file or directory).</summary>
     public bool IsNotFound => Status == NfsV3Status.NoEnt;
 }
 
+/// <summary>NFSv3 status values (nfsstat3) defined by RFC 1813.</summary>
 public static class NfsV3Status
 {
     public const uint Ok = 0;

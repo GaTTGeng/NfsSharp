@@ -4,6 +4,11 @@ using Xunit.Abstractions;
 
 namespace NfsSharp.Tests;
 
+/// <summary>
+/// End-to-end NFSv3 tests against a real server. Opt-in only: each fact is skipped unless
+/// NFSSHARP_RUN_NFSV3_INTEGRATION=1 is set (see NfsV3IntegrationFactAttribute), with the target
+/// server/export/uid/gid supplied via the NFSSHARP_NFS_* environment variables.
+/// </summary>
 public sealed class NfsV3IntegrationTests
 {
     private const string MissingExportPath = "/missing-export";
@@ -31,6 +36,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // After unmount the connection is unusable: further RPC calls must throw rather than silently reconnect.
     public async Task NfsV3Client_MountsAndUnmountsExportRepeatedly()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -121,6 +127,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Confirms the shared fixture tree materializes correctly, including optional symlink/hard-link/restricted-mode features when the server supports them.
     public async Task NfsV3Client_MaterializesDeterministicFixtureData()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -426,6 +433,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Forces a small readdir count so cookie-based pagination is actually exercised across multiple pages.
     public async Task NfsV3Client_ReadDirAndReadDirPlusCompleteCookiePaginationWithoutDuplicates()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -525,6 +533,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // A second client must not see stale directory-cache entries after another client mutates the export.
     public async Task NfsV3Client_DirectoryCacheExpiresForCrossClientMutations()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -632,6 +641,7 @@ public sealed class NfsV3IntegrationTests
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
     [Trait("Category", "Benchmark")]
+    // Measures that concurrent reads at 1/8/32 callers all return the correct bytes without cross-call data mixing.
     public async Task NfsV3Client_ReportsConcurrentReadLoadAtOneEightAndThirtyTwoCallers()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
@@ -898,6 +908,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // A canceled write must not leave a created file or report success; follow-up reads must fail or return no data.
     public async Task NfsV3Client_CanceledWritesDoNotReportSuccessOrCreateFiles()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1055,6 +1066,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Server-dependent case: RENAME over an existing target either replaces it or fails with NFS3ERR_IO while both names survive (see NfsV3ReplacementRenameOutcome).
     public async Task NfsV3Client_VerifiesRenameSameDirectoryCrossDirectoryReplacementAndInvalidTargets()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1250,6 +1262,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Uses an unprivileged uid/gid connection so the server rejects SETATTR with NFS3ERR_ACCES/PERM.
     public async Task NfsV3Client_PreservesSetAttributePermissionFailures()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1393,6 +1406,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // The client is expected to reconnect and retry a retry-safe call after the transport is torn down underneath it.
     public async Task NfsV3Client_ReconnectsAndRetriesAfterTransportFailure()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1471,6 +1485,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // REMOUNT replaces the active export in place; Dispose must leave the facade unmounted and cleaned up.
     public async Task NfsClient_RemountReplacesActiveExportAndDisposeCleansUp()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1537,6 +1552,7 @@ public sealed class NfsV3IntegrationTests
             DirectoryCacheTtl = directoryCacheTtl ?? NfsClientOptions.Default.DirectoryCacheTtl
         };
 
+    // Connect helpers parameterize uid/gid, readdir count, or options against the configured integration server.
     private static Task<NfsV3Client> ConnectV3ClientAsync(CancellationToken ct) =>
         NfsV3Client.ConnectAsync(
             NfsV3IntegrationEnvironment.Server,
@@ -1695,6 +1711,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(8, result.WriteVerifier.Length);
     }
 
+    // The server may report a stronger stability guarantee than requested (e.g. FILE_SYNC when UNSTABLE was asked for).
     private static void AssertCommittedAtLeast(NfsWriteStableHow requested, NfsWriteStableHow actual) =>
         Assert.True(
             (uint)actual >= (uint)requested,
@@ -1703,6 +1720,7 @@ public sealed class NfsV3IntegrationTests
     private static void AssertCommitResult(NfsCommitResult result) =>
         Assert.Equal(8, result.WriteVerifier.Length);
 
+    // NFS timestamps have one-second resolution on some servers; allow a small delta when comparing against the fixture clock.
     private static void AssertCloseTo(DateTime expectedUtc, DateTime? actualUtc)
     {
         Assert.NotNull(actualUtc);

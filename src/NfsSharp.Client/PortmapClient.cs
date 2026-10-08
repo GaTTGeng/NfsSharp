@@ -2,6 +2,7 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>RPC portmap (portmapper) client for resolving program ports (RFC 1833).</summary>
 internal sealed class PortmapClient
 {
     private const uint IpProtoTcp = 6;
@@ -14,8 +15,10 @@ internal sealed class PortmapClient
         _portmapPort = portmapPort;
     }
 
+    /// <summary>portmap GETPORT — resolve the TCP port registered for a program/version.</summary>
     internal async Task<int> GetTcpPortAsync(uint program, uint version, CancellationToken ct)
     {
+        // GETPORT args: program, version, protocol (IPPROTO_TCP), reserved port (0).
         var writer = new XdrWriter();
         writer.UInt(program);
         writer.UInt(version);
@@ -39,6 +42,7 @@ internal sealed class PortmapClient
         return (int)port;
     }
 
+    /// <summary>Throw when portmap reported no TCP registration for the service.</summary>
     internal static void EnsureMapped(int port, string service)
     {
         if (port == 0)

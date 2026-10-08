@@ -3,6 +3,7 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>Holds RPCSEC_GSS context state and writes CALL credentials/verifiers (RFC 2203).</summary>
 internal sealed class RpcSecGssSession
 {
     private readonly NfsClientOptions _options;
@@ -17,6 +18,7 @@ internal sealed class RpcSecGssSession
 
     internal bool IsEstablished => _context?.Mechanism.IsEstablished == true;
 
+    /// <summary>Write the RPCSEC_GSS credential body: context handle, sequence number, service.</summary>
     internal void WriteCredential(XdrWriter writer)
     {
         var context = _context ?? throw new InvalidOperationException("RPCSEC_GSS context is unavailable.");
@@ -28,12 +30,14 @@ internal sealed class RpcSecGssSession
         writer.Opaque(body.ToArray());
     }
 
+    /// <summary>Write the RPCSEC_GSS verifier: a GSS MIC over the procedure arguments.</summary>
     internal void WriteVerifier(XdrWriter writer, ReadOnlySpan<byte> arguments)
     {
         var context = _context ?? throw new InvalidOperationException("RPCSEC_GSS context is unavailable.");
         writer.Opaque(context.Mechanism.GetMic(arguments.ToArray()));
     }
 
+    /// <summary>Observe a REPLY verifier so security-session state can track it.</summary>
     internal void ObserveReply(RpcReply reply)
     {
         if (_context is not null && reply.VerifierFlavor == (uint)RpcSecGssFlavor.Gss)
@@ -44,6 +48,7 @@ internal sealed class RpcSecGssSession
         }
     }
 
+    /// <summary>Run RPCSEC_GSS_CREATE and store the resulting server context handle.</summary>
     internal async Task EstablishAsync(string server, RpcClient rpcClient, CancellationToken ct)
     {
         var mechanism = _options.GssMechanism
@@ -51,6 +56,7 @@ internal sealed class RpcSecGssSession
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
         var token = await mechanism.InitiateContextAsync(targetName, _options.GssCredentials, ct);
 
+        // CREATE arguments: procedure, GSS token, requested service, sequence-window hint.
         var arguments = new XdrWriter();
         arguments.UInt((uint)RpcSecGssProc.Create);
         arguments.UInt((uint)token.Length);
@@ -58,6 +64,7 @@ internal sealed class RpcSecGssSession
         arguments.UInt((uint)_options.GssService);
         arguments.UInt(0);
 
+        // CREATE is not idempotent; a retry would allocate a second server context.
         var reader = await rpcClient.CallRawAsync(
             NfsRpcConstants.ProgNfs,
             NfsRpcConstants.VerNfs,

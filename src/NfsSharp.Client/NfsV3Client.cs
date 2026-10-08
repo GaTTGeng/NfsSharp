@@ -34,6 +34,8 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         _portmapClient = new PortmapClient(_rpcClient, options.PortmapPort);
         _mountClient = new MountClient(_rpcClient);
         _protocolClient = new NfsV3ProtocolClient(_rpcClient, options, new NfsDirectoryCache(options));
+        // The resolver reads the root handle lazily so path walks start from the export root
+        // established later by the mount in ConnectAsync.
         _pathResolver = new NfsPathResolver(
             () => _rootFh,
             _protocolClient.LookupAsync,
@@ -43,6 +45,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
     /// <summary>File handle for the mounted export root.</summary>
     public byte[] RootHandle => _rootFh;
 
+    /// <summary>Observed maximum number of concurrent RPC calls; exposed for tests.</summary>
     internal int RpcPendingCallHighWaterMarkForTesting => _rpcClient.PendingCallHighWaterMarkForTesting;
 
     /// <summary>Resolve a server, mount an export, and open the NFSv3 connection.</summary>
@@ -203,12 +206,16 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         finally { await _rpcClient.DisposeAsync(); }
     }
 
+    /// <summary>Drops the live connection while keeping the instance usable; exposed for tests.</summary>
     internal ValueTask DisposeActiveNfsConnectionForTestingAsync() =>
         _rpcClient.DisposeActiveConnectionForTestingAsync();
+    /// <summary>True when an exception is a transient failure eligible for retry.</summary>
     internal static bool IsTransient(Exception ex) => NfsRetryPolicy.IsTransient(ex);
+    /// <summary>True when the procedure is idempotent enough to retry under the retry policy.</summary>
     internal static bool CanRetryTransient(uint program, uint version, uint procedure) =>
         NfsRetryPolicy.CanRetry(program, version, procedure);
 
+    // Thin forwarders that let tests reach the internal RPC/protocol helpers through this type.
     private static RpcReply DecodeRpcReplyWithContext(
         byte[] reply, uint xid, uint program, uint version, uint procedure) =>
         RpcClient.DecodeReplyWithContext(reply, xid, program, version, procedure);

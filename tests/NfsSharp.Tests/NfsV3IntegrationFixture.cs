@@ -4,8 +4,13 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Tests;
 
+/// <summary>
+/// Shared real-server fixture data for NFSv3 integration tests: deterministic files/directories/links
+/// under nfssharp-fixtures, plus per-test run directories. Reports which optional features the server supports.
+/// </summary>
 internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
 {
+    // Serializes first-time materialization so concurrent tests do not race creating the shared tree.
     private static readonly SemaphoreSlim SetupLock = new(1, 1);
 
     public const string RootDirectory = "nfssharp-fixtures";
@@ -95,6 +100,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         }
     }
 
+    // Shared tree is created once per process under a lock; each test then gets a unique run directory underneath.
     private static async Task<NfsV3FixtureCapabilities> EnsureSharedDataAsync(
         NfsV3Client client,
         CancellationToken ct)
@@ -146,6 +152,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
             await client.ChmodAsync(path, mode, ct);
     }
 
+    // Content is rewritten only when missing or different, so repeated runs stay cheap and timestamps are forced to TimestampUtc.
     private static async Task EnsureFileAsync(
         NfsV3Client client,
         NfsV3FixtureFile file,
@@ -267,6 +274,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
             await client.DeleteFileAsync(path, ct);
     }
 
+    // Symlinks and hard links are optional server features; NotSupp/Access/Perm/Inval is recorded as "unsupported" rather than failing setup.
     private static bool IsOptionalFixtureUnsupported(NfsException ex) =>
         ex.Status is NfsV3Status.NotSupp
             or NfsV3Status.Access
@@ -283,11 +291,16 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
     }
 }
 
+/// <summary>Expected content and permission mode for one fixture file.</summary>
 internal sealed record NfsV3FixtureFile(string Path, byte[] Content, uint Mode)
 {
     public long Size => Content.Length;
 }
 
+/// <summary>
+/// Optional server capabilities probed during setup; tests must skip symlink, hard-link,
+/// or restricted-mode assertions when the corresponding flag is false.
+/// </summary>
 internal sealed record NfsV3FixtureCapabilities(
     bool SupportsSymbolicLinks,
     bool SupportsHardLinks,

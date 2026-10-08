@@ -30,7 +30,9 @@ public enum RpcSecGssProc : uint
 /// <summary>RPCSEC_GSS sequence number window size for replay detection.</summary>
 public static class RpcSecGssConstants
 {
+    /// <summary>Largest sequence window accepted by the protocol (RFC 2203).</summary>
     public const int MaxSeqWindowSize = 64;
+    /// <summary>Window size used unless a peer negotiates a smaller value.</summary>
     public const int DefaultSeqWindowSize = 64;
 }
 
@@ -100,10 +102,15 @@ public sealed class GssCredentials
 /// <summary>RPCSEC_GSS context handle returned after CREATE exchange.</summary>
 public sealed class RpcSecGssContext
 {
+    /// <summary>Opaque server-issued context handle for subsequent RPCs.</summary>
     public byte[] ContextHandle { get; init; } = Array.Empty<byte>();
+    /// <summary>Number of sequence numbers accepted within the sliding window.</summary>
     public uint SeqWindowSize { get; init; }
+    /// <summary>Replay-detection window bits received from the server (RFC 2203).</summary>
     public byte[] SeqWindow { get; init; } = new byte[8];
+    /// <summary>Service level (none/integrity/privacy) bound to this context.</summary>
     public RpcSecGssService Service { get; init; }
+    /// <summary>Mechanism that established and secures this context.</summary>
     public IRpcSecGssMechanism Mechanism { get; init; } = null!;
 }
 
