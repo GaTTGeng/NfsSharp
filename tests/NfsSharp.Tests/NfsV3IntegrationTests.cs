@@ -1,11 +1,15 @@
 using NfsSharp.Client;
 using NfsSharp.Protocol;
+using Xunit.Abstractions;
 
 namespace NfsSharp.Tests;
 
 public sealed class NfsV3IntegrationTests
 {
     private const string MissingExportPath = "/missing-export";
+    private readonly ITestOutputHelper _output;
+
+    public NfsV3IntegrationTests(ITestOutputHelper output) => _output = output;
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
@@ -589,6 +593,117 @@ public sealed class NfsV3IntegrationTests
             expectedEof: true,
             ct: timeout.Token);
     }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    public async Task NfsV3Client_ConcurrentReadAtCallsShareConnectionAndReturnMatchingData()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(
+            CreateOptions() with { MaxOutstandingRpcCallsPerConnection = 32 },
+            timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+        var small = await client.LookupPathAsync(NfsV3IntegrationFixture.SmallFile.Path, timeout.Token);
+        var large = await client.LookupPathAsync(NfsV3IntegrationFixture.BoundaryFile.Path, timeout.Token);
+
+        var reads = Enumerable.Range(0, 32).Select(async index =>
+        {
+            var file = index % 2 == 0 ? NfsV3IntegrationFixture.SmallFile : NfsV3IntegrationFixture.BoundaryFile;
+            var handle = index % 2 == 0 ? small.Handle : large.Handle;
+            var count = Math.Min(index % 2 == 0 ? 16 : 1024, file.Content.Length);
+            var offset = file.Content.Length <= count ? 0 : (index * 97) % (file.Content.Length - count + 1);
+            var buffer = new byte[count];
+            var (bytesRead, eof) = await client.ReadAtAsync(
+                handle,
+                (ulong)offset,
+                buffer,
+                0,
+                count,
+                timeout.Token);
+
+            Assert.Equal(count, bytesRead);
+            Assert.Equal(file.Content.AsSpan(offset, count).ToArray(), buffer);
+            Assert.Equal(offset + count == file.Content.Length, eof);
+        });
+
+        await Task.WhenAll(reads);
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
+    [Trait("Category", "Benchmark")]
+    public async Task NfsV3Client_ReportsConcurrentReadLoadAtOneEightAndThirtyTwoCallers()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+        var small = await setupClient.LookupPathAsync(NfsV3IntegrationFixture.SmallFile.Path, timeout.Token);
+        var largeContent = Enumerable.Range(0, 256 * 1024).Select(index => (byte)(index % 251)).ToArray();
+        var largePath = fixture.GetRunPath("rpc-load-large.bin");
+        await using (var input = new MemoryStream(largeContent, writable: false))
+            await setupClient.WriteFileAsync(largePath, input, timeout.Token);
+        var large = await setupClient.LookupPathAsync(largePath, timeout.Token);
+        var scenarios = new[]
+        {
+            (Name: "small", Handle: small.Handle, Content: NfsV3IntegrationFixture.SmallFile.Content, RequestedLength: 64),
+            (Name: "large", Handle: large.Handle, Content: largeContent, RequestedLength: 64 * 1024)
+        };
+
+        foreach (var concurrency in new[] { 1, 8, 32 })
+        {
+            await using var client = await ConnectV3ClientAsync(
+                CreateOptions() with { MaxOutstandingRpcCallsPerConnection = concurrency },
+                timeout.Token);
+
+            foreach (var scenario in scenarios)
+            {
+                const int operations = 64;
+                var payloadSize = Math.Min(scenario.RequestedLength, scenario.Content.Length);
+                var latencies = new System.Collections.Concurrent.ConcurrentBag<double>();
+                var allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+                var wall = System.Diagnostics.Stopwatch.StartNew();
+                await Task.WhenAll(Enumerable.Range(0, operations).Select(async index =>
+                {
+                    var count = payloadSize;
+                    var offset = scenario.Name == "large"
+                        ? index * 13 % (scenario.Content.Length - count + 1)
+                        : 0;
+                    var buffer = new byte[count];
+                    var elapsed = System.Diagnostics.Stopwatch.StartNew();
+                    var (bytesRead, _) = await client.ReadAtAsync(
+                        scenario.Handle,
+                        (ulong)offset,
+                        buffer,
+                        0,
+                        count,
+                        timeout.Token);
+                    elapsed.Stop();
+                    Assert.Equal(count, bytesRead);
+                    latencies.Add(elapsed.Elapsed.TotalMilliseconds);
+                }));
+                wall.Stop();
+
+                var sorted = latencies.Order().ToArray();
+                var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+                _output.WriteLine(
+                "rpc-load server={0} auth=AUTH_SYS concurrency={1} payload={2} bytes={3} operations={4} elapsed_ms={5:F1} ops_per_second={6:F1} p50_ms={7:F2} p95_ms={8:F2} allocated_bytes={9} worker_nfs_sockets=1 pending_high_water={10}",
+                    NfsV3IntegrationEnvironment.Server,
+                    concurrency,
+                    scenario.Name,
+                    payloadSize,
+                    operations,
+                    wall.Elapsed.TotalMilliseconds,
+                    operations / wall.Elapsed.TotalSeconds,
+                    Percentile(sorted, 0.50),
+                    Percentile(sorted, 0.95),
+                    allocated,
+                    client.RpcPendingCallHighWaterMarkForTesting);
+            }
+        }
+    }
+
+    private static double Percentile(double[] sorted, double percentile) =>
+        sorted[Math.Clamp((int)Math.Ceiling(percentile * sorted.Length) - 1, 0, sorted.Length - 1)];
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]

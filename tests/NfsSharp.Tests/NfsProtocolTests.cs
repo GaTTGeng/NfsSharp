@@ -1261,6 +1261,7 @@ public class NfsModelsTests
         Assert.Equal(30u, (uint)opts.CommandTimeout.TotalSeconds);
         Assert.True(opts.TcpKeepAlive);
         Assert.True(opts.TcpNoDelay);
+        Assert.Equal(32, opts.MaxOutstandingRpcCallsPerConnection);
     }
 
     [Fact]
@@ -1274,6 +1275,9 @@ public class NfsModelsTests
 
         Assert.Throws<NfsException>(
             () => new NfsClientOptions { MaxRetries = -1 }.Validate());
+
+        Assert.Throws<NfsException>(
+            () => new NfsClientOptions { MaxOutstandingRpcCallsPerConnection = 0 }.Validate());
 
         Assert.Throws<NfsException>(
             () => new NfsClientOptions { RetryDelay = TimeSpan.FromMilliseconds(-1) }.Validate());

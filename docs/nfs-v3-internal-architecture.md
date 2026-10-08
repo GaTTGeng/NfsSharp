@@ -15,14 +15,18 @@ NfsV3Client
                             -> NfsRetryPolicy
                             -> RpcSecGssSession
                             -> RpcTransport -> RpcConnection -> RpcRecordStream
+                                                           -> pending XID calls
 ```
 
 ## Ownership boundaries
 
 - `RpcTransport` resolves the server, creates and configures sockets, frames RPC
   records, assigns connection generations, and owns connection shutdown.
-- `RpcClient` owns XID allocation, the current one-call critical section, RPC call
+- `RpcClient` owns collision-safe XID allocation, bounded in-flight calls, RPC call
   and reply envelopes, timeout precedence, reconnects, and RPC error context.
+- `RpcConnection` owns one receive loop, the XID-keyed pending-call table, and a
+  send lock held only for complete record writes. Replies for unknown or late XIDs
+  are discarded. A failed connection completes all calls tied to that generation.
 - `PortmapClient` and `MountClient` own their respective v2/v3 procedure arguments,
   response validation, and mount lifecycle calls.
 - `NfsV3ProtocolClient` owns file-handle-based NFSv3 procedure encoding and decoding,
@@ -38,5 +42,5 @@ NfsV3Client
 
 All extracted types remain internal. `IRpcCallClient` is an internal fixture seam so
 NFS procedure bytes and response parsing can be tested without a public client or a
-live server. The RPC layer deliberately retains one outstanding call; multiplexed
-reply dispatch is a separate reliability milestone item.
+live server. AUTH_SYS calls use bounded XID multiplexing; RPCSEC_GSS remains serialized
+until per-request sequence-window and reply-verifier behavior is implemented.

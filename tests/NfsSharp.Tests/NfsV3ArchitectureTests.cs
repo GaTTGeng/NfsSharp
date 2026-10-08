@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Threading.Channels;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
 
@@ -160,6 +161,175 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    public async Task RpcClient_DispatchesConcurrentRepliesByXidWhenTheyArriveOutOfOrder()
+    {
+        var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: true);
+        var options = NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            MaxOutstandingRpcCallsPerConnection = 2
+        };
+        await using var rpc = new RpcClient(stream, options);
+
+        var first = rpc.CallAsync(100003, 3, 1, UIntArgument(101), CancellationToken.None);
+        var second = rpc.CallAsync(100003, 3, 1, UIntArgument(202), CancellationToken.None);
+        await stream.WaitForRequestsAsync(2);
+
+        Assert.Equal(101u, (await first).UInt());
+        Assert.Equal(202u, (await second).UInt());
+        Assert.Equal(0, rpc.PendingCallCountForTesting);
+        Assert.Equal(2, rpc.PendingCallHighWaterMarkForTesting);
+        Assert.True(stream.RepliesWereSentInReverseOrder);
+    }
+
+    [Fact]
+    public async Task RpcClient_CancellingOnePendingCallDoesNotAffectOtherCallsOrLateReplies()
+    {
+        var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
+        var options = NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            MaxOutstandingRpcCallsPerConnection = 2
+        };
+        await using var rpc = new RpcClient(stream, options);
+        using var cancellation = new CancellationTokenSource();
+
+        var cancelled = rpc.CallAsync(100003, 3, 1, UIntArgument(1), cancellation.Token);
+        var survivor = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
+        await stream.WaitForRequestsAsync(2);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+
+        await stream.ReplyForXidAsync(0xDEAD_BEEFu, 99); // Unknown XID is discarded.
+        await stream.ReplyToAsync(2);
+        await stream.ReplyToAsync(2); // Duplicate reply is discarded.
+        Assert.Equal(2u, (await survivor).UInt());
+        await stream.ReplyToAsync(1); // Late XID is discarded after its caller has left.
+
+        var later = rpc.CallAsync(100003, 3, 1, UIntArgument(3), CancellationToken.None);
+        await stream.WaitForRequestsAsync(3);
+        await stream.ReplyToAsync(3);
+        Assert.Equal(3u, (await later).UInt());
+        Assert.Equal(0, rpc.PendingCallCountForTesting);
+    }
+
+    [Fact]
+    public async Task RpcClient_AppliesConfiguredOutstandingCallBound()
+    {
+        var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
+        var options = NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            MaxOutstandingRpcCallsPerConnection = 1
+        };
+        await using var rpc = new RpcClient(stream, options);
+
+        var first = rpc.CallAsync(100003, 3, 1, UIntArgument(1), CancellationToken.None);
+        await stream.WaitForRequestsAsync(1);
+        var second = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
+        await Task.Delay(20);
+        Assert.Equal(1, stream.RequestCount);
+
+        await stream.ReplyToAsync(1);
+        Assert.Equal(1u, (await first).UInt());
+        await stream.WaitForRequestsAsync(2);
+        await stream.ReplyToAsync(2);
+        Assert.Equal(2u, (await second).UInt());
+    }
+
+    [Fact]
+    public async Task RpcClient_XidWraparoundSkipsAnIdStillPendingOnTheConnection()
+    {
+        var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
+        await using var rpc = new RpcClient(stream, NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            MaxOutstandingRpcCallsPerConnection = 2
+        });
+        typeof(RpcClient).GetField("_xid", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(rpc, -2);
+
+        var first = rpc.CallAsync(100003, 3, 1, UIntArgument(1), CancellationToken.None);
+        await stream.WaitForRequestsAsync(1);
+        typeof(RpcClient).GetField("_xid", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(rpc, -2);
+        var second = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
+        await stream.WaitForRequestsAsync(2);
+
+        Assert.Equal(new[] { uint.MaxValue, 0u }, stream.RequestXids);
+        await stream.ReplyToAsync(1);
+        await stream.ReplyToAsync(2);
+        Assert.Equal(1u, (await first).UInt());
+        Assert.Equal(2u, (await second).UInt());
+    }
+
+    [Fact]
+    public async Task RpcClient_MalformedReplyFailsEveryCallOnThatConnection()
+    {
+        var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
+        await using var rpc = new RpcClient(stream, NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            MaxOutstandingRpcCallsPerConnection = 2
+        });
+        var first = rpc.CallAsync(100003, 3, 1, UIntArgument(1), CancellationToken.None);
+        var second = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
+        await stream.WaitForRequestsAsync(2);
+
+        await stream.SendRawReplyAsync([0x01, 0x02]);
+
+        await Assert.ThrowsAsync<NfsException>(() => first);
+        await Assert.ThrowsAsync<NfsException>(() => second);
+        Assert.Equal(0, rpc.PendingCallCountForTesting);
+    }
+
+    [Fact]
+    public async Task RpcClient_DisposalCompletesAllPendingCallsAndStopsTheReceiveLoop()
+    {
+        var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
+        var rpc = new RpcClient(stream, NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            MaxOutstandingRpcCallsPerConnection = 2
+        });
+        var first = rpc.CallAsync(100003, 3, 1, UIntArgument(1), CancellationToken.None);
+        var second = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
+        await stream.WaitForRequestsAsync(2);
+
+        await rpc.DisposeAsync();
+
+        await Assert.ThrowsAsync<NfsException>(() => first);
+        await Assert.ThrowsAsync<NfsException>(() => second);
+        Assert.Equal(0, rpc.PendingCallCountForTesting);
+        await rpc.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RpcClient_OneCommandTimeoutDoesNotInterruptAnotherOutstandingCall()
+    {
+        var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
+        await using var rpc = new RpcClient(stream, NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            MaxOutstandingRpcCallsPerConnection = 2,
+            CommandTimeout = TimeSpan.FromMilliseconds(250)
+        });
+        var timedOut = rpc.CallAsync(100003, 3, 1, UIntArgument(1), CancellationToken.None);
+        var survivor = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
+        await stream.WaitForRequestsAsync(2);
+        await stream.ReplyToAsync(2);
+
+        Assert.Equal(2u, (await survivor).UInt());
+        var timeout = await Assert.ThrowsAsync<NfsException>(() => timedOut);
+        Assert.Contains("timed out", timeout.Message, StringComparison.OrdinalIgnoreCase);
+
+        var later = rpc.CallAsync(100003, 3, 1, UIntArgument(3), CancellationToken.None);
+        await stream.WaitForRequestsAsync(3);
+        await stream.ReplyToAsync(3);
+        Assert.Equal(3u, (await later).UInt());
+    }
+
+    [Fact]
     public async Task RpcClient_ExplicitStopClosesTheConnectionAndPreventsFurtherCalls()
     {
         await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), NfsClientOptions.Default);
@@ -206,6 +376,145 @@ public sealed class NfsV3ArchitectureTests
         BinaryPrimitives.WriteUInt32BigEndian(result, 0x8000_0000u | (uint)message.Length);
         message.CopyTo(result, 4);
         return result;
+    }
+
+    private static byte[] UIntArgument(uint value)
+    {
+        var writer = new XdrWriter();
+        writer.UInt(value);
+        return writer.ToArray();
+    }
+
+    private sealed class MultiplexingTestStream(bool autoReplyAfterTwoRequests) : Stream
+    {
+        private readonly object _writeSync = new();
+        private readonly MemoryStream _writeBuffer = new();
+        private readonly Channel<byte[]> _replies = Channel.CreateUnbounded<byte[]>();
+        private readonly List<(uint Xid, uint Tag)> _requests = [];
+        private readonly List<uint> _replyTags = [];
+        private readonly SemaphoreSlim _requestChanged = new(0);
+        private byte[]? _currentReply;
+        private int _replyOffset;
+
+        internal int RequestCount { get { lock (_writeSync) return _requests.Count; } }
+        internal uint[] RequestXids { get { lock (_writeSync) return _requests.Select(item => item.Xid).ToArray(); } }
+        internal bool RepliesWereSentInReverseOrder { get { lock (_writeSync) return _replyTags.SequenceEqual([202u, 101u]); } }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        internal async Task WaitForRequestsAsync(int count)
+        {
+            while (RequestCount < count)
+                await _requestChanged.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        internal Task ReplyToAsync(uint tag)
+        {
+            (uint Xid, uint Tag) request;
+            lock (_writeSync)
+                request = _requests.Single(item => item.Tag == tag);
+            return QueueReplyAsync(request.Xid, request.Tag);
+        }
+
+        internal Task ReplyForXidAsync(uint xid, uint tag) => QueueReplyAsync(xid, tag);
+
+        internal Task SendRawReplyAsync(byte[] reply) => _replies.Writer.WriteAsync(Frame(reply)).AsTask();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            while (_currentReply is null || _replyOffset == _currentReply.Length)
+            {
+                _currentReply = await _replies.Reader.ReadAsync(cancellationToken);
+                _replyOffset = 0;
+            }
+
+            var count = Math.Min(buffer.Length, _currentReply.Length - _replyOffset);
+            _currentReply.AsMemory(_replyOffset, count).CopyTo(buffer);
+            _replyOffset += count;
+            return count;
+        }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            lock (_writeSync)
+            {
+                _writeBuffer.Position = _writeBuffer.Length;
+                _writeBuffer.Write(buffer.Span);
+                ProcessCompleteRequests();
+            }
+
+            return ValueTask.CompletedTask;
+        }
+
+        private void ProcessCompleteRequests()
+        {
+            var bytes = _writeBuffer.ToArray();
+            var offset = 0;
+            while (bytes.Length - offset >= 4)
+            {
+                var marker = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(offset, 4));
+                var length = (int)(marker & 0x7fff_ffff);
+                if ((marker & 0x8000_0000u) == 0 || bytes.Length - offset - 4 < length)
+                    break;
+
+                var message = bytes.AsSpan(offset + 4, length);
+                var reader = new XdrReader(message.ToArray());
+                var xid = reader.UInt();
+                _ = reader.UInt();
+                _ = reader.UInt();
+                _ = reader.UInt();
+                _ = reader.UInt();
+                _ = reader.UInt();
+                _ = reader.UInt();
+                _ = reader.Opaque();
+                _ = reader.UInt();
+                _ = reader.Opaque();
+                var tag = reader.UInt();
+                _requests.Add((xid, tag));
+                _requestChanged.Release();
+                offset += 4 + length;
+
+                if (autoReplyAfterTwoRequests && _requests.Count == 2)
+                {
+                    foreach (var request in _requests.AsEnumerable().Reverse())
+                        _ = QueueReplyAsync(request.Xid, request.Tag);
+                }
+            }
+
+            var remaining = bytes.AsSpan(offset).ToArray();
+            _writeBuffer.SetLength(0);
+            _writeBuffer.Write(remaining);
+        }
+
+        private Task QueueReplyAsync(uint xid, uint tag)
+        {
+            var writer = new XdrWriter();
+            writer.UInt(xid);
+            writer.UInt(1);
+            writer.UInt(0);
+            writer.UInt(0);
+            writer.Opaque([]);
+            writer.UInt(0);
+            writer.UInt(tag);
+            lock (_writeSync)
+                _replyTags.Add(tag);
+            return _replies.Writer.WriteAsync(Frame(writer.ToArray())).AsTask();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            _replies.Writer.TryComplete();
+            base.Dispose(disposing);
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => WriteAsync(buffer.AsMemory(offset, count)).GetAwaiter().GetResult();
     }
 
     private sealed class ScriptedDuplexStream(

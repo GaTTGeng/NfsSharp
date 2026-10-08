@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using NfsSharp.Protocol;
 
@@ -22,12 +23,13 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     private readonly RpcSecGssSession _gssSession;
     private readonly byte[] _authSysBody;
     private readonly ILogger? _logger;
-    private readonly SemaphoreSlim _callLock = new(1, 1);
+    private readonly SemaphoreSlim _gssCallLock = new(1, 1);
     private readonly SemaphoreSlim _connectionStateLock = new(1, 1);
+    private readonly CancellationTokenSource _stopSource = new();
 
     private RpcConnection? _activeConnection;
     private int _activePort;
-    private uint _xid;
+    private int _xid;
     private int _stopping;
 
     internal RpcClient(
@@ -53,7 +55,10 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             new RpcSecGssSession(options),
             RpcAuthSysCredentials.Encode(options))
     {
-        _activeConnection = new RpcConnection(stream);
+        _activeConnection = new RpcConnection(
+            stream,
+            maxOutstandingCalls: options.MaxOutstandingRpcCallsPerConnection,
+            logger: options.Logger);
     }
 
     internal async Task ConnectAsync(int port, CancellationToken ct)
@@ -92,7 +97,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                     _retryPolicy.MaxAttempts,
                     program,
                     procedure);
-                connection = await ReconnectAsync(ct) ?? connection;
+                connection = await ReconnectAsync(connection, ct) ?? connection;
                 await _retryPolicy.DelayAsync(ct);
             }
             catch (Exception ex) when (NfsRetryPolicy.IsTransient(ex) && attempt < _retryPolicy.MaxAttempts)
@@ -104,7 +109,9 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                     procedure);
                 throw;
             }
-            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested &&
+                                                         !_stopSource.IsCancellationRequested &&
+                                                         _options.CommandTimeout > TimeSpan.Zero)
             {
                 _logger?.LogError(
                     ex,
@@ -112,7 +119,6 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                     _options.CommandTimeout,
                     program,
                     procedure);
-                await RefreshAfterTimeoutAsync(connection, ct);
                 throw new NfsException($"RPC call timed out after {_options.CommandTimeout}.", ex);
             }
         }
@@ -158,7 +164,9 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                     procedure);
                 throw;
             }
-            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && _options.CommandTimeout > TimeSpan.Zero)
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested &&
+                                                         !_stopSource.IsCancellationRequested &&
+                                                         _options.CommandTimeout > TimeSpan.Zero)
             {
                 _logger?.LogError(
                     ex,
@@ -189,6 +197,9 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     internal async ValueTask DisposeActiveConnectionForTestingAsync() =>
         await RequireActiveConnection().DisposeAsync();
 
+    internal int PendingCallCountForTesting => _activeConnection?.PendingCallCount ?? 0;
+    internal int PendingCallHighWaterMarkForTesting => _activeConnection?.PendingCallHighWaterMark ?? 0;
+
     internal async ValueTask CloseActiveConnectionAsync()
     {
         var connection = Interlocked.Exchange(ref _activeConnection, null);
@@ -216,9 +227,8 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _stopSource.Cancel();
         await StopAndCloseActiveConnectionAsync();
-        _callLock.Dispose();
-        _connectionStateLock.Dispose();
     }
 
     internal static RpcReply DecodeReplyWithContext(
@@ -248,11 +258,29 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         byte[] arguments,
         CancellationToken ct)
     {
-        await _callLock.WaitAsync(ct);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _stopSource.Token);
+        var token = linkedCts.Token;
+        var queuedAt = Stopwatch.GetTimestamp();
+        await connection.WaitForCallSlotAsync(token);
+        var queueDelay = Stopwatch.GetElapsedTime(queuedAt);
+        var ownsGssLock = _gssSession.IsEstablished;
+        var gssLockAcquired = false;
+        uint xid = 0;
+        TaskCompletionSource<byte[]>? pending = null;
         try
         {
-            using var timeoutCts = CreateCallTimeout(ct, out var token);
-            var xid = unchecked(++_xid);
+            if (ownsGssLock)
+            {
+                await _gssCallLock.WaitAsync(token);
+                gssLockAcquired = true;
+            }
+
+            using var timeoutCts = CreateCallTimeout(ct, out var callToken);
+            do
+            {
+                xid = unchecked((uint)Interlocked.Increment(ref _xid));
+            } while (!connection.TryRegister(xid, out pending));
+
             var writer = new XdrWriter();
             writer.UInt(xid);
             writer.UInt(0);
@@ -277,28 +305,54 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             }
 
             writer.Raw(arguments);
-            await RpcTransport.SendRecordAsync(connection.Stream, writer.ToArray(), token);
-            var bytes = await RpcTransport.ReceiveRecordAsync(connection.Stream, token);
+            _logger?.LogDebug(
+                "Sending RPC call (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, queueMs={QueueMs}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
+                xid,
+                program,
+                version,
+                procedure,
+                connection.Generation,
+                queueDelay.TotalMilliseconds,
+                connection.PendingCallCount,
+                connection.PendingCallHighWaterMark);
+            var bytes = await connection.SendAndReceiveAsync(xid, pending, writer.ToArray(), callToken);
             var reply = DecodeReplyWithContext(bytes, xid, program, version, procedure);
             _gssSession.ObserveReply(reply);
+            _logger?.LogDebug(
+                "Received RPC reply (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
+                xid,
+                program,
+                version,
+                procedure,
+                connection.Generation,
+                connection.PendingCallCount,
+                connection.PendingCallHighWaterMark);
             return reply.Body;
         }
         finally
         {
-            _callLock.Release();
+            if (pending is not null)
+                connection.RemovePending(xid, pending);
+            if (gssLockAcquired)
+                _gssCallLock.Release();
+            connection.ReleaseCallSlot();
         }
     }
 
     private RpcConnection RequireActiveConnection() =>
         _activeConnection ?? throw new NfsException("NFS connection is not established.");
 
-    private async Task<RpcConnection?> ReconnectAsync(CancellationToken ct)
+    private async Task<RpcConnection?> ReconnectAsync(RpcConnection failedConnection, CancellationToken ct)
     {
         await _connectionStateLock.WaitAsync(ct);
         try
         {
             if (_activePort <= 0 || Volatile.Read(ref _stopping) != 0)
                 return null;
+
+            var active = _activeConnection;
+            if (active is not null && !ReferenceEquals(active, failedConnection))
+                return active;
 
             _logger?.LogInformation("Reconnecting to NFS server (port={Port})", _activePort);
             var previous = Interlocked.Exchange(ref _activeConnection, null);
@@ -325,28 +379,6 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         finally
         {
             _connectionStateLock.Release();
-        }
-    }
-
-    private async Task RefreshAfterTimeoutAsync(RpcConnection connection, CancellationToken ct)
-    {
-        if (!ReferenceEquals(connection, _activeConnection) ||
-            _activePort <= 0 ||
-            Volatile.Read(ref _stopping) != 0)
-            return;
-
-        try
-        {
-            _logger?.LogWarning("Refreshing NFS connection after RPC command timeout");
-            await ReconnectAsync(ct);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            _logger?.LogWarning("Timed out while refreshing NFS connection after RPC command timeout");
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogWarning(ex, "Failed to refresh NFS connection after RPC command timeout");
         }
     }
 

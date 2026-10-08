@@ -43,6 +43,8 @@ public sealed partial class NfsV3Client : IAsyncDisposable
     /// <summary>File handle for the mounted export root.</summary>
     public byte[] RootHandle => _rootFh;
 
+    internal int RpcPendingCallHighWaterMarkForTesting => _rpcClient.PendingCallHighWaterMarkForTesting;
+
     /// <summary>Resolve a server, mount an export, and open the NFSv3 connection.</summary>
     public static Task<NfsV3Client> ConnectAsync(string server, string exportPath, CancellationToken ct) =>
         ConnectAsync(server, exportPath, NfsClientOptions.Default, ct);

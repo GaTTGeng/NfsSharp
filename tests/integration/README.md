@@ -58,6 +58,30 @@ docker compose -f compose.integration.yml down --volumes --remove-orphans
 
 Without `NFSSHARP_RUN_NFSV3_INTEGRATION=1`, the integration tests are skipped and the normal unit-test workflow does not require Docker.
 
+## Measure concurrent RPC reads
+
+The opt-in benchmark test compares a serialized baseline (`MaxOutstandingRpcCallsPerConnection=1`) with bounds of 8 and 32. For each bound it runs 64 concurrent AUTH_SYS reads using a 32-byte payload and 64 KiB reads from a generated 256 KiB file, then reports throughput, p50/p95 latency, process allocation delta, the worker connection count, and the observed pending-call high-water mark through xUnit output.
+
+```powershell
+dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release `
+  --filter "FullyQualifiedName~NfsV3Client_ReportsConcurrentReadLoadAtOneEightAndThirtyTwoCallers" `
+  --logger "console;verbosity=detailed"
+```
+
+Record the server implementation/version, platform, transport, authentication mode, payload sizes, and observed metrics with the CI artifact or PR evidence. Allocation totals are process-wide during each scenario and should be treated as comparative measurements under the same test environment.
+
+### Local smoke measurement (2026-10-08)
+
+One run on the Windows development host with .NET 9.0.17 against the repository NFS-Ganesha 4.3 / Ubuntu 24.04 container used AUTH_SYS over TCP. Each point is 64 reads on one worker NFS socket; the small reads were 32 bytes and the large reads were 64 KiB from a generated 256 KiB file. The process allocation delta was approximately 0.33 MiB per small-read scenario and 20.3 MiB per large-read scenario.
+
+| Outstanding-call bound | 32-byte reads (ops/s, p95 ms) | 64-KiB reads (ops/s, p95 ms) | Observed pending high-water |
+| ---: | ---: | ---: | ---: |
+| 1 | 1,674; 32.11 | 903; 67.20 | 1 |
+| 8 | 8,297; 6.95 | 1,870; 33.02 | 8 |
+| 32 | 11,124; 4.02 | 1,424; 37.47 | 32 |
+
+This is a single local smoke run, not a performance guarantee. Large-read throughput did not improve monotonically at 32 outstanding calls, so deployments should measure their own server, network, and payload mix before selecting a bound.
+
 ## Run the Linux kernel fixture locally
 
 Use a disposable or dedicated Ubuntu 24.04 host. The setup script installs `nfs-kernel-server` and `rpcbind`, creates `/srv/nfssharp-kernel-export`, and writes the isolated configuration files `/etc/exports.d/nfssharp.exports` and `/etc/nfs.conf.d/nfssharp.conf`. It refuses to reuse an existing export directory that it did not create. It also refuses to replace either configuration path unless the existing regular file carries the fixture ownership header; symbolic links, directories, and host-owned files are left untouched.

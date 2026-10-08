@@ -152,6 +152,8 @@ public sealed record NfsClientOptions
     public int ReaddirCount { get; init; } = 32 * 1024;
     public NfsWriteStableHow StableHow { get; init; } = NfsWriteStableHow.FileSync;
     public int MaxRetries { get; init; } = 2;
+    /// <summary>Maximum RPCs that may be outstanding on one TCP connection.</summary>
+    public int MaxOutstandingRpcCallsPerConnection { get; init; } = 32;
     public TimeSpan RetryDelay { get; init; } = TimeSpan.FromSeconds(1);
     public bool EnableDirectoryCache { get; init; }
     public TimeSpan DirectoryCacheTtl { get; init; } = TimeSpan.FromSeconds(30);
@@ -182,6 +184,8 @@ public sealed record NfsClientOptions
             throw new NfsException($"Invalid write stability mode: {StableHow}.");
         if (MaxRetries < 0)
             throw new NfsException("MaxRetries cannot be negative.");
+        if (MaxOutstandingRpcCallsPerConnection <= 0)
+            throw new NfsException("MaxOutstandingRpcCallsPerConnection must be greater than zero.");
         if (RetryDelay < TimeSpan.Zero)
             throw new NfsException("RetryDelay cannot be negative.");
         if (EnableDirectoryCache && DirectoryCacheTtl <= TimeSpan.Zero)

@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
 using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
@@ -27,7 +29,11 @@ internal sealed class RpcTransport
     {
         var socket = await ConnectSocketAsync(_address, port, _options.UsePrivilegedSourcePort, ct);
         ApplySocketOptions(socket, _options);
-        return new RpcConnection(socket, Interlocked.Increment(ref _generation));
+        return new RpcConnection(
+            socket,
+            Interlocked.Increment(ref _generation),
+            _options.MaxOutstandingRpcCallsPerConnection,
+            _options.Logger);
     }
 
     internal static async Task SendRecordAsync(Stream stream, ReadOnlyMemory<byte> message, CancellationToken ct)
@@ -131,25 +137,204 @@ internal sealed class RpcTransport
 internal sealed class RpcConnection : IAsyncDisposable
 {
     private readonly Socket? _socket;
+    private readonly ILogger? _logger;
+    private readonly SemaphoreSlim _inFlightLimit;
+    private readonly ConcurrentDictionary<uint, TaskCompletionSource<byte[]>> _pendingCalls = new();
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly object _receiveSync = new();
+    private Task? _receiveLoop;
+    private Exception? _failure;
+    private int _disposed;
+    private int _pendingCallCount;
+    private int _pendingCallHighWaterMark;
 
-    internal RpcConnection(Socket socket, long generation)
+    internal RpcConnection(Socket socket, long generation, int maxOutstandingCalls, ILogger? logger = null)
     {
         _socket = socket;
+        _logger = logger;
+        _inFlightLimit = new SemaphoreSlim(maxOutstandingCalls);
         Stream = new NetworkStream(socket, ownsSocket: false);
         Generation = generation;
     }
 
-    internal RpcConnection(Stream stream, long generation = 1)
+    internal RpcConnection(
+        Stream stream,
+        long generation = 1,
+        int maxOutstandingCalls = 32,
+        ILogger? logger = null)
     {
+        _logger = logger;
+        _inFlightLimit = new SemaphoreSlim(maxOutstandingCalls);
         Stream = stream;
         Generation = generation;
     }
 
     internal Stream Stream { get; }
     internal long Generation { get; }
+    internal int PendingCallCount => Volatile.Read(ref _pendingCallCount);
+    internal int PendingCallHighWaterMark => Volatile.Read(ref _pendingCallHighWaterMark);
+
+    internal Task WaitForCallSlotAsync(CancellationToken ct) => _inFlightLimit.WaitAsync(ct);
+    internal void ReleaseCallSlot() => _inFlightLimit.Release();
+
+    internal bool TryRegister(uint xid, out TaskCompletionSource<byte[]> pending)
+    {
+        pending = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (Volatile.Read(ref _disposed) != 0 || _failure is not null)
+            throw _failure ?? new NfsException($"RPC connection generation {Generation} is closed.");
+
+        if (!_pendingCalls.TryAdd(xid, pending))
+            return false;
+
+        UpdateHighWaterMark(Interlocked.Increment(ref _pendingCallCount));
+
+        var failure = _failure;
+        if (Volatile.Read(ref _disposed) != 0 || failure is not null)
+        {
+            TryRemovePending(xid, pending);
+            throw failure ?? new NfsException($"RPC connection generation {Generation} is closed.");
+        }
+
+        return true;
+    }
+
+    private void UpdateHighWaterMark(int count)
+    {
+        var observed = Volatile.Read(ref _pendingCallHighWaterMark);
+        while (count > observed)
+        {
+            var previous = Interlocked.CompareExchange(ref _pendingCallHighWaterMark, count, observed);
+            if (previous == observed)
+                return;
+            observed = previous;
+        }
+    }
+
+    private bool TryRemovePending(uint xid, TaskCompletionSource<byte[]> pending)
+    {
+        if (!_pendingCalls.TryRemove(new KeyValuePair<uint, TaskCompletionSource<byte[]>>(xid, pending)))
+            return false;
+
+        Interlocked.Decrement(ref _pendingCallCount);
+        return true;
+    }
+
+    internal void RemovePending(uint xid, TaskCompletionSource<byte[]> pending) =>
+        TryRemovePending(xid, pending);
+
+    internal async Task<byte[]> SendAndReceiveAsync(
+        uint xid,
+        TaskCompletionSource<byte[]> pending,
+        byte[] request,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _sendLock.WaitAsync(ct);
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_failure is { } failure)
+                    throw failure;
+
+                // Finish a record write once it begins. Abandoning a partial record would
+                // corrupt the shared TCP byte stream and fail unrelated calls.
+                try
+                {
+                    await RpcTransport.SendRecordAsync(Stream, request, _lifetime.Token);
+                    EnsureReceiveLoopStarted();
+                }
+                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    FailConnection(new NfsException(
+                        $"RPC send failed on connection generation {Generation}.", ex));
+                    throw;
+                }
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
+
+            return await pending.Task.WaitAsync(ct);
+        }
+        finally
+        {
+            TryRemovePending(xid, pending);
+        }
+    }
+
+    private async Task ReceiveLoopAsync()
+    {
+        try
+        {
+            while (!_lifetime.IsCancellationRequested)
+            {
+                var record = await RpcTransport.ReceiveRecordAsync(Stream, _lifetime.Token);
+                if (record.Length < sizeof(uint))
+                    throw new NfsException($"RPC reply on connection generation {Generation} is missing its XID.");
+
+                var xid = BinaryPrimitives.ReadUInt32BigEndian(record);
+                if (_pendingCalls.TryRemove(xid, out var pending))
+                {
+                    Interlocked.Decrement(ref _pendingCallCount);
+                    pending.TrySetResult(record);
+                }
+                else
+                {
+                    _logger?.LogDebug(
+                        "Discarded unmatched RPC reply (xid={Xid}, generation={Generation})",
+                        xid,
+                        Generation);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // Normal connection shutdown.
+        }
+        catch (Exception ex)
+        {
+            FailConnection(new NfsException(
+                $"RPC receive failed on connection generation {Generation}.", ex));
+        }
+    }
+
+    private void EnsureReceiveLoopStarted()
+    {
+        lock (_receiveSync)
+            _receiveLoop ??= ReceiveLoopAsync();
+    }
+
+    private void FailConnection(Exception failure)
+    {
+        if (Interlocked.CompareExchange(ref _failure, failure, null) is not null)
+            return;
+
+        _lifetime.Cancel();
+        foreach (var item in _pendingCalls.ToArray())
+        {
+            if (_pendingCalls.TryRemove(item.Key, out var pending))
+            {
+                Interlocked.Decrement(ref _pendingCallCount);
+                pending.TrySetException(failure);
+            }
+        }
+    }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        FailConnection(new NfsException(
+            $"RPC connection generation {Generation} was closed.",
+            new IOException("The RPC connection was closed.")));
         try
         {
             await Stream.DisposeAsync();
@@ -167,5 +352,18 @@ internal sealed class RpcConnection : IAsyncDisposable
         {
             // Disposal is best-effort.
         }
+
+        try
+        {
+            var receiveLoop = Volatile.Read(ref _receiveLoop);
+            if (receiveLoop is not null)
+                await receiveLoop;
+        }
+        catch
+        {
+            // The receive loop owns and reports its pending-call failures.
+        }
+
+        _lifetime.Dispose();
     }
 }

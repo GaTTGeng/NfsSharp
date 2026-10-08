@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added bounded concurrent AUTH_SYS RPC calls over one NFSv3 TCP connection, dispatched by XID through a single receive loop; RPCSEC_GSS calls remain serialized.
+- Added `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` and `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`, defaulting to 32 outstanding calls.
+
+### Changed
+
+- A per-call timeout or cancellation now removes only that call from the pending RPC table instead of reconnecting the shared connection and interrupting unrelated calls.
+
 ## [1.2.0] - 2026-08-13
 
 ### Added
