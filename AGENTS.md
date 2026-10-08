@@ -57,6 +57,7 @@ Always tear down the integration fixture, including after a failing test run.
 - Validate packages with `dotnet pack NfsSharp.sln --configuration Release --no-build --output artifacts/packages` when package metadata or distributable content changes.
 - Keep `master` releasable. Use focused short-lived branches and target pull requests at `master`.
 - When a pull request completes an Issue, include `Closes #<issue-number>` in its description so merging automatically closes the Issue.
+- After fixing or explicitly skipping a pull request review comment, resolve its corresponding review thread.
 - Describe validation performed and any tests intentionally not run. Do not commit files ignored by `.gitignore`.
 
 ## Releases
