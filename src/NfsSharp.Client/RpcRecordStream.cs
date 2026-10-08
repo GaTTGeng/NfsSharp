@@ -3,10 +3,13 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>Reassembles RPC messages from TCP record-marking fragments (RFC 5531).</summary>
 internal static class RpcRecordStream
 {
+    // Sanity cap on a single record; real NFS messages stay far below this.
     internal const int MaxRecordLength = 64 * 1024 * 1024;
 
+    /// <summary>Read one record-marked RPC message, concatenating non-final fragments.</summary>
     internal static async Task<byte[]> ReceiveAsync(
         Stream stream,
         CancellationToken ct,
@@ -38,6 +41,7 @@ internal static class RpcRecordStream
 
             while (!last)
             {
+                // Record marker: high bit = last fragment, low 31 bits = fragment length.
                 var marker = BinaryPrimitives.ReadUInt32BigEndian(header);
                 last = (marker & 0x8000_0000u) != 0;
                 var length = (int)(marker & 0x7FFF_FFFF);
@@ -70,6 +74,7 @@ internal static class RpcRecordStream
         return aggregate.ToArray();
     }
 
+    /// <summary>Reject fragment lengths that would push the accumulated record past the cap.</summary>
     internal static void ValidateLength(int fragmentLength, long accumulatedLength)
     {
         if (fragmentLength < 0 ||

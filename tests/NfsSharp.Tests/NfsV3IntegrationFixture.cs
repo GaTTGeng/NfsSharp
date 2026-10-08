@@ -4,8 +4,13 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Tests;
 
+/// <summary>
+/// Shared real-server fixture data for NFSv3 integration tests: deterministic files/directories/links
+/// under nfssharp-fixtures, plus per-test run directories. Reports which optional features the server supports.
+/// </summary>
 internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
 {
+    // Serializes first-time materialization so concurrent tests do not race creating the shared tree.
     private static readonly SemaphoreSlim SetupLock = new(1, 1);
 
     public const string RootDirectory = "nfssharp-fixtures";
@@ -95,6 +100,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         }
     }
 
+    // Shared tree is created once per process under a lock; each test then gets a unique run directory underneath.
     private static async Task<NfsV3FixtureCapabilities> EnsureSharedDataAsync(
         NfsV3Client client,
         CancellationToken ct)
@@ -102,18 +108,21 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         await SetupLock.WaitAsync(ct);
         try
         {
+            // Directory skeleton first (root, empty, nested, and the per-test runs area) so file writes have parents.
             await EnsureDirectoryAsync(client, RootDirectory, 0x1ED, ct);
             await EnsureDirectoryAsync(client, EmptyDirectory, 0x1ED, ct);
             await EnsureDirectoryAsync(client, "nfssharp-fixtures/nested", 0x1ED, ct);
             await EnsureDirectoryAsync(client, NestedDirectory, 0x1ED, ct);
             await EnsureDirectoryAsync(client, MutableRunsDirectory, 0x1ED, ct);
 
+            // Deterministic file contents covering empty, text, binary, unicode names, and a length boundary.
             await EnsureFileAsync(client, EmptyFile, ct);
             await EnsureFileAsync(client, SmallFile, ct);
             await EnsureFileAsync(client, NestedFile, ct);
             await EnsureFileAsync(client, UnicodeFile, ct);
             await EnsureFileAsync(client, BoundaryFile, ct);
 
+            // Optional features are probed last; each returns false instead of failing setup on unsupported servers.
             var supportsSymlinks = await EnsureSymbolicLinkAsync(client, ct);
             var supportsHardLinks = await EnsureHardLinkAsync(client, ct);
             var restrictedModeApplied = await EnsureRestrictedPermissionCaseAsync(client, ct);
@@ -146,6 +155,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
             await client.ChmodAsync(path, mode, ct);
     }
 
+    // Content is rewritten only when missing or different, so repeated runs stay cheap and timestamps are forced to TimestampUtc.
     private static async Task EnsureFileAsync(
         NfsV3Client client,
         NfsV3FixtureFile file,
@@ -176,6 +186,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
 
     private static async Task<bool> EnsureSymbolicLinkAsync(NfsV3Client client, CancellationToken ct)
     {
+        // An existing path is reused only when it already resolves to the expected target; anything else is replaced.
         if (await client.FileExistsAsync(SymlinkPath, ct))
         {
             try
@@ -198,12 +209,14 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         }
         catch (NfsException ex) when (IsOptionalFixtureUnsupported(ex))
         {
+            // The server does not support symlinks; tests gated on SupportsSymbolicLinks will skip.
             return false;
         }
     }
 
     private static async Task<bool> EnsureHardLinkAsync(NfsV3Client client, CancellationToken ct)
     {
+        // A hard link is verified by matching fileid with its source rather than trusting the path alone.
         var source = await client.GetAttributesAsync(SmallFilePath, ct);
         if (await client.FileExistsAsync(HardLinkPath, ct))
         {
@@ -229,6 +242,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
         NfsV3Client client,
         CancellationToken ct)
     {
+        // Build the restricted tree with a usable mode first, then lock it down to mode 0 and verify the server kept it.
         await EnsureDirectoryAsync(client, RestrictedDirectory, 0x1C0, ct);
         await EnsureFileAsync(client, RestrictedFile, ct);
 
@@ -267,6 +281,7 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
             await client.DeleteFileAsync(path, ct);
     }
 
+    // Symlinks and hard links are optional server features; NotSupp/Access/Perm/Inval is recorded as "unsupported" rather than failing setup.
     private static bool IsOptionalFixtureUnsupported(NfsException ex) =>
         ex.Status is NfsV3Status.NotSupp
             or NfsV3Status.Access
@@ -283,11 +298,16 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
     }
 }
 
+/// <summary>Expected content and permission mode for one fixture file.</summary>
 internal sealed record NfsV3FixtureFile(string Path, byte[] Content, uint Mode)
 {
     public long Size => Content.Length;
 }
 
+/// <summary>
+/// Optional server capabilities probed during setup; tests must skip symlink, hard-link,
+/// or restricted-mode assertions when the corresponding flag is false.
+/// </summary>
 internal sealed record NfsV3FixtureCapabilities(
     bool SupportsSymbolicLinks,
     bool SupportsHardLinks,

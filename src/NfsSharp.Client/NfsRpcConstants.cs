@@ -1,10 +1,14 @@
 namespace NfsSharp.Client;
 
+/// <summary>
+/// Well-known ONC RPC program/version/procedure numbers: portmap (RFC 1833),
+/// MOUNT, and NFSv3 (RFC 1813).
+/// </summary>
 internal static class NfsRpcConstants
 {
     internal const uint ProgPortmap = 100000;
     internal const uint VerPortmap = 2;
-    internal const uint PmapGetPort = 3;
+    internal const uint PmapGetPort = 3; // GETPORT is procedure 3 in portmap v2.
 
     internal const uint ProgMount = 100005;
     internal const uint VerMount = 3;
@@ -12,6 +16,7 @@ internal static class NfsRpcConstants
     internal const uint MountUmnt = 3;
     internal const uint MountExport = 5;
 
+    // NFSv3 procedure numbers 1..21 follow the ordering defined by RFC 1813.
     internal const uint ProgNfs = 100003;
     internal const uint VerNfs = 3;
     internal const uint NfsGetAttr = 1;

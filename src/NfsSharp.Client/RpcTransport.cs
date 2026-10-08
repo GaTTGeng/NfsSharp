@@ -7,6 +7,7 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>Opens TCP connections to the server and frames RPC messages with record marking.</summary>
 internal sealed class RpcTransport
 {
     private readonly IPAddress _address;
@@ -25,6 +26,7 @@ internal sealed class RpcTransport
         CancellationToken ct) =>
         new(await ResolveAddressAsync(server, ct), options);
 
+    /// <summary>Connect to <paramref name="port"/> and wrap the socket in a multiplexed RPC connection.</summary>
     internal async Task<RpcConnection> OpenAsync(int port, CancellationToken ct)
     {
         var socket = await ConnectSocketAsync(_address, port, _options.UsePrivilegedSourcePort, ct);
@@ -37,11 +39,13 @@ internal sealed class RpcTransport
             _options.CommandTimeout);
     }
 
+    /// <summary>Write one RPC message as a single last-fragment record (RFC 5531 record marking).</summary>
     internal static async Task SendRecordAsync(Stream stream, ReadOnlyMemory<byte> message, CancellationToken ct)
     {
         if (message.Length > RpcRecordStream.MaxRecordLength)
             throw new NfsException($"RPC record length {message.Length} exceeds the configured limit.");
 
+        // High bit marks the last (only) fragment; the low 31 bits are the length.
         var header = new byte[4];
         BinaryPrimitives.WriteUInt32BigEndian(header, 0x8000_0000u | (uint)message.Length);
         await stream.WriteAsync(header, ct);
@@ -55,6 +59,7 @@ internal sealed class RpcTransport
     internal static Task<byte[]> ReceiveRecordAsync(Stream stream, CancellationToken ct, TimeSpan completionTimeout) =>
         RpcRecordStream.ReceiveAsync(stream, ct, completionTimeout);
 
+    /// <summary>Connect a TCP socket, preferring a privileged source port when requested.</summary>
     private static async Task<Socket> ConnectSocketAsync(
         IPAddress address,
         int port,
@@ -63,6 +68,8 @@ internal sealed class RpcTransport
     {
         if (usePrivilegedSourcePort)
         {
+            // Some insecure NFS exports require a source port below 1024 (the classic
+            // "secure port" convention); ports are tried at random to reduce collisions.
             for (var attempt = 0; attempt < 12; attempt++)
             {
                 var sourcePort = 1023 - Random.Shared.Next(0, 512);
@@ -138,6 +145,7 @@ internal sealed class RpcTransport
     }
 }
 
+/// <summary>One TCP connection multiplexing outstanding CALLs and demultiplexing REPLYs by XID.</summary>
 internal sealed class RpcConnection : IAsyncDisposable
 {
     private readonly Socket? _socket;
@@ -193,6 +201,7 @@ internal sealed class RpcConnection : IAsyncDisposable
     internal Task WaitForCallSlotAsync(CancellationToken ct) => _inFlightLimit.WaitAsync(ct);
     internal void ReleaseCallSlot() => _inFlightLimit.Release();
 
+    /// <summary>Register a waiter for <paramref name="xid"/>; false means the XID is already in flight.</summary>
     internal bool TryRegister(uint xid, out TaskCompletionSource<byte[]> pending)
     {
         pending = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -204,6 +213,7 @@ internal sealed class RpcConnection : IAsyncDisposable
 
         UpdateHighWaterMark(Interlocked.Increment(ref _pendingCallCount));
 
+        // Re-check after insert: a concurrent FailConnection must not leave this waiter stranded.
         var failure = _failure;
         if (Volatile.Read(ref _disposed) != 0 || failure is not null)
         {
@@ -238,6 +248,7 @@ internal sealed class RpcConnection : IAsyncDisposable
     internal void RemovePending(uint xid, TaskCompletionSource<byte[]> pending) =>
         TryRemovePending(xid, pending);
 
+    /// <summary>Write the CALL record and await the matching REPLY for <paramref name="xid"/>.</summary>
     internal async Task<byte[]> SendAndReceiveAsync(
         uint xid,
         TaskCompletionSource<byte[]> pending,
@@ -294,10 +305,12 @@ internal sealed class RpcConnection : IAsyncDisposable
         }
     }
 
+    /// <summary>Read REPLY records and complete the waiter whose XID matches.</summary>
     private async Task ReceiveLoopAsync()
     {
         try
         {
+            // Single reader demultiplexing concurrent CALLs; exits only on lifetime cancellation.
             while (!_lifetime.IsCancellationRequested)
             {
                 var record = await RpcTransport.ReceiveRecordAsync(
@@ -307,14 +320,17 @@ internal sealed class RpcConnection : IAsyncDisposable
                 if (record.Length < sizeof(uint))
                     throw new NfsException($"RPC reply on connection generation {Generation} is missing its XID.");
 
+                // The first word of every REPLY is the CALL's XID (RFC 5531).
                 var xid = BinaryPrimitives.ReadUInt32BigEndian(record);
                 if (_pendingCalls.TryRemove(xid, out var pending))
                 {
+                    // Claiming the waiter here also owns the pending-count decrement.
                     Interlocked.Decrement(ref _pendingCallCount);
                     pending.TrySetResult(record);
                 }
                 else
                 {
+                    // Unmatched replies are late or duplicate; drop them without failing the connection.
                     _logger?.LogDebug(
                         "Discarded unmatched RPC reply (xid={Xid}, generation={Generation})",
                         xid,
@@ -328,6 +344,7 @@ internal sealed class RpcConnection : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Any receive error poisons the shared stream: fail every in-flight call so callers reconnect.
             FailConnection(new NfsException(
                 $"RPC receive failed on connection generation {Generation}.", ex));
         }
@@ -335,15 +352,19 @@ internal sealed class RpcConnection : IAsyncDisposable
 
     private void EnsureReceiveLoopStarted()
     {
+        // Lazy single-reader start: the first sent CALL owns demultiplexing for the connection lifetime.
         lock (_receiveSync)
             _receiveLoop ??= ReceiveLoopAsync();
     }
 
+    /// <summary>Poison the connection and fail every pending call with the same cause.</summary>
     private void FailConnection(Exception failure)
     {
+        // First failure wins the CAS; later callers keep the original cause for diagnostics.
         if (Interlocked.CompareExchange(ref _failure, failure, null) is not null)
             return;
 
+        // Stop the receive loop and any blocked sends before tearing streams down.
         _lifetime.Cancel();
         try
         {
@@ -363,6 +384,7 @@ internal sealed class RpcConnection : IAsyncDisposable
             // Socket disposal is best-effort.
         }
 
+        // Drain every waiter with the same failure so no caller hangs on a reply that will never arrive.
         foreach (var item in _pendingCalls.ToArray())
         {
             if (_pendingCalls.TryRemove(item.Key, out var pending))

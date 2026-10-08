@@ -4,6 +4,11 @@ using Xunit.Abstractions;
 
 namespace NfsSharp.Tests;
 
+/// <summary>
+/// End-to-end NFSv3 tests against a real server. Opt-in only: each fact is skipped unless
+/// NFSSHARP_RUN_NFSV3_INTEGRATION=1 is set (see NfsV3IntegrationFactAttribute), with the target
+/// server/export/uid/gid supplied via the NFSSHARP_NFS_* environment variables.
+/// </summary>
 public sealed class NfsV3IntegrationTests
 {
     private const string MissingExportPath = "/missing-export";
@@ -31,6 +36,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // After unmount the connection is unusable: further RPC calls must throw rather than silently reconnect.
     public async Task NfsV3Client_MountsAndUnmountsExportRepeatedly()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -86,6 +92,7 @@ public sealed class NfsV3IntegrationTests
 
         try
         {
+            // CREATE returns a usable handle; LOOKUP must resolve the same directory back to a handle.
             var created = await client.CreateDirectoryAsync(directory, timeout.Token);
             Assert.NotEmpty(created.Handle);
 
@@ -97,13 +104,16 @@ public sealed class NfsV3IntegrationTests
             Assert.True(attributes.Mode > 0);
             Assert.True(attributes.FileId > 0);
 
+            // Existence helpers agree with the object type: the directory is present, its child path is not.
             Assert.True(await client.FileExistsAsync(directory, timeout.Token));
             Assert.True(await client.IsDirectoryAsync(directory, timeout.Token));
             Assert.False(await client.FileExistsAsync($"{directory}/missing", timeout.Token));
 
+            // The export root listing must include the shared fixture tree.
             var entries = await client.ReadDirAsync(".", timeout.Token);
             Assert.Contains(entries, entry => entry.Name == NfsV3IntegrationFixture.RootDirectory);
 
+            // READDIRPLUS supplies attributes and a handle for the new directory in one round trip.
             var plusEntries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
             var plusEntry = Assert.Single(plusEntries, entry => entry.Name == Path.GetFileName(directory));
             Assert.Equal(NfsType.Dir, plusEntry.Attr?.Type);
@@ -121,12 +131,14 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Confirms the shared fixture tree materializes correctly, including optional symlink/hard-link/restricted-mode features when the server supports them.
     public async Task NfsV3Client_MaterializesDeterministicFixtureData()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var client = await ConnectV3ClientAsync(timeout.Token);
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
+        // Required tree: three directories and five files, each checked for type, size, mode, and content.
         await AssertDirectoryAsync(client, NfsV3IntegrationFixture.RootDirectory, timeout.Token);
         await AssertDirectoryAsync(client, NfsV3IntegrationFixture.EmptyDirectory, timeout.Token);
         await AssertDirectoryAsync(client, NfsV3IntegrationFixture.NestedDirectory, timeout.Token);
@@ -137,12 +149,14 @@ public sealed class NfsV3IntegrationTests
         await AssertFixtureFileAsync(client, NfsV3IntegrationFixture.UnicodeFile, timeout.Token);
         await AssertFixtureFileAsync(client, NfsV3IntegrationFixture.BoundaryFile, timeout.Token);
 
+        // Optional features are asserted only when the fixture probed them as supported.
         if (fixture.Capabilities.SupportsSymbolicLinks)
         {
             var target = await client.ReadLinkAsync(NfsV3IntegrationFixture.SymlinkPath, timeout.Token);
             Assert.Equal(NfsV3IntegrationFixture.SymlinkTarget, target);
         }
 
+        // A hard link shares the source fileid and bumps its link count to at least two.
         if (fixture.Capabilities.SupportsHardLinks)
         {
             var source = await client.GetAttributesAsync(NfsV3IntegrationFixture.SmallFilePath, timeout.Token);
@@ -166,10 +180,12 @@ public sealed class NfsV3IntegrationTests
         await using var client = await ConnectV3ClientAsync(timeout.Token);
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
+        // LOOKUP of "." must resolve to the mount's root handle with directory attributes.
         var rootLookup = await client.LookupPathAsync(".", timeout.Token);
         Assert.Equal(client.RootHandle, rootLookup.Handle);
         Assert.Equal(NfsType.Dir, rootLookup.Attr?.Type);
 
+        // Path-based LOOKUP and handle-based GETATTR must agree on fileid and mode for the fixture root.
         var fixtureRoot = await client.LookupPathAsync(NfsV3IntegrationFixture.RootDirectory, timeout.Token);
         AssertLookupAttributes(fixtureRoot, NfsType.Dir);
         var fixtureRootAttributes = await client.GetAttributesAsync(fixtureRoot.Handle, timeout.Token);
@@ -183,6 +199,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(0x1EDu, nestedDirectory.Mode & 0x1FF);
         Assert.True(nestedDirectory.FileSystemId > 0);
 
+        // File attributes cover size, mode, and the fixture's forced mtime; atime/ctime must be present.
         var fileLookup = await client.LookupPathAsync(NfsV3IntegrationFixture.SmallFilePath, timeout.Token);
         AssertLookupAttributes(fileLookup, NfsType.Reg);
         var fileByHandle = await client.GetAttributesAsync(fileLookup.Handle, timeout.Token);
@@ -193,6 +210,7 @@ public sealed class NfsV3IntegrationTests
         Assert.NotNull(fileByHandle.Atime);
         Assert.NotNull(fileByHandle.Ctime);
 
+        // ACCESS is expected to grant the full requested mask on the fixture file and directory.
         var fileAccess = await client.AccessAsync(
             NfsV3IntegrationFixture.SmallFilePath,
             NfsAccessMode.Read | NfsAccessMode.Modify | NfsAccessMode.Extend,
@@ -205,12 +223,14 @@ public sealed class NfsV3IntegrationTests
             timeout.Token);
         AssertAccessGranted(directoryAccess, NfsAccessMode.Read | NfsAccessMode.Lookup);
 
+        // Requesting no access is valid and must report an empty grant rather than fail.
         var noAccessRequested = await client.AccessAsync(
             fileLookup.Handle,
             NfsAccessMode.None,
             timeout.Token);
         Assert.Equal(NfsAccessMode.None, noAccessRequested);
 
+        // A mask bit outside the NFS3 access flags is a client-side validation error (no NFS status).
         var invalidAccess = await Assert.ThrowsAsync<NfsException>(
             () => client.AccessAsync(
                 fileLookup.Handle,
@@ -218,6 +238,7 @@ public sealed class NfsV3IntegrationTests
                 timeout.Token));
         Assert.Contains("Invalid ACCESS mask", invalidAccess.Message);
 
+        // Lookup failures: a missing name is NFS3ERR_NOENT, a non-directory parent is NFS3ERR_NOTDIR.
         var missing = await Assert.ThrowsAsync<NfsException>(
             () => client.LookupPathAsync($"{NfsV3IntegrationFixture.RootDirectory}/missing", timeout.Token));
         Assert.True(missing.IsNotFound);
@@ -236,6 +257,7 @@ public sealed class NfsV3IntegrationTests
         await using var client = await ConnectV3ClientAsync(timeout.Token);
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
+        // Arrange a small conflict tree: an existing file, an empty dir, a non-empty dir, and a handle to be made stale.
         var existingFile = fixture.GetRunPath("existing-file.txt");
         var existingDirectory = fixture.GetRunPath("existing-dir");
         var nonEmptyDirectory = fixture.GetRunPath("non-empty-dir");
@@ -246,6 +268,7 @@ public sealed class NfsV3IntegrationTests
         await client.CreateDirectoryAsync(nonEmptyDirectory, timeout.Token);
         await WriteBytesAsync(client, $"{nonEmptyDirectory}/child.txt", [0x02], timeout.Token);
 
+        // Each case asserts the NFS3 status and whether it maps to IsNotFound on the public exception.
         await AssertNfsStatusAsync(
             NfsV3Status.NoEnt,
             isNotFound: true,
@@ -270,6 +293,7 @@ public sealed class NfsV3IntegrationTests
             "LOOKUP",
             () => client.LookupPathAsync($"{existingFile}/child", timeout.Token));
 
+        // REMOVE on a directory and RMDIR on a file are type mismatches (ISDIR / NOTDIR respectively).
         await AssertNfsStatusAsync(
             NfsV3Status.IsDir,
             isNotFound: false,
@@ -288,6 +312,7 @@ public sealed class NfsV3IntegrationTests
             "RMDIR",
             () => client.DeleteDirectoryAsync(nonEmptyDirectory, recursive: false, timeout.Token));
 
+        // Delete a file and keep its handle: subsequent GETATTR/ACCESS must report STALE, not NOENT.
         var created = await client.CreateFileAsync(staleFile, timeout.Token);
         await client.DeleteFileAsync(staleFile, timeout.Token);
         await AssertNfsStatusAsync(
@@ -301,6 +326,7 @@ public sealed class NfsV3IntegrationTests
             "ACCESS",
             () => client.AccessAsync(created.Handle, NfsAccessMode.None, timeout.Token));
 
+        // A 256-byte name exceeds the usual component limit and is rejected client-side without an NFS status.
         var tooLongName = new string('x', 256);
         var tooLong = await Assert.ThrowsAsync<NfsException>(
             () => client.CreateFileAsync($"{fixture.RunDirectory}/{tooLongName}", timeout.Token));
@@ -311,6 +337,7 @@ public sealed class NfsV3IntegrationTests
         if (!fixture.Capabilities.AppliesRestrictedModeBits)
             return;
 
+        // An unprivileged uid/gid must be denied on the mode-0 restricted path with ACCESS or PERM.
         await using var deniedClient = await ConnectV3ClientAsync(userId: 65534, groupId: 65534, timeout.Token);
         var denied = await Assert.ThrowsAsync<NfsException>(
             () => deniedClient.GetAttributesAsync(NfsV3IntegrationFixture.RestrictedFilePath, timeout.Token));
@@ -426,6 +453,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Forces a small readdir count so cookie-based pagination is actually exercised across multiple pages.
     public async Task NfsV3Client_ReadDirAndReadDirPlusCompleteCookiePaginationWithoutDuplicates()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -471,6 +499,7 @@ public sealed class NfsV3IntegrationTests
     [Trait("Category", "Integration")]
     public async Task NfsV3Client_DirectoryCacheKeepsReadDirPlusCoherentAfterSameClientMutations()
     {
+        // Directory caching is on with a long TTL; every mutation below must invalidate the cached listing.
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var client = await ConnectV3ClientAsync(
             CreateOptions(
@@ -485,11 +514,13 @@ public sealed class NfsV3IntegrationTests
         var entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
         Assert.Equal(1L, AssertContainsEntry(entries, "cache-coherence.txt").Attr?.Size);
 
+        // SETATTR size change must be visible on the next listing despite the long cache TTL.
         await client.SetFileSizeAsync(path, 4, timeout.Token);
 
         entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
         Assert.Equal(4L, AssertContainsEntry(entries, "cache-coherence.txt").Attr?.Size);
 
+        // A content rewrite reports the new size; the returned handle is then corrupted to prove cached entries are clones.
         await WriteBytesAsync(client, path, [0x02, 0x03], timeout.Token);
 
         entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
@@ -504,6 +535,7 @@ public sealed class NfsV3IntegrationTests
         entries = await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token);
         Assert.Equal(5L, AssertContainsEntry(entries, "cache-coherence.txt").Attr?.Size);
 
+        // CREATE then RENAME then REMOVE each update the listing: new name appears, old name disappears twice.
         var createdPath = fixture.GetRunPath("cache-created.txt");
         await client.CreateFileAsync(createdPath, timeout.Token);
 
@@ -525,6 +557,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // A second client must not see stale directory-cache entries after another client mutates the export.
     public async Task NfsV3Client_DirectoryCacheExpiresForCrossClientMutations()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -561,6 +594,7 @@ public sealed class NfsV3IntegrationTests
         await using var client = await ConnectV3ClientAsync(timeout.Token);
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
+        // Empty file: any read at offset 0 returns zero bytes and eof.
         await AssertReadAtAsync(
             client,
             NfsV3IntegrationFixture.EmptyFile,
@@ -569,6 +603,7 @@ public sealed class NfsV3IntegrationTests
             expectedEof: true,
             ct: timeout.Token);
 
+        // Mid-file read: short of the end, so eof must stay false.
         await AssertReadAtAsync(
             client,
             NfsV3IntegrationFixture.SmallFile,
@@ -577,6 +612,7 @@ public sealed class NfsV3IntegrationTests
             expectedEof: false,
             ct: timeout.Token);
 
+        // Read starting at the final byte: one byte returned, then eof.
         await AssertReadAtAsync(
             client,
             NfsV3IntegrationFixture.SmallFile,
@@ -585,6 +621,7 @@ public sealed class NfsV3IntegrationTests
             expectedEof: true,
             ct: timeout.Token);
 
+        // Boundary file: a request spanning the last 7 bytes is short relative to count but still eof.
         await AssertReadAtAsync(
             client,
             NfsV3IntegrationFixture.BoundaryFile,
@@ -598,6 +635,7 @@ public sealed class NfsV3IntegrationTests
     [Trait("Category", "Integration")]
     public async Task NfsV3Client_ConcurrentReadAtCallsShareConnectionAndReturnMatchingData()
     {
+        // 32 concurrent calls share one connection; each read targets a distinct offset/size pair on either file.
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var client = await ConnectV3ClientAsync(
             CreateOptions() with { MaxOutstandingRpcCallsPerConnection = 32 },
@@ -608,6 +646,7 @@ public sealed class NfsV3IntegrationTests
 
         var reads = Enumerable.Range(0, 32).Select(async index =>
         {
+            // Alternate between the two files and vary the request size so replies cannot be cross-wired.
             var file = index % 2 == 0 ? NfsV3IntegrationFixture.SmallFile : NfsV3IntegrationFixture.BoundaryFile;
             var handle = index % 2 == 0 ? small.Handle : large.Handle;
             var count = Math.Min(index % 2 == 0 ? 16 : 1024, file.Content.Length);
@@ -621,6 +660,7 @@ public sealed class NfsV3IntegrationTests
                 count,
                 timeout.Token);
 
+            // Each caller must see exactly its own slice of bytes and the correct eof for that offset.
             Assert.Equal(count, bytesRead);
             Assert.Equal(file.Content.AsSpan(offset, count).ToArray(), buffer);
             Assert.Equal(offset + count == file.Content.Length, eof);
@@ -632,12 +672,14 @@ public sealed class NfsV3IntegrationTests
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
     [Trait("Category", "Benchmark")]
+    // Measures that concurrent reads at 1/8/32 callers all return the correct bytes without cross-call data mixing.
     public async Task NfsV3Client_ReportsConcurrentReadLoadAtOneEightAndThirtyTwoCallers()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
         var small = await setupClient.LookupPathAsync(NfsV3IntegrationFixture.SmallFile.Path, timeout.Token);
+        // A 256 KiB deterministic file gives the load test a large-payload scenario alongside the small fixture file.
         var largeContent = Enumerable.Range(0, 256 * 1024).Select(index => (byte)(index % 251)).ToArray();
         var largePath = fixture.GetRunPath("rpc-load-large.bin");
         await using (var input = new MemoryStream(largeContent, writable: false))
@@ -657,6 +699,7 @@ public sealed class NfsV3IntegrationTests
 
             foreach (var scenario in scenarios)
             {
+                // 64 reads per scenario; latency and allocation are sampled around the whole batch.
                 const int operations = 64;
                 var payloadSize = Math.Min(scenario.RequestedLength, scenario.Content.Length);
                 var latencies = new System.Collections.Concurrent.ConcurrentBag<double>();
@@ -665,6 +708,7 @@ public sealed class NfsV3IntegrationTests
                 await Task.WhenAll(Enumerable.Range(0, operations).Select(async index =>
                 {
                     var count = payloadSize;
+                    // Large-file reads scatter their offsets so concurrent replies are compared against distinct slices.
                     var offset = scenario.Name == "large"
                         ? index * 13 % (scenario.Content.Length - count + 1)
                         : 0;
@@ -747,9 +791,11 @@ public sealed class NfsV3IntegrationTests
         using var canceled = new CancellationTokenSource();
         await canceled.CancelAsync();
 
+        // Pre-canceled tokens surface as OperationCanceledException before any RPC is attempted.
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => client.ReadAtAsync(lookup.Handle, 0, buffer, 0, buffer.Length, canceled.Token));
 
+        // Client-side argument validation: empty handle, negative buffer offset, and an out-of-range slice.
         var invalidHandle = await Assert.ThrowsAsync<NfsException>(
             () => client.ReadAtAsync(Array.Empty<byte>(), 0, buffer, 0, buffer.Length, timeout.Token));
         Assert.Contains("file handle is empty", invalidHandle.Message);
@@ -762,10 +808,12 @@ public sealed class NfsV3IntegrationTests
             () => client.ReadAtAsync(lookup.Handle, 0, buffer, 8, buffer.Length, timeout.Token));
         Assert.Contains("exceed the buffer length", tooLargeRange.Message);
 
+        // A zero-length read is a no-op and does not report eof.
         var zeroLengthRead = await client.ReadAtAsync(lookup.Handle, 0, buffer, 0, 0, timeout.Token);
         Assert.Equal(0, zeroLengthRead.BytesRead);
         Assert.False(zeroLengthRead.Eof);
 
+        // Requests above MaxReadSize are rejected before the READ RPC is sent.
         await using var limitedClient = await ConnectV3ClientAsync(
             CreateOptions(maxReadSize: 4),
             timeout.Token);
@@ -773,6 +821,7 @@ public sealed class NfsV3IntegrationTests
             () => limitedClient.ReadAtAsync(lookup.Handle, 0, buffer, 0, 5, timeout.Token));
         Assert.Contains("exceeds MaxReadSize", tooLargeRead.Message);
 
+        // ReadFileAsync on a missing remote path reports NOENT; a local destination failure must not leave partial output.
         await using var output = new MemoryStream();
         var missingPath = await Assert.ThrowsAsync<NfsException>(
             () => client.ReadFileAsync(fixture.GetRunPath("missing-read-source.bin"), output, timeout.Token));
@@ -808,6 +857,7 @@ public sealed class NfsV3IntegrationTests
         await using var client = await ConnectV3ClientAsync(timeout.Token);
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
+        // WriteAt path: create, write at offset 0, overwrite overlapping bytes at offset 2, then commit twice.
         var offsetPath = fixture.GetRunPath("write-at.bin");
         var created = await client.CreateFileAsync(offsetPath, timeout.Token);
 
@@ -826,12 +876,14 @@ public sealed class NfsV3IntegrationTests
             timeout.Token);
         Assert.Equal(4, overwrite);
 
+        // COMMIT ranges may be partial (offset 2, count 3) as long as they stay within the written data.
         var commit = await client.CommitWithResultAsync(created.Handle, 0, 0, timeout.Token);
         AssertCommitResult(commit);
         commit = await client.CommitWithResultAsync(created.Handle, 2, 3, timeout.Token);
         AssertCommitResult(commit);
         Assert.Equal(new byte[] { 0x10, 0x11, 0x20, 0x21, 0x22, 0x23 }, await ReadBytesAsync(client, offsetPath, timeout.Token));
 
+        // WriteFile path: stream content creates the file and reports its post-write size attribute.
         var streamPath = fixture.GetRunPath("stream-write.bin");
         var streamContent = Enumerable.Range(0, 19).Select(i => (byte)(0x40 + i)).ToArray();
         NfsLookup streamLookup;
@@ -848,6 +900,7 @@ public sealed class NfsV3IntegrationTests
         AssertCommitResult(commit);
         Assert.Equal(streamContent, await ReadBytesAsync(client, streamPath, timeout.Token));
 
+        // Rewriting the same path must replace the content and shrink the reported size.
         var replacementContent = new byte[] { 0x55, 0x56, 0x57 };
         await using (var input = new MemoryStream(replacementContent, writable: false))
         {
@@ -858,6 +911,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(replacementContent.Length, streamLookup.Attr.Size);
         Assert.Equal(replacementContent, await ReadBytesAsync(client, streamPath, timeout.Token));
 
+        // A small MaxWriteSize forces WriteFile to split the stream across several WRITE RPCs.
         await using var chunkedClient = await ConnectV3ClientAsync(
             CreateOptions(maxWriteSize: 3),
             timeout.Token);
@@ -875,12 +929,14 @@ public sealed class NfsV3IntegrationTests
         await chunkedClient.CommitAsync(chunkedPath, 0, 0, timeout.Token);
         Assert.Equal(chunkedContent, await ReadBytesAsync(client, chunkedPath, timeout.Token));
 
+        // A zero-length write is legal and carries no writeverf.
         var zeroLengthWrite = await client.WriteAtAsync(created.Handle, 0, ReadOnlyMemory<byte>.Empty, timeout.Token);
         Assert.Equal(0, zeroLengthWrite);
         var zeroLengthWriteResult = await client.WriteAtWithResultAsync(created.Handle, 0, ReadOnlyMemory<byte>.Empty, timeout.Token);
         Assert.Equal(0, zeroLengthWriteResult.Count);
         Assert.Empty(zeroLengthWriteResult.WriteVerifier);
 
+        // Write larger than the configured limit is rejected client-side before any RPC is sent.
         await using var limitedClient = await ConnectV3ClientAsync(
             CreateOptions(maxWriteSize: 2),
             timeout.Token);
@@ -888,6 +944,7 @@ public sealed class NfsV3IntegrationTests
             () => limitedClient.WriteAtAsync(created.Handle, 0, new byte[] { 0x01, 0x02, 0x03 }, timeout.Token));
         Assert.Contains("exceeds MaxWriteSize", tooLargeWrite.Message);
 
+        // An unreadable input stream fails without creating the target path.
         var rejectedPath = fixture.GetRunPath("non-readable-stream.bin");
         await using var nonReadableInput = new NonReadableStream();
         var notReadable = await Assert.ThrowsAsync<NfsException>(
@@ -898,6 +955,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // A canceled write must not leave a created file or report success; follow-up reads must fail or return no data.
     public async Task NfsV3Client_CanceledWritesDoNotReportSuccessOrCreateFiles()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -930,11 +988,13 @@ public sealed class NfsV3IntegrationTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var setupClient = await ConnectV3ClientAsync(timeout.Token);
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(setupClient, timeout.Token);
+        // The high-level facade is used here; MaxWriteSize=2 keeps individual WRITE RPCs small.
         await using var client = new NfsClient(NfsVersion.V3, CreateOptions(maxWriteSize: 2));
 
         await client.ConnectAsync(NfsV3IntegrationEnvironment.Server, timeout.Token);
         await client.MountDeviceAsync(NfsV3IntegrationEnvironment.ExportPath, timeout.Token);
 
+        // Two disjoint writes leave a hole at offsets 2-3; the server zero-fills the gap on readback.
         var path = fixture.GetRunPath("facade-write.bin");
         var created = await client.CreateAndOpenFileAsync(path, null, timeout.Token);
         var written = await client.WriteAtAsync(created.Handle, 0, new byte[] { 0x01, 0x02 }, timeout.Token);
@@ -950,6 +1010,7 @@ public sealed class NfsV3IntegrationTests
         await client.ReadAsync(path, sparseOutput, timeout.Token);
         Assert.Equal(new byte[] { 0x01, 0x02, 0x00, 0x00, 0x05, 0x06 }, sparseOutput.ToArray());
 
+        // A stream write through the facade replaces the whole file contents.
         var replacement = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
         await using (var input = new MemoryStream(replacement, writable: false))
         {
@@ -1009,6 +1070,7 @@ public sealed class NfsV3IntegrationTests
         var nonEmptyDirectory = fixture.GetRunPath("non-empty-delete");
         var nestedFile = $"{nonEmptyDirectory}/child.txt";
 
+        // MKDIR via handle+name with an initial mode; GETATTR must reflect the requested mode bits.
         var createdDirectory = await client.CreateDirectoryAsync(
             parent.Handle,
             "created-dir",
@@ -1020,6 +1082,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(NfsType.Dir, directoryAttributes.Type);
         Assert.Equal(0x1C0u, directoryAttributes.Mode & 0x1FF);
 
+        // CREATE via handle+name yields a regular file whose mode comes from the attribute argument.
         var directoryLookup = await client.LookupPathAsync(directory, timeout.Token);
         var createdFile = await client.CreateFileAsync(
             directoryLookup.Handle,
@@ -1032,16 +1095,19 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(NfsType.Reg, fileAttributes.Type);
         Assert.Equal(0x180u, fileAttributes.Mode & 0x1FF);
 
+        // REMOVE makes the name disappear and turns the retained handle STALE.
         await client.DeleteFileAsync(file, timeout.Token);
         await AssertMissingPathAsync(client, file, timeout.Token);
         var deletedHandle = await Assert.ThrowsAsync<NfsException>(
             () => client.GetAttributesAsync(createdFile.Handle, timeout.Token));
         Assert.Equal(NfsV3Status.Stale, deletedHandle.Status);
 
+        // An empty directory deletes cleanly with recursive: false.
         await client.CreateDirectoryAsync(emptyDirectory, timeout.Token);
         await client.DeleteDirectoryAsync(emptyDirectory, recursive: false, timeout.Token);
         await AssertMissingPathAsync(client, emptyDirectory, timeout.Token);
 
+        // A non-empty directory refuses a non-recursive RMDIR (NOT_EMPTY) but succeeds when recursive.
         await client.CreateDirectoryAsync(nonEmptyDirectory, timeout.Token);
         await WriteBytesAsync(client, nestedFile, [0x4E], timeout.Token);
 
@@ -1055,6 +1121,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Server-dependent case: RENAME over an existing target either replaces it or fails with NFS3ERR_IO while both names survive (see NfsV3ReplacementRenameOutcome).
     public async Task NfsV3Client_VerifiesRenameSameDirectoryCrossDirectoryReplacementAndInvalidTargets()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1065,10 +1132,12 @@ public sealed class NfsV3IntegrationTests
         var sameTarget = fixture.GetRunPath("same-target.txt");
         await WriteBytesAsync(client, sameSource, [0x01, 0x02], timeout.Token);
 
+        // Same-directory rename: source disappears, target holds the original bytes.
         await client.MoveAsync(sameSource, sameTarget, timeout.Token);
         await AssertMissingPathAsync(client, sameSource, timeout.Token);
         Assert.Equal(new byte[] { 0x01, 0x02 }, await ReadBytesAsync(client, sameTarget, timeout.Token));
 
+        // Cross-directory rename moves the file between two run subdirectories.
         var leftDirectory = fixture.GetRunPath("rename-left");
         var rightDirectory = fixture.GetRunPath("rename-right");
         await client.CreateDirectoryAsync(leftDirectory, timeout.Token);
@@ -1082,6 +1151,8 @@ public sealed class NfsV3IntegrationTests
         await AssertMissingPathAsync(client, crossSource, timeout.Token);
         Assert.Equal(new byte[] { 0x03 }, await ReadBytesAsync(client, crossTarget, timeout.Token));
 
+        // Replacement rename is server-dependent: either the target is replaced, or the server returns
+        // NFS3ERR_IO and both names keep their original contents.
         var replacementSource = fixture.GetRunPath("replacement-source.txt");
         var replacementTarget = fixture.GetRunPath("replacement-target.txt");
         await WriteBytesAsync(client, replacementSource, [0xAA, 0xBB], timeout.Token);
@@ -1101,11 +1172,13 @@ public sealed class NfsV3IntegrationTests
             replacementOutcome = NfsV3ReplacementRenameOutcome.IoPreservesBoth;
         }
 
+        // When the environment pins the expected outcome, enforce it; otherwise accept either valid behavior.
         var expectedReplacementOutcome =
             NfsV3IntegrationEnvironment.ExpectedReplacementRenameOutcome;
         if (expectedReplacementOutcome != NfsV3ReplacementRenameOutcome.Unspecified)
             Assert.Equal(expectedReplacementOutcome, replacementOutcome);
 
+        // Invalid rename targets: missing source is NOENT; a file used as the target parent is NOTDIR.
         var missingSource = await Assert.ThrowsAsync<NfsException>(
             () => client.MoveAsync(fixture.GetRunPath("missing-source.txt"), fixture.GetRunPath("missing-target.txt"), timeout.Token));
         Assert.Equal(NfsV3Status.NoEnt, missingSource.Status);
@@ -1131,6 +1204,7 @@ public sealed class NfsV3IntegrationTests
         var source = fixture.GetRunPath("link-source.txt");
         await WriteBytesAsync(client, source, [0x48, 0x4C], timeout.Token);
 
+        // Symlink: creation yields a link object; READLINK returns the stored target text unchanged.
         if (fixture.Capabilities.SupportsSymbolicLinks)
         {
             var symlink = fixture.GetRunPath("link-source-symlink");
@@ -1144,6 +1218,7 @@ public sealed class NfsV3IntegrationTests
             AssertLookupAttributes(lookup, NfsType.Lnk);
         }
 
+        // Hard link: both names share a fileid, and the data survives after the original name is removed.
         if (fixture.Capabilities.SupportsHardLinks)
         {
             var hardLink = fixture.GetRunPath("link-source-hardlink.txt");
@@ -1171,6 +1246,7 @@ public sealed class NfsV3IntegrationTests
         var path = fixture.GetRunPath("attribute-mutation.txt");
         await WriteBytesAsync(client, path, [0x41, 0x42, 0x43, 0x44, 0x45], timeout.Token);
 
+        // Path-based SETATTR updates mode, size, and mtime together; size 3 truncates the content.
         var pathMtime = new DateTime(2024, 02, 03, 05, 06, 07, DateTimeKind.Utc);
         await client.SetAttributesAsync(
             path,
@@ -1189,6 +1265,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(new byte[] { 0x41, 0x42, 0x43 }, await ReadBytesAsync(client, path, timeout.Token));
         Assert.NotNull(pathAttributes.CtimeTimestamp);
 
+        // Guarded SETATTR succeeds only while the recorded ctime matches (weak cache consistency).
         await client.SetAttributesGuardedAsync(
             path,
             new NfsSetAttributes { Mode = 0x1A0 },
@@ -1198,6 +1275,7 @@ public sealed class NfsV3IntegrationTests
         var guardedPathAttributes = await client.GetAttributesAsync(path, timeout.Token);
         Assert.Equal(0x1A0u, guardedPathAttributes.Mode & 0x1FF);
 
+        // A guard of (0, 0) cannot match any ctime, so the server answers NFS3ERR_NOT_SYNC.
         var staleGuard = await Assert.ThrowsAsync<NfsException>(
             () => client.SetAttributesGuardedAsync(
                 path,
@@ -1206,6 +1284,7 @@ public sealed class NfsV3IntegrationTests
                 timeout.Token));
         Assert.Equal(NfsV3Status.NotSync, staleGuard.Status);
 
+        // The same mutations applied through a file handle must behave identically to the path-based calls.
         var lookup = await client.LookupPathAsync(path, timeout.Token);
         var handleMtime = new DateTime(2024, 03, 04, 06, 07, 08, DateTimeKind.Utc);
         await client.SetAttributesAsync(
@@ -1233,6 +1312,7 @@ public sealed class NfsV3IntegrationTests
         handleAttributes = await client.GetAttributesAsync(path, timeout.Token);
         Assert.Equal(0x180u, handleAttributes.Mode & 0x1FF);
 
+        // Convenience wrappers each touch one field; the final attributes combine all of them.
         await client.ChmodAsync(path, 0x1A4, timeout.Token);
         await client.ChownAsync(path, handleAttributes.Uid, handleAttributes.Gid, timeout.Token);
         await client.SetFileSizeAsync(path, 2, timeout.Token);
@@ -1250,6 +1330,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Uses an unprivileged uid/gid connection so the server rejects SETATTR with NFS3ERR_ACCES/PERM.
     public async Task NfsV3Client_PreservesSetAttributePermissionFailures()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1304,6 +1385,7 @@ public sealed class NfsV3IntegrationTests
             await client.WriteAsync(path, content, timeout.Token);
         }
 
+        // Facade SETATTR mirrors the protocol client: mode, size, and mtime in one call, then readback via GetItemAttributesAsync.
         var mtime = new DateTime(2024, 04, 05, 06, 07, 08, DateTimeKind.Utc);
         await client.SetAttributesAsync(
             path,
@@ -1321,6 +1403,7 @@ public sealed class NfsV3IntegrationTests
         AssertCloseTo(mtime, attributes.Mtime);
         Assert.NotNull(attributes.CtimeTimestamp);
 
+        // Guarded update uses the ctime snapshot returned by the previous GETATTR.
         await client.SetAttributesGuardedAsync(
             path,
             new NfsSetAttributes { Mode = 0x1A0 },
@@ -1337,6 +1420,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(0x1A4u, attributes.Mode & 0x1FF);
         Assert.Equal(2, attributes.Size);
 
+        // Size 2 truncates the four-byte file to its first two bytes.
         await using var output = new MemoryStream();
         await client.ReadAsync(path, output, timeout.Token);
         Assert.Equal(new byte[] { 0x61, 0x62 }, output.ToArray());
@@ -1393,6 +1477,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // The client is expected to reconnect and retry a retry-safe call after the transport is torn down underneath it.
     public async Task NfsV3Client_ReconnectsAndRetriesAfterTransportFailure()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1471,6 +1556,7 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // REMOUNT replaces the active export in place; Dispose must leave the facade unmounted and cleaned up.
     public async Task NfsClient_RemountReplacesActiveExportAndDisposeCleansUp()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1537,6 +1623,7 @@ public sealed class NfsV3IntegrationTests
             DirectoryCacheTtl = directoryCacheTtl ?? NfsClientOptions.Default.DirectoryCacheTtl
         };
 
+    // Connect helpers parameterize uid/gid, readdir count, or options against the configured integration server.
     private static Task<NfsV3Client> ConnectV3ClientAsync(CancellationToken ct) =>
         NfsV3Client.ConnectAsync(
             NfsV3IntegrationEnvironment.Server,
@@ -1695,6 +1782,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(8, result.WriteVerifier.Length);
     }
 
+    // The server may report a stronger stability guarantee than requested (e.g. FILE_SYNC when UNSTABLE was asked for).
     private static void AssertCommittedAtLeast(NfsWriteStableHow requested, NfsWriteStableHow actual) =>
         Assert.True(
             (uint)actual >= (uint)requested,
@@ -1703,6 +1791,7 @@ public sealed class NfsV3IntegrationTests
     private static void AssertCommitResult(NfsCommitResult result) =>
         Assert.Equal(8, result.WriteVerifier.Length);
 
+    // NFS timestamps have one-second resolution on some servers; allow a small delta when comparing against the fixture clock.
     private static void AssertCloseTo(DateTime expectedUtc, DateTime? actualUtc)
     {
         Assert.NotNull(actualUtc);
@@ -1738,6 +1827,8 @@ public sealed class NfsV3IntegrationTests
 
     private static void AssertFileSystemStat(NfsFileSystemStat stat)
     {
+        // Space accounting must nest: available <= free <= total. Servers that report a zero total
+        // are expected to report zero free/available as well rather than inventing values.
         if (stat.TotalBytes > 0)
         {
             Assert.True(stat.FreeBytes <= stat.TotalBytes);
@@ -1749,6 +1840,7 @@ public sealed class NfsV3IntegrationTests
             Assert.Equal(0ul, stat.AvailableBytes);
         }
 
+        // The same nesting rule applies to the file-slot counters.
         if (stat.TotalFiles > 0)
         {
             Assert.True(stat.FreeFiles <= stat.TotalFiles);
@@ -1773,6 +1865,7 @@ public sealed class NfsV3IntegrationTests
         const uint FsF3CanSetTime = 0x0010;
         const uint KnownFsInfoProperties = FsF3Link | FsF3Symlink | FsF3Homogeneous | FsF3CanSetTime;
 
+        // Preferred and multiple sizes must fit inside their corresponding maximums.
         Assert.True(info.MaxReadSize > 0);
         Assert.True(info.PreferredReadSize > 0);
         Assert.True(info.PreferredReadSize <= info.MaxReadSize);
@@ -1785,11 +1878,13 @@ public sealed class NfsV3IntegrationTests
         Assert.True(info.WriteMultipleSize > 0);
         Assert.True(info.WriteMultipleSize <= info.MaxWriteSize);
 
+        // MaxFileSize must accommodate the fixture's boundary file; unknown property bits are rejected.
         Assert.True(info.PreferredReaddirSize > 0);
         Assert.True(info.MaxFileSize >= (ulong)NfsV3IntegrationFixture.BoundaryFile.Size);
         Assert.True(info.TimeDelta >= TimeSpan.Zero);
         Assert.Equal(0u, info.Properties & ~KnownFsInfoProperties);
 
+        // Property flags must agree with the capabilities the fixture probed at setup time.
         if (capabilities.SupportsHardLinks)
             Assert.NotEqual(0u, info.Properties & FsF3Link);
 
@@ -1806,6 +1901,7 @@ public sealed class NfsV3IntegrationTests
         if (pathConf.LinkMax > 0 && capabilities.SupportsHardLinks)
             Assert.True(pathConf.LinkMax >= 2);
 
+        // NameMax must fit the fixture's longest name; at least one of the case flags must be set.
         Assert.True(pathConf.NameMax >= NfsV3IntegrationFixture.BoundaryFileName.Length);
         Assert.True(pathConf.CaseInsensitive || pathConf.CasePreserving);
     }
@@ -1816,6 +1912,7 @@ public sealed class NfsV3IntegrationTests
         NfsPathConf pathConf,
         CancellationToken ct)
     {
+        // Create a mixed-case name, then verify the server's case flags describe real lookup behavior.
         var name = "PathConf-MixedCase.txt";
         var path = fixture.GetRunPath(name);
         await using (var content = new MemoryStream([0x43], writable: false))
@@ -1823,10 +1920,12 @@ public sealed class NfsV3IntegrationTests
             await client.WriteFileAsync(path, content, ct);
         }
 
+        // Case-preserving servers must echo the exact mixed-case spelling in READDIR.
         var entries = await client.ReadDirAsync(fixture.RunDirectory, ct);
         if (pathConf.CasePreserving)
             Assert.Contains(entries, entry => entry.Name == name);
 
+        // Case-insensitive servers resolve the lower-case form to the same fileid; others must report NOENT.
         var alternateCasePath = fixture.GetRunPath(name.ToLowerInvariant());
         if (pathConf.CaseInsensitive)
         {

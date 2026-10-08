@@ -3,6 +3,7 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+/// <summary>Holds RPCSEC_GSS context state and writes CALL credentials/verifiers (RFC 2203).</summary>
 internal sealed class RpcSecGssSession
 {
     private readonly NfsClientOptions _options;
@@ -17,23 +18,27 @@ internal sealed class RpcSecGssSession
 
     internal bool IsEstablished => _context?.Mechanism.IsEstablished == true;
 
+    /// <summary>Write the RPCSEC_GSS credential body: context handle, sequence number, service.</summary>
     internal void WriteCredential(XdrWriter writer)
     {
         var context = _context ?? throw new InvalidOperationException("RPCSEC_GSS context is unavailable.");
         var body = new XdrWriter();
         body.UInt((uint)context.ContextHandle.Length);
         body.Opaque(context.ContextHandle);
+        // Sequence numbers must strictly increase; RpcClient serializes GSS calls around this increment.
         body.UInt(context.Mechanism.NextSeqNum++);
         body.UInt((uint)context.Service);
         writer.Opaque(body.ToArray());
     }
 
+    /// <summary>Write the RPCSEC_GSS verifier: a GSS MIC over the procedure arguments.</summary>
     internal void WriteVerifier(XdrWriter writer, ReadOnlySpan<byte> arguments)
     {
         var context = _context ?? throw new InvalidOperationException("RPCSEC_GSS context is unavailable.");
         writer.Opaque(context.Mechanism.GetMic(arguments.ToArray()));
     }
 
+    /// <summary>Observe a REPLY verifier so security-session state can track it.</summary>
     internal void ObserveReply(RpcReply reply)
     {
         if (_context is not null && reply.VerifierFlavor == (uint)RpcSecGssFlavor.Gss)
@@ -44,13 +49,17 @@ internal sealed class RpcSecGssSession
         }
     }
 
+    /// <summary>Run RPCSEC_GSS_CREATE and store the resulting server context handle.</summary>
     internal async Task EstablishAsync(string server, RpcClient rpcClient, CancellationToken ct)
     {
         var mechanism = _options.GssMechanism
                         ?? throw new InvalidOperationException("A GSS mechanism was not configured.");
+        // Default target principal follows the conventional nfs/<host> service name.
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
+        // Phase 1: local GSS context initiation produces the token the server must consume.
         var token = await mechanism.InitiateContextAsync(targetName, _options.GssCredentials, ct);
 
+        // CREATE arguments: procedure, GSS token, requested service, sequence-window hint.
         var arguments = new XdrWriter();
         arguments.UInt((uint)RpcSecGssProc.Create);
         arguments.UInt((uint)token.Length);
@@ -58,16 +67,19 @@ internal sealed class RpcSecGssSession
         arguments.UInt((uint)_options.GssService);
         arguments.UInt(0);
 
+        // CREATE is not idempotent; a retry would allocate a second server context.
         var reader = await rpcClient.CallRawAsync(
             NfsRpcConstants.ProgNfs,
             NfsRpcConstants.VerNfs,
             0,
             arguments.ToArray(),
             ct);
+        // Phase 2: decode the CREATE result before publishing any session state.
         var status = reader.UInt();
         if (status != 0)
             throw new NfsException($"RPCSEC_GSS_CREATE failed (stat={status}).");
 
+        // Publish the context only after the full reply decodes, so later CALLs never sign with a partial session.
         _context = new RpcSecGssContext
         {
             ContextHandle = reader.Opaque(),

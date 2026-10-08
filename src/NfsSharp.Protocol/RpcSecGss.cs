@@ -30,7 +30,9 @@ public enum RpcSecGssProc : uint
 /// <summary>RPCSEC_GSS sequence number window size for replay detection.</summary>
 public static class RpcSecGssConstants
 {
+    /// <summary>Largest sequence window accepted by the protocol (RFC 2203).</summary>
     public const int MaxSeqWindowSize = 64;
+    /// <summary>Window size used unless a peer negotiates a smaller value.</summary>
     public const int DefaultSeqWindowSize = 64;
 }
 
@@ -100,10 +102,15 @@ public sealed class GssCredentials
 /// <summary>RPCSEC_GSS context handle returned after CREATE exchange.</summary>
 public sealed class RpcSecGssContext
 {
+    /// <summary>Opaque server-issued context handle for subsequent RPCs.</summary>
     public byte[] ContextHandle { get; init; } = Array.Empty<byte>();
+    /// <summary>Number of sequence numbers accepted within the sliding window.</summary>
     public uint SeqWindowSize { get; init; }
+    /// <summary>Replay-detection window bits received from the server (RFC 2203).</summary>
     public byte[] SeqWindow { get; init; } = new byte[8];
+    /// <summary>Service level (none/integrity/privacy) bound to this context.</summary>
     public RpcSecGssService Service { get; init; }
+    /// <summary>Mechanism that established and secures this context.</summary>
     public IRpcSecGssMechanism Mechanism { get; init; } = null!;
 }
 
@@ -135,6 +142,7 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
             TargetName = targetName,
         };
 
+        // Optional explicit credentials; without them Negotiate falls back to the process identity.
         if (credentials?.UserName is not null)
         {
             options.Credential = new System.Net.NetworkCredential(
@@ -144,6 +152,7 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
         }
 
         _auth = new System.Net.Security.NegotiateAuthentication(options);
+        // An empty input yields the first handshake token to ship in RPCSEC_GSS_CREATE.
         var token = _auth.GetOutgoingBlob(ReadOnlySpan<byte>.Empty, out _);
         return Task.FromResult(token ?? Array.Empty<byte>());
     }
@@ -153,10 +162,12 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
         if (_auth is null)
             throw new InvalidOperationException("Context not initiated.");
 
+        // Feed the server token back through the handshake; Completed means establishment is done.
         var token = _auth.GetOutgoingBlob(serverToken, out var statusCode);
         if (statusCode == System.Net.Security.NegotiateAuthenticationStatusCode.Completed)
             _established = true;
 
+        // A null token means no further round trip is required.
         return Task.FromResult(token ?? Array.Empty<byte>());
     }
 
@@ -185,6 +196,7 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
         }
         catch
         {
+            // A bad MIC surfaces as an exception; report it as a failed verification instead of throwing.
             return false;
         }
     }

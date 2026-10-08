@@ -34,6 +34,8 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         _portmapClient = new PortmapClient(_rpcClient, options.PortmapPort);
         _mountClient = new MountClient(_rpcClient);
         _protocolClient = new NfsV3ProtocolClient(_rpcClient, options, new NfsDirectoryCache(options));
+        // The resolver reads the root handle lazily so path walks start from the export root
+        // established later by the mount in ConnectAsync.
         _pathResolver = new NfsPathResolver(
             () => _rootFh,
             _protocolClient.LookupAsync,
@@ -43,6 +45,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
     /// <summary>File handle for the mounted export root.</summary>
     public byte[] RootHandle => _rootFh;
 
+    /// <summary>Observed maximum number of concurrent RPC calls; exposed for tests.</summary>
     internal int RpcPendingCallHighWaterMarkForTesting => _rpcClient.PendingCallHighWaterMarkForTesting;
 
     /// <summary>Resolve a server, mount an export, and open the NFSv3 connection.</summary>
@@ -63,6 +66,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         };
         try
         {
+            // Phase 1: ask portmap for mountd and nfsd TCP ports before any NFS traffic.
             var mountPort = await client._portmapClient.GetTcpPortAsync(
                 NfsRpcConstants.ProgMount, NfsRpcConstants.VerMount, ct);
             var nfsPort = await client._portmapClient.GetTcpPortAsync(
@@ -70,8 +74,11 @@ public sealed partial class NfsV3Client : IAsyncDisposable
             PortmapClient.EnsureMapped(mountPort, "mountd");
             PortmapClient.EnsureMapped(nfsPort, "NFS");
             client._mountPort = mountPort;
+            // Phase 2: MNT returns the export-root handle every path walk starts from.
             client._rootFh = await client._mountClient.MountAsync(mountPort, exportPath, ct);
+            // Phase 3: open the long-lived NFS connection used for file operations.
             await client._rpcClient.ConnectAsync(nfsPort, ct);
+            // Phase 4: optional RPCSEC_GSS context must exist before authenticated calls.
             if (options.GssMechanism is not null)
                 await client._gssSession.EstablishAsync(server, client._rpcClient, ct);
             client._logger?.LogInformation(
@@ -81,6 +88,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         catch
         {
+            // Partial setup must not leak sockets or a half-open RPC client.
             await client._rpcClient.DisposeAsync();
             throw;
         }
@@ -107,6 +115,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
     /// <summary>Unmount the export and close the active NFS connection.</summary>
     public async Task UnmountAsync(CancellationToken ct)
     {
+        // Idempotent guard: concurrent dispose/unmount must not send UMNT twice.
         if (_unmounted) return;
         _unmounted = true;
         _logger?.LogInformation("Unmounting NFS export {Export}", _exportPath);
@@ -117,6 +126,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         finally
         {
+            // Always tear down the RPC connection, even when UMNT itself failed.
             await _rpcClient.StopAndCloseActiveConnectionAsync();
         }
     }
@@ -196,19 +206,25 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         _disposed = true;
         try
         {
+            // Best-effort UMNT with a short deadline so dispose cannot hang on a sick server.
             using var source = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await UnmountAsync(source.Token);
         }
+        // Unmount failed or timed out: still drop the live connection before full dispose.
         catch { await _rpcClient.CloseActiveConnectionAsync(); }
         finally { await _rpcClient.DisposeAsync(); }
     }
 
+    /// <summary>Drops the live connection while keeping the instance usable; exposed for tests.</summary>
     internal ValueTask DisposeActiveNfsConnectionForTestingAsync() =>
         _rpcClient.DisposeActiveConnectionForTestingAsync();
+    /// <summary>True when an exception is a transient failure eligible for retry.</summary>
     internal static bool IsTransient(Exception ex) => NfsRetryPolicy.IsTransient(ex);
+    /// <summary>True when the procedure is idempotent enough to retry under the retry policy.</summary>
     internal static bool CanRetryTransient(uint program, uint version, uint procedure) =>
         NfsRetryPolicy.CanRetry(program, version, procedure);
 
+    // Thin forwarders that let tests reach the internal RPC/protocol helpers through this type.
     private static RpcReply DecodeRpcReplyWithContext(
         byte[] reply, uint xid, uint program, uint version, uint procedure) =>
         RpcClient.DecodeReplyWithContext(reply, xid, program, version, procedure);

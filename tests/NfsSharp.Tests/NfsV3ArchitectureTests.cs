@@ -7,6 +7,10 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Tests;
 
+/// <summary>
+/// Architectural seams of the NFSv3 stack in isolation: protocol client vs facade, path resolution,
+/// directory-cache coherence, and RPC transport/client/connection behavior (multiplexing, retries, faults).
+/// </summary>
 public sealed class NfsV3ArchitectureTests
 {
     [Fact]
@@ -59,6 +63,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // The cache must hand out clones so callers cannot corrupt stored entries, and must invalidate the parent directory of a mutated path.
     public void DirectoryCache_ClonesResultsAndInvalidatesContainingDirectory()
     {
         var options = NfsClientOptions.Default with
@@ -84,6 +89,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A readdir that started before a mutation may complete after it; its stale snapshot must not overwrite the invalidated entry.
     public void DirectoryCache_DoesNotPublishReadThatRacedWithMutation()
     {
         var options = NfsClientOptions.Default with { EnableDirectoryCache = true };
@@ -112,6 +118,7 @@ public sealed class NfsV3ArchitectureTests
     [Fact]
     public async Task RpcClient_EncodesEnvelopeAndExposesOnlyProcedurePayload()
     {
+        // Scripted MSG_ACCEPTED reply with a single procedure result word (0xCAFE_BABE) after the accept arm.
         var reply = new XdrWriter();
         reply.UInt(1);
         reply.UInt(1);
@@ -120,14 +127,18 @@ public sealed class NfsV3ArchitectureTests
         reply.Opaque([]);
         reply.UInt(0);
         reply.UInt(0xCAFE_BABE);
+        // maxReadSize=3 forces the reader to reassemble the reply across multiple ReadAsync calls.
         var stream = new ScriptedDuplexStream(Frame(reply.ToArray()), maxReadSize: 3);
         await using var rpc = new RpcClient(stream, NfsClientOptions.Default with { MaxRetries = 0 });
 
         var body = await rpc.CallAsync(100003, 3, 1, [0x01, 0x02, 0x03, 0x04], CancellationToken.None);
 
+        // CallAsync returns an XdrReader positioned at the procedure payload only; the RPC envelope is consumed.
         Assert.Equal(0xCAFE_BABEu, body.UInt());
+        // The outgoing frame is a single last-fragment record: high bit set plus the message length.
         var written = stream.Written;
         Assert.Equal(0x8000_0000u | (uint)(written.Length - 4), BinaryPrimitives.ReadUInt32BigEndian(written));
+        // Call envelope fields in wire order: xid, msg_type=CALL, rpcvers, prog, vers, proc, then AUTH_SYS credentials.
         var call = new XdrReader(written[4..]);
         Assert.Equal(1u, call.UInt());
         Assert.Equal(0u, call.UInt());
@@ -240,6 +251,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // The XID counter wraps through int.MinValue; a wrapped XID still held by a pending call must be skipped to avoid reply misrouting.
     public async Task RpcClient_XidWraparoundSkipsAnIdStillPendingOnTheConnection()
     {
         var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
@@ -266,6 +278,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A protocol-level decode failure poisons the connection: every outstanding call fails and the next call reconnects.
     public async Task RpcClient_MalformedReplyFailsEveryCallOnThatConnection()
     {
         var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
@@ -307,6 +320,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A per-call command timeout must not cancel sibling in-flight calls on the same connection.
     public async Task RpcClient_OneCommandTimeoutDoesNotInterruptAnotherOutstandingCall()
     {
         var stream = new MultiplexingTestStream(autoReplyAfterTwoRequests: false);
@@ -351,6 +365,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A receive-loop failure while another call is blocked in a write must fail every pending call with "receive failed", not a misleading timeout.
     public async Task RpcConnection_ReceiveFailureDuringWritePropagatesConnectionFailure()
     {
         var stream = new FaultingRpcStream(blockedWriteNumber: 4);
@@ -374,6 +389,7 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    // A replacement connection that failed after being swapped in must not be reused; reconnect again until a healthy one is obtained.
     public async Task RpcClient_ReconnectRefreshesAnAlreadyFailedReplacementConnection()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -381,6 +397,7 @@ public sealed class NfsV3ArchitectureTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         var options = NfsClientOptions.Default with { MaxRetries = 1 };
         await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), options);
+        // Reflection reaches the private connection state and ReconnectAsync so the swap logic can be driven directly.
         var activeConnectionField = typeof(RpcClient).GetField(
             "_activeConnection",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
@@ -395,12 +412,14 @@ public sealed class NfsV3ArchitectureTests
         Task<RpcConnection?> ReconnectAsync(RpcConnection failed) =>
             (Task<RpcConnection?>)reconnectMethod.Invoke(rpc, [failed, CancellationToken.None])!;
 
+        // First reconnect: a healthy replacement is dialed and accepted by the listener.
         var firstAccept = listener.AcceptSocketAsync();
         var replacement = await ReconnectAsync(original);
         using var firstAccepted = await firstAccept;
         Assert.NotNull(replacement);
         Assert.True(replacement.IsHealthy);
 
+        // Fail the replacement after it was swapped in, then reconnect again with the same "failed" original.
         await replacement.DisposeAsync();
         Assert.False(replacement.IsHealthy);
 
@@ -408,6 +427,7 @@ public sealed class NfsV3ArchitectureTests
         var refreshed = await ReconnectAsync(original);
         using var secondAccepted = await secondAccept;
 
+        // A dead replacement must be discarded, not reused, even when the caller still names the original failure.
         Assert.NotNull(refreshed);
         Assert.NotSame(replacement, refreshed);
         Assert.True(refreshed.IsHealthy);
@@ -447,6 +467,7 @@ public sealed class NfsV3ArchitectureTests
             MaxRetries = 0,
             UsePrivilegedSourcePort = false
         };
+        // The scripted stream answers the first call with an undecodable reply body to poison the connection.
         await using var rpc = new RpcClient(new ScriptedDuplexStream(Frame([1, 2])), options);
         var activeConnectionField = typeof(RpcClient).GetField(
             "_activeConnection",
@@ -461,10 +482,12 @@ public sealed class NfsV3ArchitectureTests
         Assert.Contains("receive failed", protocolFailure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.False(((RpcConnection)activeConnectionField.GetValue(rpc)!).IsHealthy);
 
+        // The next call must open a real TCP connection to the redirected port instead of reusing the poisoned one.
         var nextServerConnection = listener.AcceptSocketAsync();
         var nextCall = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
         using var socket = await nextServerConnection.WaitAsync(TimeSpan.FromSeconds(2));
         using var stream = new NetworkStream(socket, ownsSocket: false);
+        // Serve the replacement connection by hand: echo the request XID into a minimal MSG_ACCEPTED reply.
         var request = await RpcRecordStream.ReceiveAsync(stream, CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(2));
         var xid = BinaryPrimitives.ReadUInt32BigEndian(request);
@@ -500,6 +523,7 @@ public sealed class NfsV3ArchitectureTests
         uint program, uint version, uint procedure, bool expected) =>
         Assert.Equal(expected, NfsRetryPolicy.CanRetry(program, version, procedure));
 
+    // Records the last CALL envelope fields so tests can assert program/version/procedure and argument layout.
     private sealed class RecordingRpcClient(byte[] response) : IRpcCallClient
     {
         internal uint Program { get; private set; }
@@ -522,6 +546,7 @@ public sealed class NfsV3ArchitectureTests
         }
     }
 
+    // Wraps a message as a single last-fragment RPC record (high bit set on the length marker).
     private static byte[] Frame(byte[] message)
     {
         var result = new byte[message.Length + 4];
@@ -537,8 +562,10 @@ public sealed class NfsV3ArchitectureTests
         return writer.ToArray();
     }
 
+    // Injects faults at chosen write numbers and can fail reads on demand, simulating stalled or broken TCP peers.
     private sealed class FaultingRpcStream(int blockedWriteNumber) : Stream
     {
+        // Signaled when the scripted write is reached, when the receive loop starts reading, and when the read should fail.
         private readonly TaskCompletionSource<bool> _blockedWrite = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _readStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _failRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -559,6 +586,7 @@ public sealed class NfsV3ArchitectureTests
         public override void Flush() { }
         public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
+        // Reads block until FailRead() is called, then throw so the receive loop reports "receive failed".
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             _readStarted.TrySetResult(true);
@@ -566,6 +594,7 @@ public sealed class NfsV3ArchitectureTests
             throw new IOException("Injected receive failure.");
         }
 
+        // The blockedWriteNumber-th write parks forever until its cancellation token fires (command timeout).
         public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
             if (Interlocked.Increment(ref _writeCount) == blockedWriteNumber)
@@ -587,10 +616,12 @@ public sealed class NfsV3ArchitectureTests
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
+    // Multiplexed RPC stream: tracks request XIDs/tags and lets tests reply out of order, duplicate, or with unknown XIDs.
     private sealed class MultiplexingTestStream(bool autoReplyAfterTwoRequests) : Stream
     {
         private readonly object _writeSync = new();
         private readonly MemoryStream _writeBuffer = new();
+        // Outbound reply queue consumed by ReadAsync; each item is already record-marked.
         private readonly Channel<byte[]> _replies = Channel.CreateUnbounded<byte[]>();
         private readonly List<(uint Xid, uint Tag)> _requests = [];
         private readonly List<uint> _replyTags = [];
@@ -609,12 +640,14 @@ public sealed class NfsV3ArchitectureTests
         public override void Flush() { }
         public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
+        // Wait/retry loop: release once per decoded request until the caller's count is reached.
         internal async Task WaitForRequestsAsync(int count)
         {
             while (RequestCount < count)
                 await _requestChanged.WaitAsync(TimeSpan.FromSeconds(2));
         }
 
+        // Reply to a previously recorded request identified by its test-supplied tag (not the wire XID).
         internal Task ReplyToAsync(uint tag)
         {
             (uint Xid, uint Tag) request;
@@ -623,10 +656,12 @@ public sealed class NfsV3ArchitectureTests
             return QueueReplyAsync(request.Xid, request.Tag);
         }
 
+        // Craft a reply for an arbitrary XID so tests can simulate unknown or misrouted responses.
         internal Task ReplyForXidAsync(uint xid, uint tag) => QueueReplyAsync(xid, tag);
 
         internal Task SendRawReplyAsync(byte[] reply) => _replies.Writer.WriteAsync(Frame(reply)).AsTask();
 
+        // Dispatch side: pull queued reply frames and serve them in bounded chunks like a real TCP stream.
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             while (_currentReply is null || _replyOffset == _currentReply.Length)
@@ -653,6 +688,7 @@ public sealed class NfsV3ArchitectureTests
             return ValueTask.CompletedTask;
         }
 
+        // Accumulates written bytes until a complete RPC record arrives, then records its XID and argument tag.
         private void ProcessCompleteRequests()
         {
             var bytes = _writeBuffer.ToArray();
@@ -661,9 +697,12 @@ public sealed class NfsV3ArchitectureTests
             {
                 var marker = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(offset, 4));
                 var length = (int)(marker & 0x7fff_ffff);
+                // Stop on a non-final fragment or an incomplete body; the rest stays buffered for the next write.
                 if ((marker & 0x8000_0000u) == 0 || bytes.Length - offset - 4 < length)
                     break;
 
+                // Skip the CALL envelope (xid, msg_type, rpcvers, prog/vers/proc, credential, verifier);
+                // the procedure argument's first uint doubles as the test's reply tag.
                 var message = bytes.AsSpan(offset + 4, length);
                 var reader = new XdrReader(message.ToArray());
                 var xid = reader.UInt();
@@ -681,6 +720,7 @@ public sealed class NfsV3ArchitectureTests
                 _requestChanged.Release();
                 offset += 4 + length;
 
+                // Auto mode replies to both pending calls in reverse order to prove XID-based dispatch.
                 if (autoReplyAfterTwoRequests && _requests.Count == 2)
                 {
                     foreach (var request in _requests.AsEnumerable().Reverse())
@@ -693,6 +733,7 @@ public sealed class NfsV3ArchitectureTests
             _writeBuffer.Write(remaining);
         }
 
+        // Builds a MSG_ACCEPTED reply whose procedure payload echoes the test tag, then queues it for ReadAsync.
         private Task QueueReplyAsync(uint xid, uint tag)
         {
             var writer = new XdrWriter();
@@ -719,6 +760,7 @@ public sealed class NfsV3ArchitectureTests
         public override void Write(byte[] buffer, int offset, int count) => WriteAsync(buffer.AsMemory(offset, count)).GetAwaiter().GetResult();
     }
 
+    // Scriptable duplex stream: feeds a fixed reply buffer (optionally stalling) and captures written frames.
     private sealed class ScriptedDuplexStream(
         byte[] input,
         int maxReadSize = int.MaxValue,
@@ -741,6 +783,8 @@ public sealed class NfsV3ArchitectureTests
         public override void Flush() { }
         public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
+        // Serves the scripted bytes incrementally; maxReadSize simulates short TCP reads.
+        // Once the buffer is exhausted, stallReads keeps the receive loop waiting instead of returning EOF.
         public override async ValueTask<int> ReadAsync(
             Memory<byte> buffer,
             CancellationToken cancellationToken = default)
@@ -759,6 +803,7 @@ public sealed class NfsV3ArchitectureTests
             return count;
         }
 
+        // Every client write is appended verbatim so tests can decode the outbound CALL frame.
         public override ValueTask WriteAsync(
             ReadOnlyMemory<byte> buffer,
             CancellationToken cancellationToken = default) =>
