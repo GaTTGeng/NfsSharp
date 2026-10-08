@@ -330,6 +330,48 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    public async Task RpcClient_CommandTimeoutInterruptsAStalledRecordWriteAndClosesConnection()
+    {
+        var stream = new FaultingRpcStream(blockedWriteNumber: 2);
+        await using var rpc = new RpcClient(stream, NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            CommandTimeout = TimeSpan.FromMilliseconds(100)
+        });
+
+        var call = rpc.CallAsync(100003, 3, 1, UIntArgument(1), CancellationToken.None);
+        await stream.WaitForBlockedWriteAsync();
+
+        var timeout = await Assert.ThrowsAsync<NfsException>(() => call);
+        Assert.Contains("timed out", timeout.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(stream.IsDisposed);
+        Assert.Equal(0, rpc.PendingCallCountForTesting);
+    }
+
+    [Fact]
+    public async Task RpcConnection_ReceiveFailureDuringWritePropagatesConnectionFailure()
+    {
+        var stream = new FaultingRpcStream(blockedWriteNumber: 4);
+        await using var connection = new RpcConnection(stream, maxOutstandingCalls: 2);
+        Assert.True(connection.TryRegister(1, out var firstPending));
+        Assert.True(connection.TryRegister(2, out var secondPending));
+
+        var first = connection.SendAndReceiveAsync(1, firstPending, [1], CancellationToken.None);
+        await stream.WaitForReadAsync();
+        var second = connection.SendAndReceiveAsync(2, secondPending, [2], CancellationToken.None);
+        await stream.WaitForBlockedWriteAsync();
+
+        stream.FailRead();
+
+        var firstFailure = await Assert.ThrowsAsync<NfsException>(() => first);
+        var secondFailure = await Assert.ThrowsAsync<NfsException>(() => second);
+        Assert.Contains("receive failed", firstFailure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("receive failed", secondFailure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("timed out", secondFailure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, connection.PendingCallCount);
+    }
+
+    [Fact]
     public async Task RpcClient_ExplicitStopClosesTheConnectionAndPreventsFurtherCalls()
     {
         await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), NfsClientOptions.Default);
@@ -383,6 +425,56 @@ public sealed class NfsV3ArchitectureTests
         var writer = new XdrWriter();
         writer.UInt(value);
         return writer.ToArray();
+    }
+
+    private sealed class FaultingRpcStream(int blockedWriteNumber) : Stream
+    {
+        private readonly TaskCompletionSource<bool> _blockedWrite = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _readStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _failRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _writeCount;
+        private int _disposed;
+
+        internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
+        internal Task WaitForBlockedWriteAsync() => _blockedWrite.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        internal Task WaitForReadAsync() => _readStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        internal void FailRead() => _failRead.TrySetResult(true);
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            _readStarted.TrySetResult(true);
+            await _failRead.Task.WaitAsync(cancellationToken);
+            throw new IOException("Injected receive failure.");
+        }
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _writeCount) == blockedWriteNumber)
+            {
+                _blockedWrite.TrySetResult(true);
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Interlocked.Exchange(ref _disposed, 1);
+            base.Dispose(disposing);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private sealed class MultiplexingTestStream(bool autoReplyAfterTwoRequests) : Stream

@@ -238,22 +238,32 @@ internal sealed class RpcConnection : IAsyncDisposable
                 if (_failure is { } failure)
                     throw failure;
 
-                // Finish a record write once it begins. Abandoning a partial record would
-                // corrupt the shared TCP byte stream and fail unrelated calls.
+                // Once a record write begins, call cancellation must interrupt it. A
+                // partial record makes the shared byte stream unusable, so fail the
+                // connection before returning the caller's cancellation.
+                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetime.Token);
                 try
                 {
-                    await RpcTransport.SendRecordAsync(Stream, request, _lifetime.Token);
+                    await RpcTransport.SendRecordAsync(Stream, request, sendCts.Token);
                     EnsureReceiveLoopStarted();
                 }
-                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+                catch (OperationCanceledException) when (Volatile.Read(ref _failure) is { } storedFailure)
                 {
+                    throw storedFailure;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    FailConnection(new NfsException(
+                        $"RPC send was canceled on connection generation {Generation} after the record write began.",
+                        new IOException("The RPC record may be incomplete.")));
                     throw;
                 }
                 catch (Exception ex)
                 {
-                    FailConnection(new NfsException(
-                        $"RPC send failed on connection generation {Generation}.", ex));
-                    throw;
+                    var sendFailure = new NfsException(
+                        $"RPC send failed on connection generation {Generation}.", ex);
+                    FailConnection(sendFailure);
+                    throw Volatile.Read(ref _failure) ?? sendFailure;
                 }
             }
             finally
@@ -317,6 +327,24 @@ internal sealed class RpcConnection : IAsyncDisposable
             return;
 
         _lifetime.Cancel();
+        try
+        {
+            Stream.Dispose();
+        }
+        catch
+        {
+            // Closing a failed stream is best-effort; the stored failure is authoritative.
+        }
+
+        try
+        {
+            _socket?.Dispose();
+        }
+        catch
+        {
+            // Socket disposal is best-effort.
+        }
+
         foreach (var item in _pendingCalls.ToArray())
         {
             if (_pendingCalls.TryRemove(item.Key, out var pending))
