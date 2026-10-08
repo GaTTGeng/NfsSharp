@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading.Channels;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
@@ -369,6 +371,46 @@ public sealed class NfsV3ArchitectureTests
         Assert.Contains("receive failed", secondFailure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("timed out", secondFailure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(0, connection.PendingCallCount);
+    }
+
+    [Fact]
+    public async Task RpcClient_ReconnectRefreshesAnAlreadyFailedReplacementConnection()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var options = NfsClientOptions.Default with { MaxRetries = 1 };
+        await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), options);
+        var activeConnectionField = typeof(RpcClient).GetField(
+            "_activeConnection",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var activePortField = typeof(RpcClient).GetField(
+            "_activePort",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var original = (RpcConnection)activeConnectionField.GetValue(rpc)!;
+        activePortField.SetValue(rpc, port);
+        var reconnectMethod = typeof(RpcClient).GetMethod(
+            "ReconnectAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        Task<RpcConnection?> ReconnectAsync(RpcConnection failed) =>
+            (Task<RpcConnection?>)reconnectMethod.Invoke(rpc, [failed, CancellationToken.None])!;
+
+        var firstAccept = listener.AcceptSocketAsync();
+        var replacement = await ReconnectAsync(original);
+        using var firstAccepted = await firstAccept;
+        Assert.NotNull(replacement);
+        Assert.True(replacement.IsHealthy);
+
+        await replacement.DisposeAsync();
+        Assert.False(replacement.IsHealthy);
+
+        var secondAccept = listener.AcceptSocketAsync();
+        var refreshed = await ReconnectAsync(original);
+        using var secondAccepted = await secondAccept;
+
+        Assert.NotNull(refreshed);
+        Assert.NotSame(replacement, refreshed);
+        Assert.True(refreshed.IsHealthy);
     }
 
     [Fact]

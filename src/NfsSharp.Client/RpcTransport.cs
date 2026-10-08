@@ -172,6 +172,7 @@ internal sealed class RpcConnection : IAsyncDisposable
 
     internal Stream Stream { get; }
     internal long Generation { get; }
+    internal bool IsHealthy => Volatile.Read(ref _disposed) == 0 && Volatile.Read(ref _failure) is null;
     internal int PendingCallCount => Volatile.Read(ref _pendingCallCount);
     internal int PendingCallHighWaterMark => Volatile.Read(ref _pendingCallHighWaterMark);
 

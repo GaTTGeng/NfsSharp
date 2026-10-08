@@ -351,7 +351,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 return null;
 
             var active = _activeConnection;
-            if (active is not null && !ReferenceEquals(active, failedConnection))
+            if (active is { IsHealthy: true } && !ReferenceEquals(active, failedConnection))
                 return active;
 
             _logger?.LogInformation("Reconnecting to NFS server (port={Port})", _activePort);
