@@ -437,6 +437,51 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    public async Task RpcClient_ReconnectsOnNextCallAfterFatalProtocolReceiveError()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var options = NfsClientOptions.Default with
+        {
+            MaxRetries = 0,
+            UsePrivilegedSourcePort = false
+        };
+        await using var rpc = new RpcClient(new ScriptedDuplexStream(Frame([1, 2])), options);
+        var activeConnectionField = typeof(RpcClient).GetField(
+            "_activeConnection",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var activePortField = typeof(RpcClient).GetField(
+            "_activePort",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        activePortField.SetValue(rpc, port);
+
+        var protocolFailure = await Assert.ThrowsAsync<NfsException>(
+            () => rpc.CallAsync(100003, 3, 1, UIntArgument(1), CancellationToken.None));
+        Assert.Contains("receive failed", protocolFailure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(((RpcConnection)activeConnectionField.GetValue(rpc)!).IsHealthy);
+
+        var nextServerConnection = listener.AcceptSocketAsync();
+        var nextCall = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
+        using var socket = await nextServerConnection.WaitAsync(TimeSpan.FromSeconds(2));
+        using var stream = new NetworkStream(socket, ownsSocket: false);
+        var request = await RpcRecordStream.ReceiveAsync(stream, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        var xid = BinaryPrimitives.ReadUInt32BigEndian(request);
+        var reply = new XdrWriter();
+        reply.UInt(xid);
+        reply.UInt(1);
+        reply.UInt(0);
+        reply.UInt(0);
+        reply.Opaque([]);
+        reply.UInt(0);
+        reply.UInt(0xCAFE_BABE);
+        await RpcTransport.SendRecordAsync(stream, reply.ToArray(), CancellationToken.None);
+
+        Assert.Equal(0xCAFE_BABEu, (await nextCall).UInt());
+    }
+
+    [Fact]
     public async Task RpcClient_ExplicitStopClosesTheConnectionAndPreventsFurtherCalls()
     {
         await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), NfsClientOptions.Default);

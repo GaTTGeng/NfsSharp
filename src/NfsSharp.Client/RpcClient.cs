@@ -78,7 +78,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         byte[] arguments,
         CancellationToken ct)
     {
-        var connection = RequireActiveConnection();
+        var connection = await RequireHealthyConnectionAsync(ct);
         for (var attempt = 1; attempt <= _retryPolicy.MaxAttempts; attempt++)
         {
             try
@@ -187,13 +187,19 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         throw new NfsException("RPC call failed after all retry attempts.");
     }
 
-    internal Task<XdrReader> CallRawAsync(
+    internal async Task<XdrReader> CallRawAsync(
         uint program,
         uint version,
         uint procedure,
         byte[] arguments,
         CancellationToken ct) =>
-        CallOnceAsync(RequireActiveConnection(), program, version, procedure, arguments, ct);
+        await CallOnceAsync(
+            await RequireHealthyConnectionAsync(ct),
+            program,
+            version,
+            procedure,
+            arguments,
+            ct);
 
     internal async ValueTask DisposeActiveConnectionForTestingAsync() =>
         await RequireActiveConnection().DisposeAsync();
@@ -342,6 +348,17 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
 
     private RpcConnection RequireActiveConnection() =>
         _activeConnection ?? throw new NfsException("NFS connection is not established.");
+
+    private async Task<RpcConnection> RequireHealthyConnectionAsync(CancellationToken ct)
+    {
+        var connection = RequireActiveConnection();
+        if (connection.IsHealthy)
+            return connection;
+
+        return await ReconnectAsync(connection, ct)
+               ?? throw connection.Failure
+                      ?? new NfsException($"RPC connection generation {connection.Generation} is unavailable.");
+    }
 
     private async Task<RpcConnection?> ReconnectAsync(RpcConnection failedConnection, CancellationToken ct)
     {
