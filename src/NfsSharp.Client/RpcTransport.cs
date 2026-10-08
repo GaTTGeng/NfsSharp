@@ -33,7 +33,8 @@ internal sealed class RpcTransport
             socket,
             Interlocked.Increment(ref _generation),
             _options.MaxOutstandingRpcCallsPerConnection,
-            _options.Logger);
+            _options.Logger,
+            _options.CommandTimeout);
     }
 
     internal static async Task SendRecordAsync(Stream stream, ReadOnlyMemory<byte> message, CancellationToken ct)
@@ -50,6 +51,9 @@ internal sealed class RpcTransport
 
     internal static Task<byte[]> ReceiveRecordAsync(Stream stream, CancellationToken ct) =>
         RpcRecordStream.ReceiveAsync(stream, ct);
+
+    internal static Task<byte[]> ReceiveRecordAsync(Stream stream, CancellationToken ct, TimeSpan completionTimeout) =>
+        RpcRecordStream.ReceiveAsync(stream, ct, completionTimeout);
 
     private static async Task<Socket> ConnectSocketAsync(
         IPAddress address,
@@ -142,6 +146,7 @@ internal sealed class RpcConnection : IAsyncDisposable
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<byte[]>> _pendingCalls = new();
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly TimeSpan _recordCompletionTimeout;
     private readonly object _receiveSync = new();
     private Task? _receiveLoop;
     private Exception? _failure;
@@ -149,10 +154,16 @@ internal sealed class RpcConnection : IAsyncDisposable
     private int _pendingCallCount;
     private int _pendingCallHighWaterMark;
 
-    internal RpcConnection(Socket socket, long generation, int maxOutstandingCalls, ILogger? logger = null)
+    internal RpcConnection(
+        Socket socket,
+        long generation,
+        int maxOutstandingCalls,
+        ILogger? logger = null,
+        TimeSpan recordCompletionTimeout = default)
     {
         _socket = socket;
         _logger = logger;
+        _recordCompletionTimeout = recordCompletionTimeout;
         _inFlightLimit = new SemaphoreSlim(maxOutstandingCalls);
         Stream = new NetworkStream(socket, ownsSocket: false);
         Generation = generation;
@@ -162,9 +173,11 @@ internal sealed class RpcConnection : IAsyncDisposable
         Stream stream,
         long generation = 1,
         int maxOutstandingCalls = 32,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        TimeSpan recordCompletionTimeout = default)
     {
         _logger = logger;
+        _recordCompletionTimeout = recordCompletionTimeout;
         _inFlightLimit = new SemaphoreSlim(maxOutstandingCalls);
         Stream = stream;
         Generation = generation;
@@ -286,7 +299,10 @@ internal sealed class RpcConnection : IAsyncDisposable
         {
             while (!_lifetime.IsCancellationRequested)
             {
-                var record = await RpcTransport.ReceiveRecordAsync(Stream, _lifetime.Token);
+                var record = await RpcTransport.ReceiveRecordAsync(
+                    Stream,
+                    _lifetime.Token,
+                    _recordCompletionTimeout);
                 if (record.Length < sizeof(uint))
                     throw new NfsException($"RPC reply on connection generation {Generation} is missing its XID.");
 

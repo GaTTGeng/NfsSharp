@@ -58,7 +58,8 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         _activeConnection = new RpcConnection(
             stream,
             maxOutstandingCalls: options.MaxOutstandingRpcCallsPerConnection,
-            logger: options.Logger);
+            logger: options.Logger,
+            recordCompletionTimeout: options.CommandTimeout);
     }
 
     internal async Task ConnectAsync(int port, CancellationToken ct)

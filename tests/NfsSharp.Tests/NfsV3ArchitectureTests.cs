@@ -413,6 +413,29 @@ public sealed class NfsV3ArchitectureTests
         Assert.True(refreshed.IsHealthy);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RpcConnection_IncompleteReplyRecordTimesOutAndRetiresConnection(bool partialHeader)
+    {
+        var partialReply = partialHeader
+            ? new byte[] { 0x80 }
+            : new byte[] { 0x80, 0x00, 0x00, 0x04, 0x00, 0x00 };
+        var stream = new ScriptedDuplexStream(partialReply, stallReads: true);
+        await using var connection = new RpcConnection(
+            stream,
+            maxOutstandingCalls: 1,
+            recordCompletionTimeout: TimeSpan.FromMilliseconds(50));
+        Assert.True(connection.TryRegister(1, out var pending));
+
+        var call = connection.SendAndReceiveAsync(1, pending, [1], CancellationToken.None);
+        var failure = await Assert.ThrowsAsync<NfsException>(() => call.WaitAsync(TimeSpan.FromSeconds(2)));
+
+        Assert.Contains("receive failed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(connection.IsHealthy);
+        Assert.Equal(0, connection.PendingCallCount);
+    }
+
     [Fact]
     public async Task RpcClient_ExplicitStopClosesTheConnectionAndPreventsFurtherCalls()
     {
@@ -677,7 +700,7 @@ public sealed class NfsV3ArchitectureTests
             Memory<byte> buffer,
             CancellationToken cancellationToken = default)
         {
-            if (stallReads)
+            if (_readOffset >= input.Length && stallReads)
             {
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
                 return 0;

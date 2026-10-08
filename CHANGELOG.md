@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- A per-call timeout or cancellation now removes only that call from the pending RPC table instead of reconnecting the shared connection and interrupting unrelated calls.
+- Per-call timeouts and cancellations remove only their pending RPC; a canceled partial write or stalled partial reply retires the shared connection so later calls can reconnect safely.
 
 ## [1.2.0] - 2026-08-13
 
