@@ -198,12 +198,20 @@ public class RpcSecGssTests
 
         Assert.False(RpcSecGssMechanism.ProvidesCryptographicProtection(negotiate));
         Assert.False(negotiate.ProvidesCryptographicProtection);
+        Assert.False(RpcSecGssMechanism.CanComputeMic(negotiate));
+        Assert.False(negotiate.CanComputeMic);
     }
 
     [Fact]
-    public void NegotiateMechanism_IsRejectedForIntegrityAndPrivacy()
+    public void NegotiateMechanism_IsRejectedForEveryServiceIncludingNone()
     {
-        foreach (var service in new[] { RpcSecGssService.Integrity, RpcSecGssService.Privacy })
+        // Header MICs are mandatory for all data calls; Negotiate cannot produce them at all.
+        foreach (var service in new[]
+                 {
+                     RpcSecGssService.None,
+                     RpcSecGssService.Integrity,
+                     RpcSecGssService.Privacy
+                 })
         {
             var options = new NfsClientOptions
             {
@@ -211,7 +219,7 @@ public class RpcSecGssTests
                 GssService = service,
             };
             var ex = Assert.Throws<NfsException>(() => options.Validate());
-            Assert.Contains("does not provide cryptographic integrity/privacy", ex.Message);
+            Assert.Contains("cannot compute the RPCSEC_GSS data-call header verifier", ex.Message);
         }
     }
 
@@ -417,6 +425,7 @@ public class RpcSecGssTests
         public uint NextSeqNum { get; set; } = 1;
         public RpcSecGssService NegotiatedService { get; set; }
         public bool ProvidesCryptographicProtection => true;
+        public bool CanComputeMic => true;
 
         public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
             Task.FromResult(new byte[] { 0x01 });

@@ -23,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - RPCSEC_GSS data-reply verifiers are now validated fail-closed against the network-order request sequence number using the request QOP before any procedure result is exposed. Missing, wrong-flavor, empty, mismatched, or unverifiable MICs are rejected, including on accepted RPC errors. Replay against a replaced context generation is rejected.
-- `NegotiateGssMechanism` no longer pretends to compute or verify MICs through the Negotiate handshake API. Those operations fail closed until a real GSS integrity API is wired, so unbound verifiers cannot be accepted. `RpcSecGssMechanism.ProvidesCryptographicProtection` reports it as false, and integrity/privacy service is rejected at configuration time instead of failing on the first protected call.
+- `NegotiateGssMechanism` no longer pretends to compute or verify MICs through the Negotiate handshake API. Those operations fail closed until a real GSS integrity API is wired, so unbound verifiers cannot be accepted. `RpcSecGssMechanism.CanComputeMic` and `ProvidesCryptographicProtection` report it as false, and configuration is rejected for every service (including `rpc_gss_svc_none`) because the mandatory data-call header MIC cannot be produced.
 - Accept server-selected RPCSEC_GSS `seq_window` values above the local default of 64; only a zero window is rejected (RFC 2203 does not cap the negotiated window).
 - `NoOpGssMechanism` emits a deterministic nonempty verifier so the permitted `rpc_gss_svc_none` data-call path stays usable.
 

@@ -148,6 +148,14 @@ internal sealed class RpcSecGssSession
     {
         var mechanism = _options.GssMechanism
                         ?? throw new InvalidOperationException("A GSS mechanism was not configured.");
+        // Header MICs are mandatory for every data call, including rpc_gss_svc_none.
+        if (!RpcSecGssMechanism.CanComputeMic(mechanism))
+        {
+            throw new NfsException(
+                "The configured GSS mechanism cannot compute the RPCSEC_GSS data-call header verifier " +
+                "(NegotiateGssMechanism does not expose GSS_GetMIC) and cannot be used for any service, including none.");
+        }
+
         if (_options.GssService != RpcSecGssService.None &&
             !RpcSecGssMechanism.ProvidesCryptographicProtection(mechanism))
         {

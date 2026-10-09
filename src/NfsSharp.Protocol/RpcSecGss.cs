@@ -181,6 +181,12 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMe
     /// </summary>
     public bool ProvidesCryptographicProtection => false;
 
+    /// <summary>
+    /// False: the mandatory data-call header verifier needs GSS_GetMIC, which NegotiateAuthentication
+    /// does not expose. No RPCSEC_GSS data call (including rpc_gss_svc_none) can be sealed.
+    /// </summary>
+    public bool CanComputeMic => false;
+
     public NegotiateGssMechanism(string package = "Kerberos")
     {
         // Kerberos v5 OID: 1.2.840.113554.1.2.2
@@ -368,6 +374,12 @@ public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechani
     /// <summary>Always false: this mechanism provides no cryptographic protection.</summary>
     public bool ProvidesCryptographicProtection => false;
 
+    /// <summary>
+    /// True: the deterministic placeholder MIC can seal data-call headers for
+    /// <c>rpc_gss_svc_none</c> fixtures. Integrity/privacy remain rejected separately.
+    /// </summary>
+    public bool CanComputeMic => true;
+
     public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
         Task.FromResult(Array.Empty<byte>());
 
@@ -409,6 +421,13 @@ public interface IRpcSecGssMechanismCapabilities
     /// real GSS integrity/privacy operations bound to the supplied data.
     /// </summary>
     bool ProvidesCryptographicProtection { get; }
+
+    /// <summary>
+    /// True when <see cref="IRpcSecGssMechanism.GetMic"/> and <see cref="IRpcSecGssMechanism.VerifyMic"/>
+    /// can seal and check the mandatory RPCSEC_GSS data-call header verifier (required even for
+    /// <c>rpc_gss_svc_none</c>). False means no data call can be sent on this mechanism.
+    /// </summary>
+    bool CanComputeMic { get; }
 }
 
 /// <summary>Helpers for classifying RPCSEC_GSS mechanism security strength.</summary>
@@ -424,6 +443,17 @@ public static class RpcSecGssMechanism
         ArgumentNullException.ThrowIfNull(mechanism);
         return mechanism is not IRpcSecGssMechanismCapabilities capabilities
             || capabilities.ProvidesCryptographicProtection;
+    }
+
+    /// <summary>
+    /// Returns true when the mechanism can produce and verify the RPCSEC_GSS data-call header MIC.
+    /// Every data call needs that verifier, including <c>rpc_gss_svc_none</c>.
+    /// </summary>
+    public static bool CanComputeMic(IRpcSecGssMechanism mechanism)
+    {
+        ArgumentNullException.ThrowIfNull(mechanism);
+        return mechanism is not IRpcSecGssMechanismCapabilities capabilities
+            || capabilities.CanComputeMic;
     }
 
     /// <summary>Compute a MIC, preferring the QOP-aware contract when available.</summary>
