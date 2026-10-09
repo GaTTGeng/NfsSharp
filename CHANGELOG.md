@@ -16,13 +16,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Per-call timeouts and cancellations remove only their pending RPC; a canceled partial write or stalled partial reply retires the shared connection so later calls can reconnect safely. Fatal receive errors also trigger reconnection before a later call.
-- Corrected RPCSEC_GSS `rpc_gss_proc_t` discriminators to RFC 2203 values (`DATA=0`, `INIT=1`, `CONTINUE_INIT=2`, `DESTROY=3`) and encoded `rpc_gss_cred_t` as version / gss_proc / seq_num / service / handle.
+- Corrected RPCSEC_GSS `rpc_gss_proc_t` discriminators to RFC 2203 values (`DATA=0`, `INIT=1`, `CONTINUE_INIT=2`, `DESTROY=3`) and encoded `rpc_gss_cred_t` as version / gss_proc / seq_num / service / handle. Obsolete aliases `Create`, `GetMic`, and `Wrap` remain for source compatibility.
 - RPCSEC_GSS request verifiers are now GSS MICs over the RPC header up to and including the credential (RFC 2203 section 5.3.1).
 - Documented that RPCSEC_GSS negotiation hooks are available while full reply verification, integrity, and privacy remain incomplete and experimental; applications must not treat the surface as an end-to-end Kerberos security guarantee.
 
 ### Fixed
 
 - RPCSEC_GSS data-reply verifiers are now validated fail-closed against the network-order request sequence number using the request QOP before any procedure result is exposed. Missing, wrong-flavor, empty, mismatched, or unverifiable MICs are rejected, including on accepted RPC errors. Replay against a replaced context generation is rejected.
+- `NegotiateGssMechanism` no longer pretends to compute or verify MICs through the Negotiate handshake API. Those operations fail closed until a real GSS integrity API is wired, so unbound verifiers cannot be accepted.
+- Accept server-selected RPCSEC_GSS `seq_window` values above the local default of 64; only a zero window is rejected (RFC 2203 does not cap the negotiated window).
+- `NoOpGssMechanism` emits a deterministic nonempty verifier so the permitted `rpc_gss_svc_none` data-call path stays usable.
 
 ### Security
 

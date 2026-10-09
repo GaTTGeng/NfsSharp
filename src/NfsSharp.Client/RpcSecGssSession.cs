@@ -29,8 +29,9 @@ internal sealed class RpcSecGssSession
         ArgumentNullException.ThrowIfNull(context);
         if (context.ContextHandle is null)
             throw new ArgumentException("Context handle is required.", nameof(context));
-        if (context.SeqWindowSize == 0 || context.SeqWindowSize > RpcSecGssConstants.MaxSeqWindowSize)
-            throw new ArgumentException($"Invalid sequence window: {context.SeqWindowSize}.", nameof(context));
+        // RFC 2203 does not cap seq_window at 64; only a zero window is protocol-invalid.
+        if (context.SeqWindowSize == 0)
+            throw new ArgumentException("Sequence window must be greater than zero.", nameof(context));
 
         _context = context;
         _contextGeneration++;
@@ -185,8 +186,9 @@ internal sealed class RpcSecGssSession
         // Publish the context only after the full reply decodes, so later CALLs never sign with a partial session.
         var contextHandle = reader.Opaque();
         var seqWindow = reader.UInt();
-        if (seqWindow == 0 || seqWindow > RpcSecGssConstants.MaxSeqWindowSize)
-            throw new NfsException($"RPCSEC_GSS_CREATE returned an invalid sequence window: {seqWindow}.");
+        // RFC 2203 lets the server select any positive window; 64 is only a local default.
+        if (seqWindow == 0)
+            throw new NfsException("RPCSEC_GSS_CREATE returned an invalid sequence window: 0.");
 
         InstallContext(new RpcSecGssContext
         {

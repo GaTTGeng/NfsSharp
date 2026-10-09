@@ -201,6 +201,93 @@ public class RpcSecGssTests
     }
 
     [Fact]
+    public void RpcSecGssProc_PreservesObsoleteCompatibilityAliases()
+    {
+#pragma warning disable CS0618 // Compatibility aliases are intentional.
+        Assert.Equal((uint)RpcSecGssProc.Data, (uint)RpcSecGssProc.Create);
+        Assert.Equal(4u, (uint)RpcSecGssProc.GetMic);
+        Assert.Equal(5u, (uint)RpcSecGssProc.Wrap);
+#pragma warning restore CS0618
+    }
+
+    [Fact]
+    public void NegotiateGssMechanism_MicOperationsFailClosed()
+    {
+        // NegotiateAuthentication cannot bind a verifier to data; accepting one would be dishonest.
+        using var mechanism = new NegotiateGssMechanism();
+
+        Assert.Throws<NfsException>(() => mechanism.GetMic([1, 2, 3]));
+        Assert.Throws<NfsException>(() => mechanism.VerifyMic([1, 2, 3], [4, 5, 6]));
+        Assert.Throws<NfsException>(() => mechanism.GetMic([1, 2, 3], 0));
+        Assert.Throws<NfsException>(() => mechanism.VerifyMic([1, 2, 3], [4, 5, 6], 0));
+        Assert.Throws<NfsException>(() => mechanism.Wrap([1, 2, 3]));
+        Assert.Throws<NfsException>(() => mechanism.Unwrap([4, 5, 6]));
+    }
+
+    [Fact]
+    public void InstallContext_AcceptsServerSelectedSequenceWindowAboveLocalDefault()
+    {
+        // RFC 2203 does not cap seq_window at 64; a peer may negotiate 128 or more.
+        var session = new RpcSecGssSession(new NfsClientOptions
+        {
+            GssMechanism = new FakeGssMechanism(),
+            GssService = RpcSecGssService.Integrity,
+        });
+
+        session.InstallContext(new RpcSecGssContext
+        {
+            ContextHandle = ContextHandle,
+            SeqWindowSize = 128,
+            SeqWindow = new byte[8],
+            Service = RpcSecGssService.Integrity,
+            Mechanism = new FakeGssMechanism(),
+        });
+
+        Assert.True(session.IsEstablished);
+        Assert.Equal(1u, session.BeginDataCall(Xid, 100003, 3, 1).SeqNum);
+    }
+
+    [Fact]
+    public void NoOpMechanism_ServiceNoneDataCallCarriesNonemptyVerifier()
+    {
+        // The permitted NoOp + svc_none path must stay usable end-to-end, including header MICs.
+        var mechanism = new NoOpGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism,
+            GssService = RpcSecGssService.None,
+        };
+        options.Validate();
+
+        var session = new RpcSecGssSession(options);
+        session.InstallContext(new RpcSecGssContext
+        {
+            ContextHandle = ContextHandle,
+            SeqWindowSize = 16,
+            SeqWindow = new byte[8],
+            Service = RpcSecGssService.None,
+            Mechanism = mechanism,
+        });
+
+        var record = session.BeginDataCall(Xid, 100003, 3, 1);
+        var header = new XdrWriter();
+        header.UInt(Xid);
+        header.UInt(0);
+        header.UInt(2);
+        header.UInt(100003);
+        header.UInt(3);
+        header.UInt(3);
+        header.UInt((uint)RpcSecGssFlavor.Gss);
+        session.WriteCredential(header, record);
+
+        var headerVerifier = session.CreateHeaderVerifier(header.ToArray(), record);
+        Assert.NotEmpty(headerVerifier);
+
+        var reply = ParseAcceptedReply(record, mechanism.GetMic(record.SeqNumNetworkOrder()));
+        session.VerifyReply(reply, record);
+    }
+
+    [Fact]
     public void DecodeAccepted_PreservesVerifierOnAcceptFailures()
     {
         // RFC 2203 still supplies the reply verifier on accepted RPC errors.

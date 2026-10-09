@@ -27,6 +27,22 @@ public enum RpcSecGssProc : uint
     ContinueInit = 2,
     /// <summary>Context destruction control message.</summary>
     Destroy = 3,
+
+    // Compatibility aliases for previously published names. RFC 2203 does not define
+    // Create/GetMic/Wrap as rpc_gss_proc_t values; they are retained so existing
+    // consumers still compile. Prefer the RFC-correct members above.
+
+    /// <summary>Compatibility alias for <see cref="Data"/>. Not an RFC 2203 control procedure.</summary>
+    [Obsolete("Use Data (RPCSEC_GSS_DATA). Create was never an RFC 2203 rpc_gss_proc_t value.")]
+    Create = 0,
+
+    /// <summary>Reserved for source compatibility only. Not an RFC 2203 control procedure.</summary>
+    [Obsolete("Not an RFC 2203 rpc_gss_proc_t value. MIC operations belong on IRpcSecGssMechanism.")]
+    GetMic = 4,
+
+    /// <summary>Reserved for source compatibility only. Not an RFC 2203 control procedure.</summary>
+    [Obsolete("Not an RFC 2203 rpc_gss_proc_t value. Wrap operations belong on IRpcSecGssMechanism.")]
+    Wrap = 5,
 }
 
 /// <summary>RPCSEC_GSS protocol constants (RFC 2203).</summary>
@@ -36,9 +52,12 @@ public static class RpcSecGssConstants
     public const uint Version = 1;
     /// <summary>Maximum sequence number value (MAXSEQ).</summary>
     public const uint MaxSeq = 0x8000_0000;
-    /// <summary>Largest sequence window accepted by the protocol.</summary>
+    /// <summary>
+    /// Local recommended bound for outstanding authenticated requests.
+    /// RFC 2203 does not cap the server-selected <c>seq_window</c>; peers may negotiate larger values.
+    /// </summary>
     public const int MaxSeqWindowSize = 64;
-    /// <summary>Window size used unless a peer negotiates a smaller value.</summary>
+    /// <summary>Local default window size used when the peer has not negotiated one.</summary>
     public const int DefaultSeqWindowSize = 64;
     /// <summary>QOP used for the context-completion seq_window checksum (RFC 2203 §5.2.3.1).</summary>
     public const uint DefaultQop = 0;
@@ -143,8 +162,10 @@ public sealed class RpcSecGssContext
 
 /// <summary>
 /// NegotiateAuthentication-based GSS mechanism for .NET 8+.
-/// Uses System.Net.Security.NegotiateAuthentication for Kerberos/NTLM.
-/// Experimental: token-exchange success is not evidence of integrity/privacy correctness.
+/// Uses System.Net.Security.NegotiateAuthentication for Kerberos/NTLM token exchange.
+/// Experimental: .NET NegotiateAuthentication does not expose GSS_GetMIC/GSS_VerifyMIC,
+/// so MIC and wrap/unwrap operations fail closed until a real GSS integrity API is wired.
+/// Token-exchange success is never evidence of integrity/privacy correctness.
 /// </summary>
 public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism
 {
@@ -201,89 +222,48 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMe
 
     public bool IsEstablished => _established;
 
-    public byte[] GetMic(byte[] data)
-    {
-        if (_auth is null || !_established)
-            throw new InvalidOperationException("Security context not established.");
+    /// <summary>
+    /// Fail closed. <see cref="System.Net.Security.NegotiateAuthentication"/> does not expose
+    /// GSS_GetMIC, so this mechanism cannot produce an RFC 2203 header/reply checksum.
+    /// Returning a handshake blob here would advertise integrity without binding to <paramref name="data"/>.
+    /// </summary>
+    public byte[] GetMic(byte[] data) =>
+        throw new NfsException(
+            "NegotiateGssMechanism cannot compute RPCSEC_GSS MICs: .NET NegotiateAuthentication does not expose GSS_GetMIC.");
 
-        // GetOutgoingBlob with input data computes the MIC
-        var result = _auth.GetOutgoingBlob(data, out _);
-        return result ?? Array.Empty<byte>();
-    }
+    /// <summary>
+    /// Fail closed. Verification must bind the MIC to <paramref name="data"/>; the Negotiate
+    /// handshake API cannot perform GSS_VerifyMIC, so no verifier is accepted.
+    /// </summary>
+    public bool VerifyMic(byte[] data, byte[] mic) =>
+        throw new NfsException(
+            "NegotiateGssMechanism cannot verify RPCSEC_GSS MICs: .NET NegotiateAuthentication does not expose GSS_VerifyMIC.");
 
-    public bool VerifyMic(byte[] data, byte[] mic)
-    {
-        if (_auth is null || !_established)
-            throw new InvalidOperationException("Security context not established.");
+    /// <summary>Fail closed; GSS_Wrap is not exposed by NegotiateAuthentication.</summary>
+    public byte[] Wrap(byte[] data) =>
+        throw new NfsException(
+            "NegotiateGssMechanism cannot wrap RPCSEC_GSS payloads: .NET NegotiateAuthentication does not expose GSS_Wrap.");
 
-        try
-        {
-            // GetOutgoingBlob with mic data verifies integrity
-            var result = _auth.GetOutgoingBlob(mic, out var statusCode);
-            return statusCode == System.Net.Security.NegotiateAuthenticationStatusCode.Completed;
-        }
-        catch
-        {
-            // A bad MIC surfaces as an exception; report it as a failed verification instead of throwing.
-            return false;
-        }
-    }
-
-    public byte[] Wrap(byte[] data)
-    {
-        if (_auth is null || !_established)
-            throw new InvalidOperationException("Security context not established.");
-
-        var result = _auth.GetOutgoingBlob(data, out _);
-        return result ?? data;
-    }
-
-    public byte[] Unwrap(byte[] wrappedData)
-    {
-        if (_auth is null || !_established)
-            throw new InvalidOperationException("Security context not established.");
-
-        var result = _auth.GetOutgoingBlob(wrappedData, out _);
-        return result ?? wrappedData;
-    }
+    /// <summary>Fail closed; GSS_Unwrap is not exposed by NegotiateAuthentication.</summary>
+    public byte[] Unwrap(byte[] wrappedData) =>
+        throw new NfsException(
+            "NegotiateGssMechanism cannot unwrap RPCSEC_GSS payloads: .NET NegotiateAuthentication does not expose GSS_Unwrap.");
 
     public uint MaxMessageSize { get; set; } = 1024 * 1024;
     public uint NextSeqNum { get => _nextSeqNum; set => _nextSeqNum = value; }
     public RpcSecGssService NegotiatedService { get; set; }
 
-    /// <summary>QOP-aware MIC. NegotiateAuthentication does not expose distinct QOPs; only QOP 0 is supported.</summary>
-    public byte[] GetMic(byte[] data, uint qop)
-    {
-        EnsureDefaultQop(qop);
-        return GetMic(data);
-    }
+    /// <summary>QOP-aware MIC. Fails closed for the same reason as <see cref="GetMic(byte[])"/>.</summary>
+    public byte[] GetMic(byte[] data, uint qop) => GetMic(data);
 
-    /// <summary>QOP-aware MIC verification. Only QOP 0 is supported.</summary>
-    public bool VerifyMic(byte[] data, byte[] mic, uint qop)
-    {
-        EnsureDefaultQop(qop);
-        return VerifyMic(data, mic);
-    }
+    /// <summary>QOP-aware MIC verification. Fails closed for the same reason as <see cref="VerifyMic(byte[], byte[])"/>.</summary>
+    public bool VerifyMic(byte[] data, byte[] mic, uint qop) => VerifyMic(data, mic);
 
-    /// <summary>QOP-aware wrap. Only QOP 0 is supported.</summary>
-    public byte[] Wrap(byte[] data, uint qop)
-    {
-        EnsureDefaultQop(qop);
-        return Wrap(data);
-    }
+    /// <summary>QOP-aware wrap. Fails closed for the same reason as <see cref="Wrap(byte[])"/>.</summary>
+    public byte[] Wrap(byte[] data, uint qop) => Wrap(data);
 
-    /// <summary>QOP-aware unwrap. Only QOP 0 is supported.</summary>
-    public byte[] Unwrap(byte[] wrappedData, uint qop)
-    {
-        EnsureDefaultQop(qop);
-        return Unwrap(wrappedData);
-    }
-
-    private static void EnsureDefaultQop(uint qop)
-    {
-        if (qop != RpcSecGssConstants.DefaultQop)
-            throw new NfsException($"Unsupported GSS QOP: {qop}. NegotiateGssMechanism only supports QOP 0.");
-    }
+    /// <summary>QOP-aware unwrap. Fails closed for the same reason as <see cref="Unwrap(byte[])"/>.</summary>
+    public byte[] Unwrap(byte[] wrappedData, uint qop) => Unwrap(wrappedData);
 
     public void Dispose()
     {
@@ -367,9 +347,9 @@ public sealed class RpcSecGssCallRecord
 }
 
 /// <summary>
-/// AUTH_NONE/AUTH_SYS-based GSS mechanism for testing and environments
-/// where Kerberos is not available. Provides no actual security.
-/// Must not be configured with integrity or privacy service.
+/// Deterministic non-cryptographic GSS stand-in for testing and environments where Kerberos
+/// is not available. Provides no actual security. Must not be configured with integrity or
+/// privacy service. Verifier bytes are nonempty so the rpc_gss_svc_none call path stays usable.
 /// </summary>
 public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism
 {
@@ -388,8 +368,20 @@ public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechani
     public Task<byte[]> ContinueContextAsync(byte[] serverToken, CancellationToken ct) =>
         Task.FromResult(Array.Empty<byte>());
 
-    public byte[] GetMic(byte[] data) => Array.Empty<byte>();
-    public bool VerifyMic(byte[] data, byte[] mic) => true;
+    /// <summary>
+    /// Deterministic nonempty placeholder so data calls can carry a verifier body.
+    /// Not a MAC: integrity/privacy are rejected at configuration time.
+    /// </summary>
+    public byte[] GetMic(byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        // "NoOp" tag plus a length-dependent byte keeps the value stable per input shape.
+        return [(byte)'N', (byte)'o', (byte)'O', (byte)'p', (byte)data.Length, (byte)(data.Length >> 8)];
+    }
+
+    public bool VerifyMic(byte[] data, byte[] mic) =>
+        GetMic(data).AsSpan().SequenceEqual(mic);
+
     public byte[] Wrap(byte[] data) => data;
     public byte[] Unwrap(byte[] wrappedData) => wrappedData;
     public byte[] GetMic(byte[] data, uint qop) => GetMic(data);
