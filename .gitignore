@@ -26,6 +26,9 @@ coverage-*/
 .vscode/
 *.sln.iml
 
+# Agent/local tooling docs
+AGENTS.md
+
 # .NET tooling and NuGet
 .dotnet/
 .nuget/
