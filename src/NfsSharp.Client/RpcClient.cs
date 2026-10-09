@@ -266,7 +266,22 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     {
         try
         {
-            return RpcReplyParser.Decode(reply, xid);
+            return RpcReplyParser.DecodeAccepted(reply, xid);
+        }
+        catch (NfsException ex)
+        {
+            throw new NfsException(
+                $"RPC call failed (prog={program}, vers={version}, proc={procedure}): {ex.Message}",
+                ex);
+        }
+    }
+
+    /// <summary>Throw when an accepted reply is not SUCCESS, annotating the CALL's program/procedure.</summary>
+    internal static void EnsureAcceptSuccess(RpcReply reply, uint program, uint version, uint procedure)
+    {
+        try
+        {
+            RpcReplyParser.ThrowIfAcceptFailed(reply);
         }
         catch (NfsException ex)
         {
@@ -320,15 +335,20 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             writer.UInt(version);
             writer.UInt(procedure);
 
-            // Credential then verifier: RPCSEC_GSS (RFC 2203) wraps the context handle
-            // and seals the arguments with a MIC; otherwise AUTH_SYS (flavor 1) with an
+            // Credential then verifier: RPCSEC_GSS (RFC 2203) uses a per-attempt security
+            // record and seals the header with a MIC; otherwise AUTH_SYS (flavor 1) with an
             // AUTH_NONE (flavor 0) verifier.
+            RpcSecGssCallRecord? gssRecord = null;
             if (_gssSession.IsEstablished)
             {
+                // Allocate the sequence number once per transmitted attempt, including retries.
+                gssRecord = _gssSession.BeginDataCall(xid, program, version, procedure);
                 writer.UInt((uint)RpcSecGssFlavor.Gss);
-                _gssSession.WriteCredential(writer);
+                _gssSession.WriteCredential(writer, gssRecord);
+                // RFC 2203 §5.3.1: the header checksum covers the RPC header through the credential.
+                var headerVerifier = _gssSession.CreateHeaderVerifier(writer.ToArray(), gssRecord);
                 writer.UInt((uint)RpcSecGssFlavor.Gss);
-                _gssSession.WriteVerifier(writer, arguments);
+                writer.Opaque(headerVerifier);
             }
             else
             {
@@ -351,7 +371,11 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 connection.PendingCallHighWaterMark);
             var bytes = await connection.SendAndReceiveAsync(xid, pending, writer.ToArray(), callToken);
             var reply = DecodeReplyWithContext(bytes, xid, program, version, procedure);
-            _gssSession.ObserveReply(reply);
+            // Fail closed on RPCSEC_GSS verifier problems before any procedure result is exposed,
+            // including accepted RPC errors whose verifier RFC 2203 still requires.
+            if (gssRecord is not null)
+                _gssSession.VerifyReply(reply, gssRecord);
+            EnsureAcceptSuccess(reply, program, version, procedure);
             _logger?.LogDebug(
                 "Received RPC reply (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
                 xid,

@@ -84,7 +84,7 @@ await client.UnMountDeviceAsync();
 - 权限、所有者、时间戳、文件大小和 guarded 属性更新。
 - ACCESS、READLINK、COMMIT、FSSTAT、FSINFO 和 PATHCONF。
 - 重试、超时、Socket 参数、目录缓存、日志和 AUTH_SYS 身份配置。
-- RPCSEC_GSS 扩展点和托管协商抽象。
+- RPCSEC_GSS 协商/扩展钩子，以及对认证数据调用的 fail-closed 回复 verifier 校验。完整的端到端完整性、隐私保护和 Kerberos 互操作性仍不完整且属于实验性——请勿将该接口视为端到端 Kerberos 安全保证。
 - 通过 `NfsV4Client` 提供实验性的 NFSv4.0、NFSv4.1 和 NFSv4.2 COMPOUND 操作。
 
 ## 当前范围

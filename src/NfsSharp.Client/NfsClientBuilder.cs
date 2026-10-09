@@ -157,7 +157,12 @@ public sealed class NfsClientBuilder
         return this;
     }
 
-    /// <summary>Use Kerberos via RPCSEC_GSS against the given target SPN.</summary>
+    /// <summary>
+    /// Use Kerberos via RPCSEC_GSS against the given target SPN.
+    /// Experimental and currently rejected at configuration time: <see cref="NegotiateGssMechanism"/>
+    /// performs token exchange only and cannot compute the mandatory data-call header MIC
+    /// (including for <see cref="RpcSecGssService.None"/>).
+    /// </summary>
     public NfsClientBuilder WithKerberos(string targetSpn, RpcSecGssService service = RpcSecGssService.Integrity)
     {
         _gssMechanism = new NegotiateGssMechanism("Kerberos");

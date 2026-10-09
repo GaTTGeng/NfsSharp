@@ -3,11 +3,13 @@ namespace NfsSharp.Protocol;
 /// <summary>Decoded ONC RPC reply header and the remaining procedure result payload.</summary>
 public sealed class RpcReply
 {
-    internal RpcReply(uint verifierFlavor, byte[] verifier, XdrReader body)
+    internal RpcReply(uint verifierFlavor, byte[] verifier, XdrReader body, uint acceptStatus, string? acceptFailureMessage)
     {
         VerifierFlavor = verifierFlavor;
         Verifier = verifier;
         Body = body;
+        AcceptStatus = acceptStatus;
+        AcceptFailureMessage = acceptFailureMessage;
     }
 
     /// <summary>Authentication flavor of the reply verifier.</summary>
@@ -18,6 +20,15 @@ public sealed class RpcReply
 
     /// <summary>Reader positioned at the procedure-specific result payload.</summary>
     public XdrReader Body { get; }
+
+    /// <summary>ONC RPC accept_stat discriminator (0 = SUCCESS).</summary>
+    public uint AcceptStatus { get; }
+
+    /// <summary>Readable failure text when <see cref="AcceptStatus"/> is not SUCCESS.</summary>
+    public string? AcceptFailureMessage { get; }
+
+    /// <summary>Whether the server accepted the call (accept_stat = SUCCESS).</summary>
+    public bool IsSuccess => AcceptStatus == 0;
 }
 
 /// <summary>Decodes and validates ONC RPC reply envelopes (RFC 5531).</summary>
@@ -45,6 +56,18 @@ public static class RpcReplyParser
     /// </summary>
     public static RpcReply Decode(byte[] message, uint expectedXid)
     {
+        var reply = DecodeAccepted(message, expectedXid);
+        ThrowIfAcceptFailed(reply);
+        return reply;
+    }
+
+    /// <summary>
+    /// Decodes an accepted ONC RPC reply for <paramref name="expectedXid"/>, preserving the reply
+    /// verifier even when accept_stat is not SUCCESS so security layers can validate it first.
+    /// Envelope-level failures (xid mismatch, MSG_DENIED, invalid discriminators, malformed XDR) still throw.
+    /// </summary>
+    public static RpcReply DecodeAccepted(byte[] message, uint expectedXid)
+    {
         var reader = new XdrReader(message);
         // Match the reply to the outstanding call before interpreting anything else.
         var xid = reader.UInt();
@@ -59,14 +82,22 @@ public static class RpcReplyParser
         // Branch on reply_stat: MSG_ACCEPTED continues into accept_stat, MSG_DENIED into reject_stat.
         return reader.UInt() switch
         {
-            MsgAccepted => DecodeAccepted(reader),
+            MsgAccepted => DecodeAcceptedBody(reader),
             MsgDenied => DecodeDenied(reader),
             var replyStat => throw new NfsException($"Invalid RPC reply_stat discriminator: {replyStat}.")
         };
     }
 
-    /// <summary>Decodes MSG_ACCEPTED: reply verifier, then accept_stat; only SUCCESS exposes a body.</summary>
-    private static RpcReply DecodeAccepted(XdrReader reader)
+    /// <summary>Throws when an accepted reply did not have accept_stat SUCCESS.</summary>
+    public static void ThrowIfAcceptFailed(RpcReply reply)
+    {
+        ArgumentNullException.ThrowIfNull(reply);
+        if (!reply.IsSuccess)
+            throw new NfsException(reply.AcceptFailureMessage ?? "RPC call rejected by the server.");
+    }
+
+    /// <summary>Decodes MSG_ACCEPTED: reply verifier, then accept_stat; every accept arm keeps the verifier.</summary>
+    private static RpcReply DecodeAcceptedBody(XdrReader reader)
     {
         // Consume the reply verifier first; every MSG_ACCEPTED carries it regardless of accept_stat.
         var verifierFlavor = reader.UInt();
@@ -75,28 +106,50 @@ public static class RpcReplyParser
         if (verifierFlavor == AuthNone && verifier.Length != 0)
             throw new NfsException("Malformed RPC reply verifier: AUTH_NONE must be empty.");
 
-        switch (reader.UInt())
+        var acceptStatus = reader.UInt();
+        return acceptStatus switch
         {
-            case Success:
-                // SUCCESS is the only accept_stat that carries a procedure result payload.
-                return new RpcReply(verifierFlavor, verifier, reader);
-            case ProgUnavail:
-                throw new NfsException("RPC call rejected: program unavailable.");
-            case ProgMismatch:
-                // Mismatch replies append a low/high version range; read it before throwing.
-                ThrowProgramMismatch(reader, "RPC call rejected: program version mismatch");
-                break;
-            case ProcUnavail:
-                throw new NfsException("RPC call rejected: procedure unavailable.");
-            case GarbageArgs:
-                throw new NfsException("RPC call rejected: server reported garbage arguments.");
-            case SystemErr:
-                throw new NfsException("RPC call rejected: server system error.");
-            default:
-                throw new NfsException("Invalid RPC accept_stat discriminator.");
-        }
+            Success =>
+                new RpcReply(verifierFlavor, verifier, reader, Success, null),
+            ProgUnavail =>
+                Failed(verifierFlavor, verifier, reader, acceptStatus, "RPC call rejected: program unavailable."),
+            ProgMismatch =>
+                FailedProgramMismatch(verifierFlavor, verifier, reader, acceptStatus, "RPC call rejected: program version mismatch"),
+            ProcUnavail =>
+                Failed(verifierFlavor, verifier, reader, acceptStatus, "RPC call rejected: procedure unavailable."),
+            GarbageArgs =>
+                Failed(verifierFlavor, verifier, reader, acceptStatus, "RPC call rejected: server reported garbage arguments."),
+            SystemErr =>
+                Failed(verifierFlavor, verifier, reader, acceptStatus, "RPC call rejected: server system error."),
+            _ => throw new NfsException("Invalid RPC accept_stat discriminator.")
+        };
+    }
 
-        throw new InvalidOperationException("Unreachable RPC reply state.");
+    private static RpcReply Failed(
+        uint verifierFlavor,
+        byte[] verifier,
+        XdrReader reader,
+        uint acceptStatus,
+        string message) =>
+        new(verifierFlavor, verifier, reader, acceptStatus, message);
+
+    /// <summary>Builds a mismatch failure reply that still carries the low/high version range in the body.</summary>
+    private static RpcReply FailedProgramMismatch(
+        uint verifierFlavor,
+        byte[] verifier,
+        XdrReader reader,
+        uint acceptStatus,
+        string prefix)
+    {
+        // Both mismatch forms end with the supported version range before the failure surfaces.
+        var low = reader.UInt();
+        var high = reader.UInt();
+        return new RpcReply(
+            verifierFlavor,
+            verifier,
+            reader,
+            acceptStatus,
+            $"{prefix} (supported range {low}..{high}).");
     }
 
     /// <summary>Decodes MSG_DENIED: RPC version mismatch or an auth_stat authentication failure.</summary>

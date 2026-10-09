@@ -210,6 +210,24 @@ public sealed record NfsClientOptions
         // Re-check the AUTH_SYS gids cap here so misconfiguration fails before any RPC is sent.
         if (AuxiliaryGroups.Count > RpcAuthSys.MaxAuxiliaryGroups)
             throw new NfsException($"AUTH_SYS supports at most {RpcAuthSys.MaxAuxiliaryGroups} auxiliary groups.");
+        // Every RPCSEC_GSS data call (including svc_none) needs a header MIC; reject mechanisms
+        // that cannot produce one before any call is attempted.
+        if (GssMechanism is not null && !RpcSecGssMechanism.CanComputeMic(GssMechanism))
+        {
+            throw new NfsException(
+                "The configured GSS mechanism cannot compute the RPCSEC_GSS data-call header verifier " +
+                "(NegotiateGssMechanism does not expose GSS_GetMIC) and cannot be used for any service, including none.");
+        }
+
+        // Mechanisms without real GSS integrity/privacy must not claim those services.
+        if (GssMechanism is not null &&
+            GssService != RpcSecGssService.None &&
+            !RpcSecGssMechanism.ProvidesCryptographicProtection(GssMechanism))
+        {
+            throw new NfsException(
+                "The configured GSS mechanism does not provide cryptographic integrity/privacy " +
+                "(NoOpGssMechanism and NegotiateGssMechanism are excluded) and cannot be used with integrity or privacy service.");
+        }
     }
 }
 
