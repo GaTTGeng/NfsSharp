@@ -25,7 +25,17 @@ public class RpcSecGssTests
     public void CallRecord_CopiesContextHandleOnInputAndOutput()
     {
         var source = (byte[])ContextHandle.Clone();
-        var record = NewRecord();
+        var record = new RpcSecGssCallRecord(
+            xid: Xid,
+            seqNum: 1,
+            service: RpcSecGssService.Integrity,
+            qop: 0,
+            contextGeneration: 1,
+            program: 100003,
+            version: 3,
+            procedure: 1,
+            gssProc: RpcSecGssProc.Data,
+            contextHandle: source);
 
         // Mutating the construction buffer must not change the record identity.
         source[0] ^= 0xFF;
