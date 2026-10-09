@@ -10,10 +10,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Added bounded concurrent AUTH_SYS RPC calls over one NFSv3 TCP connection, dispatched by XID through a single receive loop; RPCSEC_GSS calls remain serialized.
 - Added `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` and `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`, defaulting to 32 outstanding calls.
+- Added immutable per-attempt RPCSEC_GSS security records (`RpcSecGssCallRecord`) carrying XID, sequence number, service, QOP, context generation, and procedure identity. Sequence numbers are allocated once per transmitted attempt, including retries.
+- Added `IRpcSecGssQopMechanism` for QOP-aware MIC and wrap/unwrap operations, and `RpcSecGssMechanism` helpers for QOP dispatch and cryptographic-strength classification.
 
 ### Changed
 
 - Per-call timeouts and cancellations remove only their pending RPC; a canceled partial write or stalled partial reply retires the shared connection so later calls can reconnect safely. Fatal receive errors also trigger reconnection before a later call.
+- Corrected RPCSEC_GSS `rpc_gss_proc_t` discriminators to RFC 2203 values (`DATA=0`, `INIT=1`, `CONTINUE_INIT=2`, `DESTROY=3`) and encoded `rpc_gss_cred_t` as version / gss_proc / seq_num / service / handle.
+- RPCSEC_GSS request verifiers are now GSS MICs over the RPC header up to and including the credential (RFC 2203 section 5.3.1).
+- Documented that RPCSEC_GSS negotiation hooks are available while full reply verification, integrity, and privacy remain incomplete and experimental; applications must not treat the surface as an end-to-end Kerberos security guarantee.
+
+### Fixed
+
+- RPCSEC_GSS data-reply verifiers are now validated fail-closed against the network-order request sequence number using the request QOP before any procedure result is exposed. Missing, wrong-flavor, empty, mismatched, or unverifiable MICs are rejected, including on accepted RPC errors. Replay against a replaced context generation is rejected.
+
+### Security
+
+- `NoOpGssMechanism` is rejected when integrity or privacy service is requested; it remains deterministic-test-only and is never interoperability evidence.
 
 ## [1.2.0] - 2026-08-13
 

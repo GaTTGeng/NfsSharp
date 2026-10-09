@@ -111,7 +111,7 @@ Console.WriteLine($"{attributes.Size} bytes");
 - Permission, ownership, timestamp, file-size, and guarded attribute updates.
 - ACCESS, READLINK, COMMIT, FSSTAT, FSINFO, and PATHCONF.
 - Configurable retries, timeouts, socket options, directory caching, logging, and AUTH_SYS identity.
-- RPCSEC_GSS extension points, including a managed negotiation abstraction.
+- RPCSEC_GSS negotiation/extension hooks and fail-closed reply-verifier validation for authenticated data calls. Full end-to-end integrity, privacy, and Kerberos interoperability remain incomplete and experimental — do not treat this surface as an end-to-end Kerberos security guarantee.
 - Experimental NFSv4.0, NFSv4.1, and NFSv4.2 COMPOUND operations through `NfsV4Client`.
 
 ## Current Scope

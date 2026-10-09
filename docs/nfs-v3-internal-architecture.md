@@ -35,12 +35,11 @@ NfsV3Client
   lookup traversal, and parent/name resolution.
 - `NfsRetryPolicy` is the single source for transient classification, safe replay
   eligibility, attempt limits, and backoff. Mutation procedures remain non-retryable.
-- `RpcSecGssSession` owns security context and per-call security metadata. Full reply
-  verifier, integrity, and privacy correctness remain future security work.
+- `RpcSecGssSession` owns security context, per-attempt security records, and reply-verifier validation. Data-reply verifiers are checked fail-closed against the request sequence number; context-establishment verifier, integrity, and privacy body correctness remain future security work.
 - `NfsDirectoryCache` owns cached directory entries, defensive copies, expiry, and
   mutation invalidation.
 
 All extracted types remain internal. `IRpcCallClient` is an internal fixture seam so
 NFS procedure bytes and response parsing can be tested without a public client or a
 live server. AUTH_SYS calls use bounded XID multiplexing; RPCSEC_GSS remains serialized
-until per-request sequence-window and reply-verifier behavior is implemented.
+and allocates a fresh sequence number per transmitted attempt.

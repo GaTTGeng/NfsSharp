@@ -24,7 +24,20 @@ NFSv3 over TCP is the primary supported protocol. The NFSv4 surface is experimen
 
 NFSv3 transient transport retries are conservative: automatic reconnect/retry is limited to retry-safe discovery, mount negotiation, read-only NFS procedures, and `COMMIT`. Mutating procedures such as `SETATTR`, `WRITE`, `CREATE`, `REMOVE`, `RENAME`, and link creation surface the transport failure to the caller instead of being replayed automatically.
 
-AUTH_SYS NFSv3 calls can be outstanding concurrently on one TCP connection. The default bound is 32 and can be changed with `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` or `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`. Replies are matched by XID. RPCSEC_GSS calls remain serialized while per-request sequence-window and reply-verifier validation are incomplete.
+AUTH_SYS NFSv3 calls can be outstanding concurrently on one TCP connection. The default bound is 32 and can be changed with `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` or `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`. Replies are matched by XID. RPCSEC_GSS calls remain serialized and allocate a fresh protocol sequence number per transmitted attempt.
+
+### RPCSEC_GSS security limits
+
+RPCSEC_GSS negotiation and mechanism extension points are available (`WithKerberos`, `WithGssMechanism`, `IRpcSecGssMechanism`, `IRpcSecGssQopMechanism`). The client now fail-closes on invalid or missing RPCSEC_GSS data-reply verifiers: an accepted reply is checked against the exact per-attempt sequence number and QOP before any procedure result is exposed, including accepted RPC errors.
+
+The following remain incomplete and **experimental**:
+
+- Context-establishment (`INIT`/`CONTINUE_INIT`) reply-verifier validation is not yet complete.
+- Integrity and privacy request/result body wrapping is not yet complete.
+- `NegotiateGssMechanism` has not been proven against a real Kerberos realm and is not an end-to-end security guarantee.
+- `NoOpGssMechanism` provides no cryptographic protection and is rejected for integrity/privacy service; it is for deterministic tests only and is never interoperability evidence.
+
+Applications must not treat the current RPCSEC_GSS surface as an end-to-end Kerberos security guarantee.
 
 ## NFSv3 operation groups
 
@@ -54,6 +67,6 @@ Stream reads require a writable output stream, and stream writes require a reada
 - NFSv3 and NFSv4 model types.
 - NFS status codes and exception mapping.
 - AUTH_SYS options shared by client APIs.
-- RPCSEC_GSS extension contracts for authentication, integrity, and privacy work.
+- RPCSEC_GSS extension contracts for authentication, integrity, and privacy work. Reply-verifier validation is fail-closed; full integrity/privacy body protection and Kerberos interoperability remain experimental (see Client layer notes above).
 
 Use the protocol package directly for protocol tooling, tests, or integrations that do not need the high-level client package.

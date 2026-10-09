@@ -226,8 +226,12 @@ public sealed partial class NfsV3Client : IAsyncDisposable
 
     // Thin forwarders that let tests reach the internal RPC/protocol helpers through this type.
     private static RpcReply DecodeRpcReplyWithContext(
-        byte[] reply, uint xid, uint program, uint version, uint procedure) =>
-        RpcClient.DecodeReplyWithContext(reply, xid, program, version, procedure);
+        byte[] reply, uint xid, uint program, uint version, uint procedure)
+    {
+        var decoded = RpcClient.DecodeReplyWithContext(reply, xid, program, version, procedure);
+        RpcClient.EnsureAcceptSuccess(decoded, program, version, procedure);
+        return decoded;
+    }
     private static void EnsureDirectoryReadProgress(
         ulong requestCookie, ulong responseCookie, int entryCount, bool eof, string procedure) =>
         NfsV3ProtocolClient.EnsureDirectoryReadProgress(requestCookie, responseCookie, entryCount, eof, procedure);

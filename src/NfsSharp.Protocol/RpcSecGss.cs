@@ -16,24 +16,51 @@ public enum RpcSecGssService : uint
     Privacy = 3,
 }
 
-/// <summary>RPCSEC_GSS procedure numbers.</summary>
+/// <summary>RPCSEC_GSS control procedures (RFC 2203 rpc_gss_proc_t).</summary>
 public enum RpcSecGssProc : uint
 {
-    Create = 0,
-    Destroy = 1,
-    Init = 2,
-    ContinueInit = 3,
-    GetMic = 4,
-    Wrap = 5,
+    /// <summary>Regular data exchange; not a control action.</summary>
+    Data = 0,
+    /// <summary>First context-creation request.</summary>
+    Init = 1,
+    /// <summary>Subsequent context-creation request carrying a continuation token.</summary>
+    ContinueInit = 2,
+    /// <summary>Context destruction control message.</summary>
+    Destroy = 3,
 }
 
-/// <summary>RPCSEC_GSS sequence number window size for replay detection.</summary>
+/// <summary>RPCSEC_GSS protocol constants (RFC 2203).</summary>
 public static class RpcSecGssConstants
 {
-    /// <summary>Largest sequence window accepted by the protocol (RFC 2203).</summary>
+    /// <summary>Only defined credential version (RPCSEC_GSS_VERS_1).</summary>
+    public const uint Version = 1;
+    /// <summary>Maximum sequence number value (MAXSEQ).</summary>
+    public const uint MaxSeq = 0x8000_0000;
+    /// <summary>Largest sequence window accepted by the protocol.</summary>
     public const int MaxSeqWindowSize = 64;
     /// <summary>Window size used unless a peer negotiates a smaller value.</summary>
     public const int DefaultSeqWindowSize = 64;
+    /// <summary>QOP used for the context-completion seq_window checksum (RFC 2203 §5.2.3.1).</summary>
+    public const uint DefaultQop = 0;
+}
+
+/// <summary>
+/// Optional QOP-aware GSS operations. When a mechanism implements this interface,
+/// RPCSEC_GSS passes the per-request QOP explicitly; otherwise QOP 0 is assumed.
+/// </summary>
+public interface IRpcSecGssQopMechanism
+{
+    /// <summary>Compute a MIC for <paramref name="data"/> using <paramref name="qop"/>.</summary>
+    byte[] GetMic(byte[] data, uint qop);
+
+    /// <summary>Verify a MIC against <paramref name="data"/> using <paramref name="qop"/>.</summary>
+    bool VerifyMic(byte[] data, byte[] mic, uint qop);
+
+    /// <summary>Wrap (encrypt or sign) data using <paramref name="qop"/>.</summary>
+    byte[] Wrap(byte[] data, uint qop);
+
+    /// <summary>Unwrap protected data using <paramref name="qop"/>.</summary>
+    byte[] Unwrap(byte[] wrappedData, uint qop);
 }
 
 /// <summary>Interface for GSSAPI security mechanisms (e.g., Kerberos).</summary>
@@ -117,8 +144,9 @@ public sealed class RpcSecGssContext
 /// <summary>
 /// NegotiateAuthentication-based GSS mechanism for .NET 8+.
 /// Uses System.Net.Security.NegotiateAuthentication for Kerberos/NTLM.
+/// Experimental: token-exchange success is not evidence of integrity/privacy correctness.
 /// </summary>
-public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
+public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism
 {
     private System.Net.Security.NegotiateAuthentication? _auth;
     private bool _established;
@@ -223,6 +251,40 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
     public uint NextSeqNum { get => _nextSeqNum; set => _nextSeqNum = value; }
     public RpcSecGssService NegotiatedService { get; set; }
 
+    /// <summary>QOP-aware MIC. NegotiateAuthentication does not expose distinct QOPs; only QOP 0 is supported.</summary>
+    public byte[] GetMic(byte[] data, uint qop)
+    {
+        EnsureDefaultQop(qop);
+        return GetMic(data);
+    }
+
+    /// <summary>QOP-aware MIC verification. Only QOP 0 is supported.</summary>
+    public bool VerifyMic(byte[] data, byte[] mic, uint qop)
+    {
+        EnsureDefaultQop(qop);
+        return VerifyMic(data, mic);
+    }
+
+    /// <summary>QOP-aware wrap. Only QOP 0 is supported.</summary>
+    public byte[] Wrap(byte[] data, uint qop)
+    {
+        EnsureDefaultQop(qop);
+        return Wrap(data);
+    }
+
+    /// <summary>QOP-aware unwrap. Only QOP 0 is supported.</summary>
+    public byte[] Unwrap(byte[] wrappedData, uint qop)
+    {
+        EnsureDefaultQop(qop);
+        return Unwrap(wrappedData);
+    }
+
+    private static void EnsureDefaultQop(uint qop)
+    {
+        if (qop != RpcSecGssConstants.DefaultQop)
+            throw new NfsException($"Unsupported GSS QOP: {qop}. NegotiateGssMechanism only supports QOP 0.");
+    }
+
     public void Dispose()
     {
         _auth?.Dispose();
@@ -230,16 +292,95 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism
 }
 
 /// <summary>
+/// Immutable per-attempt RPCSEC_GSS security record (RFC 2203).
+/// One record is allocated for every transmitted attempt; retries allocate a fresh sequence number.
+/// </summary>
+public sealed class RpcSecGssCallRecord
+{
+    /// <summary>Creates a record for one transmitted attempt.</summary>
+    public RpcSecGssCallRecord(
+        uint xid,
+        uint seqNum,
+        RpcSecGssService service,
+        uint qop,
+        uint contextGeneration,
+        uint program,
+        uint version,
+        uint procedure,
+        RpcSecGssProc gssProc,
+        byte[] contextHandle)
+    {
+        if (contextHandle is null)
+            throw new ArgumentNullException(nameof(contextHandle));
+        if (seqNum == 0 || seqNum >= RpcSecGssConstants.MaxSeq)
+            throw new ArgumentOutOfRangeException(nameof(seqNum), seqNum, "Sequence numbers must be in 1..MAXSEQ-1.");
+
+        Xid = xid;
+        SeqNum = seqNum;
+        Service = service;
+        Qop = qop;
+        ContextGeneration = contextGeneration;
+        Program = program;
+        Version = version;
+        Procedure = procedure;
+        GssProc = gssProc;
+        ContextHandle = contextHandle;
+    }
+
+    /// <summary>RPC transaction identifier of this attempt.</summary>
+    public uint Xid { get; }
+    /// <summary>RPCSEC_GSS sequence number allocated for this attempt.</summary>
+    public uint SeqNum { get; }
+    /// <summary>Service level used for this attempt.</summary>
+    public RpcSecGssService Service { get; }
+    /// <summary>GSS quality-of-protection used for this attempt (0 = default).</summary>
+    public uint Qop { get; }
+    /// <summary>Generation of the GSS context that signed this attempt.</summary>
+    public uint ContextGeneration { get; }
+    /// <summary>RPC program number of the protected call.</summary>
+    public uint Program { get; }
+    /// <summary>RPC program version of the protected call.</summary>
+    public uint Version { get; }
+    /// <summary>RPC procedure number of the protected call.</summary>
+    public uint Procedure { get; }
+    /// <summary>RPCSEC_GSS control procedure encoded in the credential.</summary>
+    public RpcSecGssProc GssProc { get; }
+    /// <summary>Context handle sealed into the credential (defensive copy).</summary>
+    public byte[] ContextHandle { get; }
+
+    /// <summary>Four-byte network-order encoding of <see cref="SeqNum"/> used for MIC inputs.</summary>
+    public byte[] SeqNumNetworkOrder()
+    {
+        var bytes = new byte[4];
+        bytes[0] = (byte)(SeqNum >> 24);
+        bytes[1] = (byte)(SeqNum >> 16);
+        bytes[2] = (byte)(SeqNum >> 8);
+        bytes[3] = (byte)SeqNum;
+        return bytes;
+    }
+
+    /// <summary>
+    /// Redacted diagnostic summary. Never includes credentials, tokens, MIC material, or protected payloads.
+    /// </summary>
+    public override string ToString() =>
+        $"xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, gssProc={GssProc}, seq={SeqNum}, service={Service}, qop={Qop}, contextGeneration={ContextGeneration}";
+}
+
+/// <summary>
 /// AUTH_NONE/AUTH_SYS-based GSS mechanism for testing and environments
 /// where Kerberos is not available. Provides no actual security.
+/// Must not be configured with integrity or privacy service.
 /// </summary>
-public sealed class NoOpGssMechanism : IRpcSecGssMechanism
+public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism
 {
     public byte[] MechanismOid => Array.Empty<byte>();
     public bool IsEstablished => true;
     public uint MaxMessageSize => uint.MaxValue;
     public uint NextSeqNum { get; set; }
     public RpcSecGssService NegotiatedService { get; set; } = RpcSecGssService.None;
+
+    /// <summary>Always false: this mechanism provides no cryptographic protection.</summary>
+    public bool ProvidesCryptographicProtection => false;
 
     public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
         Task.FromResult(Array.Empty<byte>());
@@ -251,5 +392,44 @@ public sealed class NoOpGssMechanism : IRpcSecGssMechanism
     public bool VerifyMic(byte[] data, byte[] mic) => true;
     public byte[] Wrap(byte[] data) => data;
     public byte[] Unwrap(byte[] wrappedData) => wrappedData;
+    public byte[] GetMic(byte[] data, uint qop) => GetMic(data);
+    public bool VerifyMic(byte[] data, byte[] mic, uint qop) => VerifyMic(data, mic);
+    public byte[] Wrap(byte[] data, uint qop) => Wrap(data);
+    public byte[] Unwrap(byte[] wrappedData, uint qop) => Unwrap(wrappedData);
     public void Dispose() { }
+}
+
+/// <summary>Helpers for classifying RPCSEC_GSS mechanism security strength.</summary>
+public static class RpcSecGssMechanism
+{
+    /// <summary>
+    /// Returns true when the mechanism can actually protect integrity/privacy service traffic.
+    /// <see cref="NoOpGssMechanism"/> is explicitly excluded from security claims.
+    /// </summary>
+    public static bool ProvidesCryptographicProtection(IRpcSecGssMechanism mechanism)
+    {
+        ArgumentNullException.ThrowIfNull(mechanism);
+        return mechanism is not NoOpGssMechanism;
+    }
+
+    /// <summary>Compute a MIC, preferring the QOP-aware contract when available.</summary>
+    public static byte[] GetMic(IRpcSecGssMechanism mechanism, byte[] data, uint qop)
+    {
+        ArgumentNullException.ThrowIfNull(mechanism);
+        ArgumentNullException.ThrowIfNull(data);
+        return mechanism is IRpcSecGssQopMechanism qopMechanism
+            ? qopMechanism.GetMic(data, qop)
+            : mechanism.GetMic(data);
+    }
+
+    /// <summary>Verify a MIC, preferring the QOP-aware contract when available.</summary>
+    public static bool VerifyMic(IRpcSecGssMechanism mechanism, byte[] data, byte[] mic, uint qop)
+    {
+        ArgumentNullException.ThrowIfNull(mechanism);
+        ArgumentNullException.ThrowIfNull(data);
+        ArgumentNullException.ThrowIfNull(mic);
+        return mechanism is IRpcSecGssQopMechanism qopMechanism
+            ? qopMechanism.VerifyMic(data, mic, qop)
+            : mechanism.VerifyMic(data, mic);
+    }
 }
