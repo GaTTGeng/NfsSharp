@@ -20,6 +20,18 @@ The solution is `NfsSharp.sln`. Library projects target `net8.0`, `net9.0`, and 
 - Do not include any AI tool or assistant name, brand, or identifying marker in repository content, commit messages, branch names, or pull-request text.
 - Update documentation and `CHANGELOG.md` when a public behavior, compatibility claim, or supported scope changes.
 
+## Code Comments
+
+Keep sources readable with key English comments. Comment-only changes are welcome when they clarify protocol or control flow; they do not require a `CHANGELOG.md` entry and do not require the integration suite.
+
+- Write code comments in English. Do not introduce Chinese (or other non-English) comments in `*.cs` files. Chinese documentation such as `README.zh-CN.md` stays Chinese.
+- Summarize public types and important public members with concise `/// <summary>…</summary>` one-liners. Prefer NFS/RPC procedure names where relevant (for example `/// <summary>COMMIT — flush cached data to stable storage for a file handle.</summary>`).
+- Document key logic inside multi-step methods with short `//` step or WHY comments: control-flow phases, retry/reconnect state changes, cache invalidation points, validation branches, and error paths. Prefer WHY over restating the code.
+- Make protocol wire details explicit when they are not obvious from the type names: field order, XDR alignment and padding, opaque-length caps, record marking, and the governing RFC (for example RFC 1813, RFC 1833, RFC 2203, RFC 4506, RFC 5531, RFC 7530).
+- In tests, summarize each class/fixture with a short purpose comment and annotate only non-obvious scenarios (why a status is expected, what wire layout is asserted, how a stream fixture is scripted). Do not comment every `[Fact]`.
+- Do not add banners, section rules, empty `///` tags, author names, or AI-tool markers. Do not comment obvious assignments or trivial getters. Keep each comment short and factual.
+- Comment-only work must not change code, names, whitespace of code lines, assertions, or public API. If a change does alter behavior, split it from pure comment work.
+
 ## Protocol and Client Changes
 
 - Ground NFS/RPC wire changes in the relevant specification and keep encoded field ordering, alignment, and status handling explicit.
