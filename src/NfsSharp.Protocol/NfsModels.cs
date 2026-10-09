@@ -36,7 +36,11 @@ public enum NfsAccessMode : uint
     Execute = 0x0020
 }
 
-/// <summary>File or directory attributes returned by NFSv3.</summary>
+/// <summary>
+/// File or directory attributes returned by NFSv3.
+/// When decoded from fattr3, all three timestamps are present — including Unix epoch zero.
+/// Optional attributes are represented by a null <see cref="NfsFattr"/> (post_op_attr presence flag), not by null timestamps.
+/// </summary>
 public sealed record NfsFattr(NfsType Type, long Size, DateTime? Mtime)
 {
     public uint Mode { get; init; }
@@ -48,6 +52,11 @@ public sealed record NfsFattr(NfsType Type, long Size, DateTime? Mtime)
     public ulong FileId { get; init; }
     public DateTime? Atime { get; init; }
     public DateTime? Ctime { get; init; }
+    /// <summary>Raw NFS access time; preserves nanosecond precision including epoch zero.</summary>
+    public NfsTimestamp? AtimeTimestamp { get; init; }
+    /// <summary>Raw NFS modification time; preserves nanosecond precision including epoch zero.</summary>
+    public NfsTimestamp? MtimeTimestamp { get; init; }
+    /// <summary>Raw NFS change time; preserves nanosecond precision including epoch zero.</summary>
     public NfsTimestamp? CtimeTimestamp { get; init; }
 }
 

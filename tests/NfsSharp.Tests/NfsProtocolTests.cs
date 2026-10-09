@@ -671,6 +671,13 @@ public class NfsModelsTests
             Assert.Equal(NfsType.Reg, attr.Type);
             Assert.Equal(7, attr.Size);
             Assert.Equal(42ul, attr.FileId);
+            // WriteFattr3 emits (0, 0) nfstime3 pairs; those are Unix epoch values, not absent timestamps.
+            Assert.Equal(DateTime.UnixEpoch, attr.Mtime);
+            Assert.Equal(DateTime.UnixEpoch, attr.Atime);
+            Assert.Equal(DateTime.UnixEpoch, attr.Ctime);
+            Assert.Equal(new NfsTimestamp(0, 0), attr.MtimeTimestamp);
+            Assert.Equal(new NfsTimestamp(0, 0), attr.AtimeTimestamp);
+            Assert.Equal(new NfsTimestamp(0, 0), attr.CtimeTimestamp);
 
             var getattrFailure = await Assert.ThrowsAsync<NfsException>(
                 () => client.GetAttributesAsync(FixtureHandle, CancellationToken.None));
@@ -710,6 +717,155 @@ public class NfsModelsTests
             var readFailure = await Assert.ThrowsAsync<NfsException>(
                 () => client.ReadAtAsync(FixtureHandle, 0, new byte[1], 0, 1, CancellationToken.None));
             Assert.Equal(NfsV3Status.IsDir, readFailure.Status);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+        }
+
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_PreservesEpochZeroTimestampsAndUsesPresenceFlagsForAbsentAttributes()
+    {
+        // RFC 1813 nfstime3 (0, 0) is the Unix epoch, a valid timestamp. Optional attributes are
+        // signaled only by post_op_attr / name_attributes presence bits, never by zero timestamps.
+        var nonZeroAtime = new NfsTimestamp(1_704_158_645, 123_456_789);
+        var nonZeroCtime = new NfsTimestamp(1_704_158_700, 0);
+        byte[] readDirVerifier = [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37];
+        byte[] readDirPlusVerifier = [0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47];
+        uint[] procedures = [1, 1, 16, 17, 17];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            switch (index)
+            {
+                // GETATTR OK: all three nfstime3 pairs are (0, 0) — Unix epoch, not absent values.
+                case 0:
+                    return NfsReply(call, writer =>
+                    {
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteFattr3(writer, NfsType.Reg, 0);
+                    });
+                // GETATTR OK: mixed timestamps so epoch zero is not confused with a decoding default.
+                case 1:
+                    return NfsReply(call, writer =>
+                    {
+                        writer.UInt(NfsV3Status.Ok);
+                        WriteFattr3(
+                            writer,
+                            NfsType.Reg,
+                            4,
+                            fileId: 7,
+                            atime: nonZeroAtime,
+                            mtime: new NfsTimestamp(0, 0),
+                            ctime: nonZeroCtime);
+                    });
+                // READDIR: names only — no attribute payload, so timestamp preservation is not applicable.
+                case 2:
+                    return NfsReply(call, writer => WriteReadDirResult(
+                        writer, readDirVerifier, [(11ul, "epoch-name", 11ul)], eof: true));
+                // READDIRPLUS with name_attributes present and zero timestamps on the entry.
+                case 3:
+                    return NfsReply(call, writer => WriteReadDirPlusResult(
+                        writer,
+                        readDirPlusVerifier,
+                        [(12ul, "epoch-entry", 12ul)],
+                        eof: true,
+                        includeAttributes: true));
+                // READDIRPLUS with mixed entry timestamps and an absent name_attributes arm nearby.
+                case 4:
+                    return NfsReply(call, writer =>
+                    {
+                        writer.UInt(NfsV3Status.Ok);
+                        WritePostOpAttr(writer, present: false);
+                        writer.FixedBytes(readDirPlusVerifier);
+                        writer.Bool(true);
+                        writer.ULong(13);
+                        writer.Str("mixed-entry");
+                        writer.ULong(13);
+                        writer.Bool(true);
+                        WriteFattr3(
+                            writer,
+                            NfsType.Reg,
+                            0,
+                            13,
+                            nonZeroAtime,
+                            new NfsTimestamp(0, 0),
+                            nonZeroCtime);
+                        writer.Bool(false);
+                        writer.Bool(true);
+                        writer.ULong(14);
+                        writer.Str("absent-entry");
+                        writer.ULong(14);
+                        // name_attributes false: the protocol absence path, independent of timestamps.
+                        WritePostOpAttr(writer, present: false);
+                        writer.Bool(false);
+                        writer.Bool(false);
+                        writer.Bool(true);
+                    });
+                default:
+                    throw new InvalidOperationException($"Unexpected timestamp fixture request {index}.");
+            }
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+
+        var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+        try
+        {
+            var epoch = await client.GetAttributesAsync(FixtureHandle, CancellationToken.None);
+            Assert.Equal(DateTime.UnixEpoch, epoch.Mtime);
+            Assert.Equal(DateTime.UnixEpoch, epoch.Atime);
+            Assert.Equal(DateTime.UnixEpoch, epoch.Ctime);
+            Assert.Equal(new NfsTimestamp(0, 0), epoch.MtimeTimestamp);
+            Assert.Equal(new NfsTimestamp(0, 0), epoch.AtimeTimestamp);
+            Assert.Equal(new NfsTimestamp(0, 0), epoch.CtimeTimestamp);
+
+            var mixed = await client.GetAttributesAsync(FixtureHandle, CancellationToken.None);
+            Assert.Equal(DateTime.UnixEpoch, mixed.Mtime);
+            Assert.Equal(new NfsTimestamp(0, 0), mixed.MtimeTimestamp);
+            Assert.Equal(nonZeroAtime, mixed.AtimeTimestamp);
+            Assert.Equal(nonZeroCtime, mixed.CtimeTimestamp);
+            Assert.Equal(nonZeroAtime.ToDateTimeUtc(), mixed.Atime);
+            Assert.Equal(nonZeroCtime.ToDateTimeUtc(), mixed.Ctime);
+
+            var entries = await client.ReadDirAsync(FixtureHandle, CancellationToken.None);
+            Assert.Collection(entries, entry => Assert.Equal(new NfsEntry("epoch-name", 11), entry));
+
+            var epochPlus = await client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None);
+            Assert.Collection(
+                epochPlus,
+                entry =>
+                {
+                    Assert.Equal("epoch-entry", entry.Name);
+                    Assert.NotNull(entry.Attr);
+                    Assert.Equal(DateTime.UnixEpoch, entry.Attr.Mtime);
+                    Assert.Equal(DateTime.UnixEpoch, entry.Attr.Atime);
+                    Assert.Equal(DateTime.UnixEpoch, entry.Attr.Ctime);
+                    Assert.Equal(new NfsTimestamp(0, 0), entry.Attr.MtimeTimestamp);
+                });
+
+            var mixedPlus = await client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None);
+            Assert.Collection(
+                mixedPlus,
+                entry =>
+                {
+                    Assert.Equal("mixed-entry", entry.Name);
+                    Assert.NotNull(entry.Attr);
+                    Assert.Equal(DateTime.UnixEpoch, entry.Attr.Mtime);
+                    Assert.Equal(nonZeroAtime, entry.Attr.AtimeTimestamp);
+                    Assert.Equal(nonZeroCtime, entry.Attr.CtimeTimestamp);
+                },
+                entry =>
+                {
+                    // Absent attributes remain null via the name_attributes presence bit.
+                    Assert.Equal("absent-entry", entry.Name);
+                    Assert.Null(entry.Attr);
+                    Assert.Null(entry.Handle);
+                });
         }
         finally
         {
@@ -1591,7 +1747,11 @@ public class NfsModelsTests
         XdrWriter writer,
         byte[] cookieVerifier,
         IReadOnlyList<(ulong FileId, string Name, ulong Cookie)> entries,
-        bool eof)
+        bool eof,
+        bool includeAttributes = false,
+        NfsTimestamp? entryAtime = null,
+        NfsTimestamp? entryMtime = null,
+        NfsTimestamp? entryCtime = null)
     {
         writer.UInt(NfsV3Status.Ok);
         WritePostOpAttr(writer, present: false);
@@ -1602,8 +1762,25 @@ public class NfsModelsTests
             writer.ULong(entry.FileId);
             writer.Str(entry.Name);
             writer.ULong(entry.Cookie);
-            WritePostOpAttr(writer, present: false);
-            writer.Bool(false); // name_handle follows
+            if (includeAttributes)
+            {
+                // name_attributes follows as post_op_attr; present fattr3 carries the requested timestamps.
+                writer.Bool(true);
+                WriteFattr3(
+                    writer,
+                    NfsType.Reg,
+                    0,
+                    entry.FileId,
+                    entryAtime,
+                    entryMtime,
+                    entryCtime);
+                writer.Bool(false); // name_handle follows
+            }
+            else
+            {
+                WritePostOpAttr(writer, present: false);
+                writer.Bool(false); // name_handle follows
+            }
         }
 
         writer.Bool(false);
@@ -1641,7 +1818,15 @@ public class NfsModelsTests
     }
 
     // fattr3 wire layout: type, mode, nlink, uid, gid, size, used, rdev, fsid, fileid, then three nfstime3 pairs.
-    private static void WriteFattr3(XdrWriter writer, NfsType type, ulong size, ulong fileId = 1)
+    // Default timestamps are (0, 0) so fixtures exercise the Unix epoch path unless they override a field.
+    private static void WriteFattr3(
+        XdrWriter writer,
+        NfsType type,
+        ulong size,
+        ulong fileId = 1,
+        NfsTimestamp? atime = null,
+        NfsTimestamp? mtime = null,
+        NfsTimestamp? ctime = null)
     {
         writer.UInt((uint)type);
         writer.UInt(0x1A4);
@@ -1654,11 +1839,15 @@ public class NfsModelsTests
         writer.UInt(0);
         writer.ULong(1);
         writer.ULong(fileId);
-        for (var index = 0; index < 3; index++)
-        {
-            writer.UInt(0);
-            writer.UInt(0);
-        }
+        WriteNfsTime3(writer, atime ?? new NfsTimestamp(0, 0));
+        WriteNfsTime3(writer, mtime ?? new NfsTimestamp(0, 0));
+        WriteNfsTime3(writer, ctime ?? new NfsTimestamp(0, 0));
+    }
+
+    private static void WriteNfsTime3(XdrWriter writer, NfsTimestamp value)
+    {
+        writer.UInt(value.Seconds);
+        writer.UInt(value.Nanoseconds);
     }
 
     private static Task WaitForRequestsAsync(params RpcFixtureServer[] servers) =>

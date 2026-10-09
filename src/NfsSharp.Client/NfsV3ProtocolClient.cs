@@ -591,13 +591,15 @@ internal sealed class NfsV3ProtocolClient
         reader.UInt(); // rdev specdata2
         var fileSystemId = reader.ULong();
         var fileId = reader.ULong();
+        // fattr3 timestamps are mandatory fields; absence of attributes is signaled by post_op_attr,
+        // never by a zero nfstime3. Unix epoch (0, 0) is therefore preserved as a real timestamp.
         var atime = ReadNfsTimestamp(reader);
         var mtime = ReadNfsTimestamp(reader);
         var ctime = ReadNfsTimestamp(reader);
         // NfsFattr exposes size as Int64; reject the unsupported upper range instead of truncating.
         if (size > long.MaxValue)
             throw new NfsException($"NFSv3 file size {size} exceeds the supported Int64 range.");
-        return new NfsFattr(type, (long)size, mtime?.ToDateTimeUtc())
+        return new NfsFattr(type, (long)size, mtime.ToDateTimeUtc())
         {
             Mode = mode,
             LinkCount = linkCount,
@@ -606,8 +608,10 @@ internal sealed class NfsV3ProtocolClient
             Used = used,
             FileSystemId = fileSystemId,
             FileId = fileId,
-            Atime = atime?.ToDateTimeUtc(),
-            Ctime = ctime?.ToDateTimeUtc(),
+            Atime = atime.ToDateTimeUtc(),
+            Ctime = ctime.ToDateTimeUtc(),
+            AtimeTimestamp = atime,
+            MtimeTimestamp = mtime,
             CtimeTimestamp = ctime
         };
     }
@@ -625,12 +629,12 @@ internal sealed class NfsV3ProtocolClient
         ReadPostOpAttr(reader);
     }
 
-    /// <summary>Decode an nfstime3; a zero second/nanosecond pair is treated as absent.</summary>
-    private static NfsTimestamp? ReadNfsTimestamp(XdrReader reader)
+    /// <summary>Decode an nfstime3. Epoch zero (0, 0) is a valid timestamp, not an absent marker.</summary>
+    private static NfsTimestamp ReadNfsTimestamp(XdrReader reader)
     {
         var seconds = reader.UInt();
         var nanoseconds = reader.UInt();
-        return seconds == 0 && nanoseconds == 0 ? null : new NfsTimestamp(seconds, nanoseconds);
+        return new NfsTimestamp(seconds, nanoseconds);
     }
 
     /// <summary>Encode sattr3 in wire order; each optional field carries its own presence flag.</summary>
