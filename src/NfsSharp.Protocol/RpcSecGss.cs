@@ -167,13 +167,19 @@ public sealed class RpcSecGssContext
 /// so MIC and wrap/unwrap operations fail closed until a real GSS integrity API is wired.
 /// Token-exchange success is never evidence of integrity/privacy correctness.
 /// </summary>
-public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism
+public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism, IRpcSecGssMechanismCapabilities
 {
     private System.Net.Security.NegotiateAuthentication? _auth;
     private bool _established;
     private uint _nextSeqNum;
 
     public byte[] MechanismOid { get; }
+
+    /// <summary>
+    /// False: NegotiateAuthentication exposes token exchange only, not GSS_GetMIC/GSS_VerifyMIC
+    /// or GSS_Wrap/GSS_Unwrap. Integrity and privacy must not be advertised as available.
+    /// </summary>
+    public bool ProvidesCryptographicProtection => false;
 
     public NegotiateGssMechanism(string package = "Kerberos")
     {
@@ -351,7 +357,7 @@ public sealed class RpcSecGssCallRecord
 /// is not available. Provides no actual security. Must not be configured with integrity or
 /// privacy service. Verifier bytes are nonempty so the rpc_gss_svc_none call path stays usable.
 /// </summary>
-public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism
+public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism, IRpcSecGssMechanismCapabilities
 {
     public byte[] MechanismOid => Array.Empty<byte>();
     public bool IsEstablished => true;
@@ -391,17 +397,33 @@ public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechani
     public void Dispose() { }
 }
 
+/// <summary>
+/// Optional capability contract for RPCSEC_GSS mechanisms. Implement this when a custom
+/// mechanism must declare whether its MIC/wrap operations provide real cryptographic protection.
+/// </summary>
+public interface IRpcSecGssMechanismCapabilities
+{
+    /// <summary>
+    /// True only when <see cref="IRpcSecGssMechanism.GetMic"/>, <see cref="IRpcSecGssMechanism.VerifyMic"/>,
+    /// <see cref="IRpcSecGssMechanism.Wrap"/>, and <see cref="IRpcSecGssMechanism.Unwrap"/> implement
+    /// real GSS integrity/privacy operations bound to the supplied data.
+    /// </summary>
+    bool ProvidesCryptographicProtection { get; }
+}
+
 /// <summary>Helpers for classifying RPCSEC_GSS mechanism security strength.</summary>
 public static class RpcSecGssMechanism
 {
     /// <summary>
     /// Returns true when the mechanism can actually protect integrity/privacy service traffic.
-    /// <see cref="NoOpGssMechanism"/> is explicitly excluded from security claims.
+    /// Mechanisms that implement <see cref="IRpcSecGssMechanismCapabilities"/> declare the result
+    /// explicitly; <see cref="NoOpGssMechanism"/> and <see cref="NegotiateGssMechanism"/> report false.
     /// </summary>
     public static bool ProvidesCryptographicProtection(IRpcSecGssMechanism mechanism)
     {
         ArgumentNullException.ThrowIfNull(mechanism);
-        return mechanism is not NoOpGssMechanism;
+        return mechanism is not IRpcSecGssMechanismCapabilities capabilities
+            || capabilities.ProvidesCryptographicProtection;
     }
 
     /// <summary>Compute a MIC, preferring the QOP-aware contract when available.</summary>

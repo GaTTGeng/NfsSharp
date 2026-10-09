@@ -179,7 +179,7 @@ public class RpcSecGssTests
                 GssService = service,
             };
             var ex = Assert.Throws<NfsException>(() => options.Validate());
-            Assert.Contains("NoOpGssMechanism", ex.Message);
+            Assert.Contains("does not provide cryptographic integrity/privacy", ex.Message);
         }
 
         // NoOp remains legal for rpc_gss_svc_none in deterministic tests.
@@ -189,6 +189,30 @@ public class RpcSecGssTests
             GssService = RpcSecGssService.None,
         };
         noneOptions.Validate();
+    }
+
+    [Fact]
+    public void NegotiateMechanism_IsNotReportedCryptographicallyCapable()
+    {
+        using var negotiate = new NegotiateGssMechanism();
+
+        Assert.False(RpcSecGssMechanism.ProvidesCryptographicProtection(negotiate));
+        Assert.False(negotiate.ProvidesCryptographicProtection);
+    }
+
+    [Fact]
+    public void NegotiateMechanism_IsRejectedForIntegrityAndPrivacy()
+    {
+        foreach (var service in new[] { RpcSecGssService.Integrity, RpcSecGssService.Privacy })
+        {
+            var options = new NfsClientOptions
+            {
+                GssMechanism = new NegotiateGssMechanism(),
+                GssService = service,
+            };
+            var ex = Assert.Throws<NfsException>(() => options.Validate());
+            Assert.Contains("does not provide cryptographic integrity/privacy", ex.Message);
+        }
     }
 
     [Fact]
@@ -385,13 +409,14 @@ public class RpcSecGssTests
     /// Deterministic fake GSS mechanism. The MIC is a function of both the data bytes and the QOP,
     /// so a no-op or QOP-blind verifier cannot accidentally pass negative fixtures.
     /// </summary>
-    private sealed class FakeGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism
+    private sealed class FakeGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism, IRpcSecGssMechanismCapabilities
     {
         public byte[] MechanismOid => [0x2A];
         public bool IsEstablished => true;
         public uint MaxMessageSize => 64 * 1024;
         public uint NextSeqNum { get; set; } = 1;
         public RpcSecGssService NegotiatedService { get; set; }
+        public bool ProvidesCryptographicProtection => true;
 
         public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
             Task.FromResult(new byte[] { 0x01 });

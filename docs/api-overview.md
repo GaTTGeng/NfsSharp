@@ -34,7 +34,7 @@ The following remain incomplete and **experimental**:
 
 - Context-establishment (`INIT`/`CONTINUE_INIT`) reply-verifier validation is not yet complete.
 - Integrity and privacy request/result body wrapping is not yet complete.
-- `NegotiateGssMechanism` performs Kerberos/NTLM token exchange only. .NET `NegotiateAuthentication` does not expose `GSS_GetMIC`/`GSS_VerifyMIC`, so MIC and wrap/unwrap operations fail closed rather than accept unbound values. It is not an end-to-end security guarantee.
+- `NegotiateGssMechanism` performs Kerberos/NTLM token exchange only. .NET `NegotiateAuthentication` does not expose `GSS_GetMIC`/`GSS_VerifyMIC`, so MIC and wrap/unwrap operations fail closed rather than accept unbound values. `RpcSecGssMechanism.ProvidesCryptographicProtection` reports it as false, and integrity/privacy service is rejected at configuration time. It is not an end-to-end security guarantee.
 - `NoOpGssMechanism` provides no cryptographic protection and is rejected for integrity/privacy service; it is for deterministic tests only (including `rpc_gss_svc_none` fixtures) and is never interoperability evidence.
 
 Applications must not treat the current RPCSEC_GSS surface as an end-to-end Kerberos security guarantee.

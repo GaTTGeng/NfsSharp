@@ -210,13 +210,14 @@ public sealed record NfsClientOptions
         // Re-check the AUTH_SYS gids cap here so misconfiguration fails before any RPC is sent.
         if (AuxiliaryGroups.Count > RpcAuthSys.MaxAuxiliaryGroups)
             throw new NfsException($"AUTH_SYS supports at most {RpcAuthSys.MaxAuxiliaryGroups} auxiliary groups.");
-        // NoOpGssMechanism is deterministic-test-only: never allow it to claim integrity/privacy.
+        // Mechanisms without real GSS integrity/privacy must not claim those services.
         if (GssMechanism is not null &&
             GssService != RpcSecGssService.None &&
             !RpcSecGssMechanism.ProvidesCryptographicProtection(GssMechanism))
         {
             throw new NfsException(
-                "NoOpGssMechanism provides no cryptographic protection and cannot be used with integrity or privacy service.");
+                "The configured GSS mechanism does not provide cryptographic integrity/privacy " +
+                "(NoOpGssMechanism and NegotiateGssMechanism are excluded) and cannot be used with integrity or privacy service.");
         }
     }
 }

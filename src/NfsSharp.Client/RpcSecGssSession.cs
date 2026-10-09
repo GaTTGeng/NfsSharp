@@ -152,7 +152,8 @@ internal sealed class RpcSecGssSession
             !RpcSecGssMechanism.ProvidesCryptographicProtection(mechanism))
         {
             throw new NfsException(
-                "NoOpGssMechanism provides no cryptographic protection and cannot be used with integrity or privacy service.");
+                "The configured GSS mechanism does not provide cryptographic integrity/privacy " +
+                "(NoOpGssMechanism and NegotiateGssMechanism are excluded) and cannot be used with integrity or privacy service.");
         }
 
         // Default target principal follows the conventional nfs/<host> service name.
