@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` and `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`, defaulting to 32 outstanding calls.
 - Added immutable per-attempt RPCSEC_GSS security records (`RpcSecGssCallRecord`) carrying XID, sequence number, service, QOP, context generation, and procedure identity. Sequence numbers are allocated once per transmitted attempt, including retries.
 - Added `IRpcSecGssQopMechanism` for QOP-aware MIC and wrap/unwrap operations, and `RpcSecGssMechanism` helpers for QOP dispatch and cryptographic-strength classification.
+- Added `NfsFattr.AtimeTimestamp` and `NfsFattr.MtimeTimestamp` alongside `CtimeTimestamp` so raw NFS nanosecond precision is available for every fattr3 timestamp, including Unix epoch zero.
 
 ### Changed
 
@@ -22,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Preserved NFSv3 Unix epoch timestamps (`nfstime3` seconds=0, nanoseconds=0) instead of treating them as absent values. Absent optional attributes are represented only through `post_op_attr` / `name_attributes` presence flags.
 - RPCSEC_GSS data-reply verifiers are now validated fail-closed against the network-order request sequence number using the request QOP before any procedure result is exposed. Missing, wrong-flavor, empty, mismatched, or unverifiable MICs are rejected, including on accepted RPC errors. Replay against a replaced context generation is rejected.
 - `NegotiateGssMechanism` no longer pretends to compute or verify MICs through the Negotiate handshake API. Those operations fail closed until a real GSS integrity API is wired, so unbound verifiers cannot be accepted. `RpcSecGssMechanism.CanComputeMic` and `ProvidesCryptographicProtection` report it as false, and configuration is rejected for every service (including `rpc_gss_svc_none`) because the mandatory data-call header MIC cannot be produced.
 - Accept server-selected RPCSEC_GSS `seq_window` values above the local default of 64; only a zero window is rejected (RFC 2203 does not cap the negotiated window).

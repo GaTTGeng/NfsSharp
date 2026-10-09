@@ -57,7 +57,7 @@ Applications must not treat the current RPCSEC_GSS surface as an end-to-end Kerb
 
 Stream reads require a writable output stream, and stream writes require a readable input stream. Path-based local-file reads validate the remote source before creating the local output path. Path-based stream writes validate the input stream before creating or truncating the remote file. They return an `NfsLookup` for the written file; its attributes are refreshed after the stream write completes, so `Attr.Size` reflects the final server-side length when the server returns post-write attributes normally.
 
-`SetAttributesGuardedAsync` uses the NFSv3 `ctime` guard so an attribute update only succeeds if the server-side file change time still matches the value previously observed by the caller. Pass `NfsFattr.CtimeTimestamp` to this guard because it preserves raw NFS nanosecond precision.
+`SetAttributesGuardedAsync` uses the NFSv3 `ctime` guard so an attribute update only succeeds if the server-side file change time still matches the value previously observed by the caller. Pass `NfsFattr.CtimeTimestamp` to this guard because it preserves raw NFS nanosecond precision. `NfsFattr` also exposes `AtimeTimestamp` and `MtimeTimestamp` with the same precision. Decoded attributes always carry all three timestamps, including a valid Unix epoch value of `(0, 0)`; optional attributes are represented by a null attribute record (`post_op_attr` / `name_attributes`), never by null timestamps.
 
 ## Protocol layer
 

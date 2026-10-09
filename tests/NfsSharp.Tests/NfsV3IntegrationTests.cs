@@ -1326,6 +1326,14 @@ public sealed class NfsV3IntegrationTests
         AssertCloseTo(pathMtime, finalAttributes.Atime);
         AssertCloseTo(handleMtime, finalAttributes.Mtime);
         Assert.Equal(new byte[] { 0x41, 0x42 }, await ReadBytesAsync(client, path, timeout.Token));
+
+        // Unix epoch is a valid nfstime3 (0, 0) and must round-trip as a present timestamp, not null.
+        await client.UtimesAsync(path, DateTime.UnixEpoch, DateTime.UnixEpoch, timeout.Token);
+        var epochAttributes = await client.GetAttributesAsync(path, timeout.Token);
+        Assert.Equal(DateTime.UnixEpoch, epochAttributes.Mtime);
+        Assert.Equal(new NfsTimestamp(0, 0), epochAttributes.MtimeTimestamp);
+        Assert.Equal(DateTime.UnixEpoch, epochAttributes.Atime);
+        Assert.Equal(new NfsTimestamp(0, 0), epochAttributes.AtimeTimestamp);
     }
 
     [NfsV3IntegrationFact]
