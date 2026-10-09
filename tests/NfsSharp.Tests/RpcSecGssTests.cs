@@ -21,6 +21,22 @@ public class RpcSecGssTests
         Assert.Equal(new byte[] { 0x01, 0x02, 0x03, 0x04 }, record.SeqNumNetworkOrder());
     }
 
+    [Fact]
+    public void CallRecord_CopiesContextHandleOnInputAndOutput()
+    {
+        var source = (byte[])ContextHandle.Clone();
+        var record = NewRecord();
+
+        // Mutating the construction buffer must not change the record identity.
+        source[0] ^= 0xFF;
+        Assert.Equal(ContextHandle, record.ContextHandle);
+
+        // Mutating the returned array must not change the stored identity either.
+        var exposed = record.ContextHandle;
+        exposed[1] ^= 0xFF;
+        Assert.Equal(ContextHandle, record.ContextHandle);
+    }
+
     [Theory]
     [InlineData(0u)]
     [InlineData(0x8000_0000u)]

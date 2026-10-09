@@ -289,6 +289,8 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMe
 /// </summary>
 public sealed class RpcSecGssCallRecord
 {
+    private readonly byte[] _contextHandle;
+
     /// <summary>Creates a record for one transmitted attempt.</summary>
     public RpcSecGssCallRecord(
         uint xid,
@@ -316,7 +318,8 @@ public sealed class RpcSecGssCallRecord
         Version = version;
         Procedure = procedure;
         GssProc = gssProc;
-        ContextHandle = contextHandle;
+        // Clone on input so later mutation of the caller buffer cannot change this record.
+        _contextHandle = contextHandle.ToArray();
     }
 
     /// <summary>RPC transaction identifier of this attempt.</summary>
@@ -337,8 +340,9 @@ public sealed class RpcSecGssCallRecord
     public uint Procedure { get; }
     /// <summary>RPCSEC_GSS control procedure encoded in the credential.</summary>
     public RpcSecGssProc GssProc { get; }
+
     /// <summary>Context handle sealed into the credential (defensive copy).</summary>
-    public byte[] ContextHandle { get; }
+    public byte[] ContextHandle => _contextHandle.ToArray();
 
     /// <summary>Four-byte network-order encoding of <see cref="SeqNum"/> used for MIC inputs.</summary>
     public byte[] SeqNumNetworkOrder()
