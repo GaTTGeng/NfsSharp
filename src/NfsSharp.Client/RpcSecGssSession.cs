@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Microsoft.Extensions.Logging;
 using NfsSharp.Protocol;
 
@@ -166,51 +167,145 @@ internal sealed class RpcSecGssSession
 
         // Default target principal follows the conventional nfs/<host> service name.
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
-        // Phase 1: local GSS context initiation produces the token the server must consume.
-        var token = await mechanism.InitiateContextAsync(targetName, _options.GssCredentials, ct);
-
-        // Context-establishment call data is still the pre-RFC layout used by the
-        // experimental CREATE path; #85 rewrites this to rpc_gss_init_arg over NULLPROC
-        // with the control procedure carried in rpc_gss_cred_t. Keep wire value 0 here
-        // so this slice does not silently change establishment bytes.
-        var arguments = new XdrWriter();
-        arguments.UInt((uint)RpcSecGssProc.Data);
-        arguments.UInt((uint)token.Length);
-        arguments.Opaque(token);
-        arguments.UInt((uint)_options.GssService);
-        arguments.UInt(0);
-
-        // CREATE is not idempotent; a retry would allocate a second server context.
-        var reader = await rpcClient.CallRawAsync(
-            NfsRpcConstants.ProgNfs,
-            NfsRpcConstants.VerNfs,
-            0,
-            arguments.ToArray(),
-            ct);
-        // Phase 2: decode the CREATE result before publishing any session state.
-        var status = reader.UInt();
-        if (status != 0)
-            throw new NfsException($"RPCSEC_GSS_CREATE failed (stat={status}).");
-
-        // Publish the context only after the full reply decodes, so later CALLs never sign with a partial session.
-        var contextHandle = reader.Opaque();
-        var seqWindow = reader.UInt();
-        // RFC 2203 lets the server select any positive window; 64 is only a local default.
-        if (seqWindow == 0)
-            throw new NfsException("RPCSEC_GSS_CREATE returned an invalid sequence window: 0.");
-
-        InstallContext(new RpcSecGssContext
+        try
         {
-            ContextHandle = contextHandle,
-            SeqWindowSize = seqWindow,
-            SeqWindow = reader.FixedBytes(8),
-            Service = _options.GssService,
-            Mechanism = mechanism,
-        });
+            var token = await mechanism.InitiateContextAsync(targetName, _options.GssCredentials, ct);
+            var controlProcedure = RpcSecGssProc.Init;
+            byte[] contextHandle = [];
+            uint seqWindow = 0;
+            var clientNeedsFinalToken = !mechanism.IsEstablished;
+            var contextCompleted = false;
+
+            // Each continuation is a non-idempotent context-creation call, so it is sent once.
+            for (var round = 0; round < MaxContextCreationRounds; round++)
+            {
+                var arguments = new XdrWriter();
+                arguments.Opaque(token);
+                var reply = await rpcClient.CallRpcSecGssContextAsync(
+                    controlProcedure,
+                    contextHandle,
+                    arguments.ToArray(),
+                    ct);
+
+                // The RPC envelope verifier is part of context establishment and must survive
+                // decoding so the final seq_window can be authenticated before publishing state.
+                var result = reply.Body;
+                var returnedHandle = result.Opaque();
+                var majorStatus = result.UInt();
+                var minorStatus = result.UInt();
+                var returnedSeqWindow = result.UInt();
+                var serverToken = result.Opaque();
+                if (result.Remaining != 0)
+                    throw new NfsException("RPCSEC_GSS context response contains trailing data.");
+
+                if (majorStatus is not (GssComplete or GssContinueNeeded))
+                {
+                    RequireNullContextVerifier(reply);
+                    if (returnedHandle.Length != 0 || serverToken.Length != 0)
+                        throw new NfsException("RPCSEC_GSS failed context response returned a handle or token.");
+                    throw new NfsException(
+                        $"RPCSEC_GSS context establishment failed (gss_major={majorStatus}, gss_minor={minorStatus}).");
+                }
+
+                if (returnedHandle.Length == 0)
+                    throw new NfsException("RPCSEC_GSS context response returned an empty context handle.");
+                if (contextHandle.Length != 0 && !contextHandle.AsSpan().SequenceEqual(returnedHandle))
+                    throw new NfsException("RPCSEC_GSS context handle changed during continuation.");
+                if (returnedSeqWindow == 0)
+                    throw new NfsException("RPCSEC_GSS context response returned an invalid sequence window: 0.");
+
+                contextHandle = returnedHandle;
+                seqWindow = returnedSeqWindow;
+
+                if (majorStatus == GssContinueNeeded)
+                {
+                    RequireNullContextVerifier(reply);
+                    token = await mechanism.ContinueContextAsync(serverToken, ct);
+                    if (token.Length == 0)
+                        throw new NfsException("RPCSEC_GSS mechanism returned no token while the server requested continuation.");
+                    clientNeedsFinalToken = !mechanism.IsEstablished;
+                    controlProcedure = RpcSecGssProc.ContinueInit;
+                    continue;
+                }
+
+                // GSS_S_COMPLETE authenticates the four-byte network-order seq_window with QOP 0.
+                VerifyContextCompletionVerifier(mechanism, reply, returnedSeqWindow);
+                if (clientNeedsFinalToken)
+                {
+                    await mechanism.ContinueContextAsync(serverToken, ct);
+                }
+                if (!mechanism.IsEstablished)
+                    throw new NfsException("RPCSEC_GSS server completed context establishment before the client mechanism.");
+
+                InstallContext(new RpcSecGssContext
+                {
+                    ContextHandle = contextHandle,
+                    SeqWindowSize = seqWindow,
+                    SeqWindow = new byte[8],
+                    Service = _options.GssService,
+                    Mechanism = mechanism,
+                });
+                contextCompleted = true;
+                break;
+            }
+
+            if (!contextCompleted)
+                throw new NfsException($"RPCSEC_GSS context establishment exceeded {MaxContextCreationRounds} rounds.");
+        }
+        catch
+        {
+            // A failed or cancelled handshake must not leave a partial mechanism usable.
+            _context = null;
+            mechanism.Dispose();
+            throw;
+        }
+
         _logger?.LogInformation(
             "RPCSEC_GSS context established (target={Target}, service={Service}, contextGeneration={ContextGeneration})",
             targetName,
             _options.GssService,
             _contextGeneration);
+    }
+
+    private const uint GssComplete = 0;
+    private const uint GssContinueNeeded = 1;
+    private const int MaxContextCreationRounds = 16;
+
+    private static void RequireNullContextVerifier(RpcReply reply)
+    {
+        if (reply.VerifierFlavor != (uint)RpcSecGssFlavor.None || reply.Verifier.Length != 0)
+            throw new NfsException(
+                "RPCSEC_GSS context response verifier must be an empty AUTH_NONE verifier until GSS_S_COMPLETE.");
+    }
+
+    private static void VerifyContextCompletionVerifier(
+        IRpcSecGssMechanism mechanism,
+        RpcReply reply,
+        uint seqWindow)
+    {
+        if (reply.VerifierFlavor != (uint)RpcSecGssFlavor.Gss)
+            throw new NfsException(
+                $"RPCSEC_GSS completed context verifier rejected: expected flavor RPCSEC_GSS, got {reply.VerifierFlavor}.");
+        if (reply.Verifier.Length == 0)
+            throw new NfsException("RPCSEC_GSS completed context verifier body is empty.");
+
+        Span<byte> seqWindowBytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32BigEndian(seqWindowBytes, seqWindow);
+        bool verified;
+        try
+        {
+            verified = RpcSecGssMechanism.VerifyMic(
+                mechanism,
+                seqWindowBytes.ToArray(),
+                reply.Verifier,
+                RpcSecGssConstants.DefaultQop);
+        }
+        catch (Exception ex)
+        {
+            throw new NfsException("RPCSEC_GSS completed context verifier mechanism failed to verify seq_window.", ex);
+        }
+
+        if (!verified)
+            throw new NfsException("RPCSEC_GSS completed context verifier MIC mismatch for seq_window.");
     }
 }

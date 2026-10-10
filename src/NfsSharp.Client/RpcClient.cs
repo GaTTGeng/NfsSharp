@@ -203,20 +203,43 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         throw new NfsException("RPC call failed after all retry attempts.");
     }
 
-    /// <summary>Send one RPC CALL without retries (non-idempotent setup such as RPCSEC_GSS CREATE).</summary>
+    /// <summary>Send one RPC CALL without retries (for non-idempotent setup exchanges).</summary>
     internal async Task<XdrReader> CallRawAsync(
         uint program,
         uint version,
         uint procedure,
         byte[] arguments,
         CancellationToken ct) =>
-        await CallOnceAsync(
+        (await CallOnceReplyAsync(
             await RequireHealthyConnectionAsync(ct),
             program,
             version,
             procedure,
             arguments,
-            ct);
+            ct,
+            controlProcedure: null,
+            controlContextHandle: null)).Body;
+
+    /// <summary>Send one RFC 2203 context-creation call and preserve its RPC reply verifier.</summary>
+    internal async Task<RpcReply> CallRpcSecGssContextAsync(
+        RpcSecGssProc controlProcedure,
+        byte[] contextHandle,
+        byte[] arguments,
+        CancellationToken ct)
+    {
+        if (controlProcedure is not (RpcSecGssProc.Init or RpcSecGssProc.ContinueInit))
+            throw new ArgumentOutOfRangeException(nameof(controlProcedure));
+
+        return await CallOnceReplyAsync(
+            await RequireHealthyConnectionAsync(ct),
+            NfsRpcConstants.ProgNfs,
+            NfsRpcConstants.VerNfs,
+            procedure: 0,
+            arguments,
+            ct,
+            controlProcedure,
+            contextHandle);
+    }
 
     internal async ValueTask DisposeActiveConnectionForTestingAsync() =>
         await RequireActiveConnection().DisposeAsync();
@@ -299,6 +322,25 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         uint procedure,
         byte[] arguments,
         CancellationToken ct)
+        => (await CallOnceReplyAsync(
+            connection,
+            program,
+            version,
+            procedure,
+            arguments,
+            ct,
+            controlProcedure: null,
+            controlContextHandle: null)).Body;
+
+    private async Task<RpcReply> CallOnceReplyAsync(
+        RpcConnection connection,
+        uint program,
+        uint version,
+        uint procedure,
+        byte[] arguments,
+        CancellationToken ct,
+        RpcSecGssProc? controlProcedure,
+        byte[]? controlContextHandle)
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _stopSource.Token);
         var token = linkedCts.Token;
@@ -339,7 +381,22 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             // record and seals the header with a MIC; otherwise AUTH_SYS (flavor 1) with an
             // AUTH_NONE (flavor 0) verifier.
             RpcSecGssCallRecord? gssRecord = null;
-            if (_gssSession.IsEstablished)
+            if (controlProcedure is { } gssControl)
+            {
+                // Context-creation credentials carry the control procedure and returned handle;
+                // seq_num and service are undefined for INIT/CONTINUE_INIT (RFC 2203 §5.2.2).
+                var credential = new XdrWriter();
+                credential.UInt(RpcSecGssConstants.Version);
+                credential.UInt((uint)gssControl);
+                credential.UInt(0);
+                credential.UInt((uint)RpcSecGssService.None);
+                credential.Opaque(controlContextHandle ?? []);
+                writer.UInt((uint)RpcSecGssFlavor.Gss);
+                writer.Opaque(credential.ToArray());
+                writer.UInt((uint)RpcSecGssFlavor.None);
+                writer.Opaque([]);
+            }
+            else if (_gssSession.IsEstablished)
             {
                 // Allocate the sequence number once per transmitted attempt, including retries.
                 gssRecord = _gssSession.BeginDataCall(xid, program, version, procedure);
@@ -385,7 +442,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 connection.Generation,
                 connection.PendingCallCount,
                 connection.PendingCallHighWaterMark);
-            return reply.Body;
+            return reply;
         }
         finally
         {
