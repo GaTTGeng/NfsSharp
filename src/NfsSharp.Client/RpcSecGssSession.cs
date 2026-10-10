@@ -228,14 +228,16 @@ internal sealed class RpcSecGssSession
                     continue;
                 }
 
-                // GSS_S_COMPLETE authenticates the four-byte network-order seq_window with QOP 0.
-                VerifyContextCompletionVerifier(mechanism, reply, returnedSeqWindow);
                 if (clientNeedsFinalToken)
                 {
                     await mechanism.ContinueContextAsync(serverToken, ct);
                 }
                 if (!mechanism.IsEstablished)
                     throw new NfsException("RPCSEC_GSS server completed context establishment before the client mechanism.");
+
+                // The mechanism must consume its final server token before it can verify this MIC.
+                // GSS_S_COMPLETE authenticates the four-byte network-order seq_window with QOP 0.
+                VerifyContextCompletionVerifier(mechanism, reply, returnedSeqWindow);
 
                 InstallContext(new RpcSecGssContext
                 {

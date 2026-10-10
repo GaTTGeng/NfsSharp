@@ -439,7 +439,12 @@ public class RpcSecGssTests
     [Fact]
     public async Task EstablishAsync_ContinuesWithReturnedHandleAndToken()
     {
-        var mechanism = new FakeGssMechanism { IsEstablished = false, EstablishOnContinue = true };
+        var mechanism = new FakeGssMechanism
+        {
+            IsEstablished = false,
+            EstablishOnContinueCall = 2,
+            RequireEstablishedForVerification = true,
+        };
         var seqWindow = 32u;
         var stream = new ContextReplyStream(
             ContextReply(
@@ -471,7 +476,8 @@ public class RpcSecGssTests
 
         await session.EstablishAsync("server.example", rpc, CancellationToken.None);
 
-        Assert.Equal(new byte[] { 0xA1 }, mechanism.LastServerToken);
+        Assert.Equal(new byte[] { 0xA1 }, mechanism.ServerTokens[0]);
+        Assert.Empty(mechanism.ServerTokens[1]);
         var calls = ReadCallFrames(stream.Written);
         Assert.Equal(2, calls.Count);
         var continuation = calls[1];
@@ -777,9 +783,11 @@ public class RpcSecGssTests
     {
         public byte[] MechanismOid => [0x2A];
         public bool IsEstablished { get; set; } = true;
-        public bool EstablishOnContinue { get; set; }
+        public int EstablishOnContinueCall { get; set; } = 1;
+        public bool RequireEstablishedForVerification { get; set; }
         public bool Disposed { get; private set; }
-        public byte[] LastServerToken { get; private set; } = [];
+        public List<byte[]> ServerTokens { get; } = [];
+        private int _continueCalls;
         public uint MaxMessageSize => 64 * 1024;
         public uint NextSeqNum { get; set; } = 1;
         public RpcSecGssService NegotiatedService { get; set; }
@@ -791,8 +799,8 @@ public class RpcSecGssTests
 
         public Task<byte[]> ContinueContextAsync(byte[] serverToken, CancellationToken ct)
         {
-            LastServerToken = (byte[])serverToken.Clone();
-            if (EstablishOnContinue)
+            ServerTokens.Add((byte[])serverToken.Clone());
+            if (Interlocked.Increment(ref _continueCalls) >= EstablishOnContinueCall)
                 IsEstablished = true;
             return Task.FromResult(new byte[] { 0x02 });
         }
@@ -802,7 +810,12 @@ public class RpcSecGssTests
         public byte[] Wrap(byte[] data) => data;
         public byte[] Unwrap(byte[] wrappedData) => wrappedData;
         public byte[] GetMic(byte[] data, uint qop) => Mac(data, qop);
-        public bool VerifyMic(byte[] data, byte[] mic, uint qop) => Mac(data, qop).AsSpan().SequenceEqual(mic);
+        public bool VerifyMic(byte[] data, byte[] mic, uint qop)
+        {
+            if (RequireEstablishedForVerification && !IsEstablished)
+                throw new InvalidOperationException("The GSS context is not established.");
+            return Mac(data, qop).AsSpan().SequenceEqual(mic);
+        }
         public byte[] Wrap(byte[] data, uint qop) => data;
         public byte[] Unwrap(byte[] wrappedData, uint qop) => wrappedData;
         public void Dispose() => Disposed = true;
