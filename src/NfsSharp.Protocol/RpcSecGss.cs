@@ -92,7 +92,7 @@ public interface IRpcSecGssMechanism : IDisposable
     /// <param name="targetName">Service principal name (e.g., "nfs/server.example.com@REALM").</param>
     /// <param name="credentials">Optional credentials (e.g., keytab path or password).</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>Initial GSS token to include in RPCSEC_GSS_CREATE request.</returns>
+    /// <returns>Initial GSS token to include in an RPCSEC_GSS_INIT request.</returns>
     Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct);
 
     /// <summary>Continue context establishment with a server token.</summary>
@@ -145,14 +145,14 @@ public sealed class GssCredentials
     public string? KdcAddress { get; init; }
 }
 
-/// <summary>RPCSEC_GSS context handle returned after CREATE exchange.</summary>
+/// <summary>RPCSEC_GSS context state returned after the INIT/CONTINUE_INIT exchange.</summary>
 public sealed class RpcSecGssContext
 {
     /// <summary>Opaque server-issued context handle for subsequent RPCs.</summary>
     public byte[] ContextHandle { get; init; } = Array.Empty<byte>();
     /// <summary>Number of sequence numbers accepted within the sliding window.</summary>
     public uint SeqWindowSize { get; init; }
-    /// <summary>Replay-detection window bits received from the server (RFC 2203).</summary>
+    /// <summary>Legacy compatibility field; RFC 2203 context replies report the window length in <see cref="SeqWindowSize"/>.</summary>
     public byte[] SeqWindow { get; init; } = new byte[8];
     /// <summary>Service level (none/integrity/privacy) bound to this context.</summary>
     public RpcSecGssService Service { get; init; }
@@ -213,7 +213,7 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMe
         }
 
         _auth = new System.Net.Security.NegotiateAuthentication(options);
-        // An empty input yields the first handshake token to ship in RPCSEC_GSS_CREATE.
+        // An empty input yields the first handshake token to ship in RPCSEC_GSS_INIT.
         var token = _auth.GetOutgoingBlob(ReadOnlySpan<byte>.Empty, out _);
         return Task.FromResult(token ?? Array.Empty<byte>());
     }
