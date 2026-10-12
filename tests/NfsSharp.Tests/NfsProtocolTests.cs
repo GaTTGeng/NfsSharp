@@ -1154,6 +1154,14 @@ public class NfsModelsTests
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
         {
             AssertNfsProcedure(call, procedures[index]);
+            if (index is 2 or 3)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                Assert.Equal("created", arguments.Str());
+                Assert.Equal(1u, arguments.UInt()); // Public CREATE is exclusive (GUARDED) per RFC 1813.
+            }
+
             return NfsReply(call, writer =>
             {
                 switch (index)
@@ -1275,6 +1283,215 @@ public class NfsModelsTests
         }
 
         await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_SafeWriteRemovesTemporaryFileAfterTransportFailure()
+    {
+        string? lostCreateName = null;
+        string? interruptedWriteName = null;
+        await using var nfs = new RpcFixtureServer(
+            6,
+            (call, index) =>
+            {
+                AssertNfsProcedure(call, index switch
+                {
+                    0 or 2 => 8u, // CREATE temporary file
+                    1 or 5 => 12u, // REMOVE temporary file after reconnect
+                    3 => 3u, // LOOKUP temporary name when CREATE omits its optional handle
+                    4 => 7u, // WRITE; the fixture drops this connection
+                    _ => throw new InvalidOperationException($"Unexpected request {index}.")
+                });
+
+                if (index is 0 or 2)
+                {
+                    var arguments = new XdrReader(call.Arguments);
+                    Assert.Equal(FixtureHandle, arguments.Opaque());
+                    var temporaryName = arguments.Str();
+                    Assert.StartsWith(".nfssharp-", temporaryName);
+                    if (index == 0)
+                        lostCreateName = temporaryName;
+                    else
+                        interruptedWriteName = temporaryName;
+
+                    Assert.Equal(1u, arguments.UInt()); // GUARDED CREATE prevents name-collision truncation.
+                    Assert.True(arguments.Bool());
+                    Assert.Equal(0x180u, arguments.UInt()); // Staged bytes remain private until publish.
+                    Assert.False(arguments.Bool()); // uid
+                    Assert.False(arguments.Bool()); // gid
+                    Assert.False(arguments.Bool()); // size
+                    Assert.False(arguments.Bool()); // atime
+                    Assert.False(arguments.Bool()); // mtime
+                    Assert.Equal(0, arguments.Remaining);
+                    return NfsReply(call, writer =>
+                    {
+                        writer.UInt(NfsV3Status.Ok);
+                        writer.Bool(index == 0);
+                        if (index == 0)
+                            writer.Opaque([0xE1]);
+                        WritePostOpAttr(writer, present: false);
+                        WritePostOpAttr(writer, present: false);
+                        WritePostOpAttr(writer, present: false);
+                    });
+                }
+
+                if (index == 4)
+                    return NfsReply(call, _ => { });
+
+                if (index == 3)
+                {
+                    var lookupArguments = new XdrReader(call.Arguments);
+                    Assert.Equal(FixtureHandle, lookupArguments.Opaque());
+                    Assert.Equal(interruptedWriteName, lookupArguments.Str());
+                    return NfsReply(call, writer =>
+                    {
+                        writer.UInt(NfsV3Status.Ok);
+                        writer.Opaque([0xE2]);
+                        WritePostOpAttr(writer, present: false);
+                        WritePostOpAttr(writer, present: false);
+                    });
+                }
+
+                var removeArguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, removeArguments.Opaque());
+                Assert.Equal(index == 1 ? lostCreateName : interruptedWriteName, removeArguments.Str());
+                return NfsReply(call, writer =>
+                {
+                    writer.UInt(NfsV3Status.Ok);
+                    WritePostOpAttr(writer, present: false);
+                    WritePostOpAttr(writer, present: false);
+                });
+            },
+            closeConnectionAtRequestIndices: new HashSet<int> { 0, 4 });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+        await using var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+
+        await using var input = new MemoryStream([0x01, 0x02, 0x03], writable: false);
+        var failure = await Record.ExceptionAsync(
+            () => client.WriteFileSafelyAsync("target.bin", input, CancellationToken.None));
+
+        Assert.NotNull(failure);
+        Assert.Equal(2, nfs.RequestCount);
+
+        await using var secondInput = new MemoryStream([0x04, 0x05, 0x06], writable: false);
+        failure = await Record.ExceptionAsync(
+            () => client.WriteFileSafelyAsync("target.bin", secondInput, CancellationToken.None));
+
+        Assert.NotNull(failure);
+        Assert.Equal(6, nfs.RequestCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NfsV3Client_SafeWriteCommitsUnstableDataBeforeRename(bool changeCommitVerifier)
+    {
+        byte[] writeVerifier = [1, 2, 3, 4, 5, 6, 7, 8];
+        byte[] commitVerifier = changeCommitVerifier ? [8, 7, 6, 5, 4, 3, 2, 1] : writeVerifier;
+        string? temporaryName = null;
+        uint[] procedures = changeCommitVerifier ? [8, 7, 21, 12] : [8, 7, 21, 3, 2, 1, 14];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            if (index == 0)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                temporaryName = arguments.Str();
+            }
+            else if (index == 1)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal([0xE1], arguments.Opaque());
+                Assert.Equal(0ul, arguments.ULong());
+                Assert.Equal(3u, arguments.UInt());
+                Assert.Equal((uint)NfsWriteStableHow.Unstable, arguments.UInt());
+                Assert.Equal(new byte[] { 0x11, 0x22, 0x33 }, arguments.Opaque());
+            }
+            else if (index == 2)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal([0xE1], arguments.Opaque());
+                Assert.Equal(0ul, arguments.ULong());
+                Assert.Equal(0u, arguments.UInt()); // COMMIT the complete staged file before RENAME.
+            }
+            else if (changeCommitVerifier && index == 3)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                Assert.Equal(temporaryName, arguments.Str());
+            }
+            else if (!changeCommitVerifier && index == 3)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                Assert.Equal("target.bin", arguments.Str());
+            }
+
+            return NfsReply(call, writer =>
+            {
+                writer.UInt(index == 3 && !changeCommitVerifier ? NfsV3Status.NoEnt : NfsV3Status.Ok);
+                switch (index)
+                {
+                    case 0:
+                        WriteDiropResult(writer, [0xE1]);
+                        break;
+                    case 1:
+                        WriteWccData(writer);
+                        writer.UInt(3);
+                        writer.UInt((uint)NfsWriteStableHow.Unstable);
+                        writer.FixedBytes(writeVerifier);
+                        break;
+                    case 2:
+                        WriteWccData(writer);
+                        writer.FixedBytes(commitVerifier);
+                        break;
+                    case 3 when changeCommitVerifier:
+                        WriteWccData(writer);
+                        WriteWccData(writer);
+                        break;
+                    case 3:
+                        WritePostOpAttr(writer, present: false);
+                        break;
+                    case 4:
+                        WriteWccData(writer);
+                        break;
+                    case 5:
+                        WriteFattr3(writer, NfsType.Reg, 3);
+                        break;
+                    case 6:
+                        WriteWccData(writer);
+                        WriteWccData(writer);
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unexpected safe-write durability request {index}.");
+                }
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+        await using var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export",
+            CreateFixtureOptions(portmap.Port) with { StableHow = NfsWriteStableHow.Unstable },
+            CancellationToken.None);
+
+        await using var input = new MemoryStream([0x11, 0x22, 0x33], writable: false);
+        if (changeCommitVerifier)
+        {
+            var failure = await Assert.ThrowsAsync<NfsException>(
+                () => client.WriteFileSafelyAsync("target.bin", input, CancellationToken.None));
+            Assert.Contains("COMMIT verifier changed", failure.Message);
+            Assert.Equal(4, nfs.RequestCount); // Cleanup follows the failed verifier check; RENAME was not sent.
+        }
+        else
+        {
+            var result = await client.WriteFileSafelyAsync("target.bin", input, CancellationToken.None);
+            Assert.Equal([0xE1], result.Handle);
+            Assert.Equal(3L, result.Attr!.Size);
+            Assert.Equal(7, nfs.RequestCount); // COMMIT precedes destination lookup, SETATTR, GETATTR, and RENAME.
+        }
     }
 
     [Fact]
@@ -2440,6 +2657,7 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
 
     private readonly TcpListener _listener;
     private readonly Task _serveTask;
+    private int _requestCount;
 
     public RpcFixtureServer(
         int expectedRequests,
@@ -2452,7 +2670,8 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
     public RpcFixtureServer(
         int expectedRequests,
         Func<RpcFixtureCall, int, byte[]> reply,
-        bool readRequests = true)
+        bool readRequests = true,
+        IReadOnlySet<int>? closeConnectionAtRequestIndices = null)
     {
         if (expectedRequests <= 0)
             throw new ArgumentOutOfRangeException(nameof(expectedRequests));
@@ -2460,10 +2679,12 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start();
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _serveTask = ServeAsync(expectedRequests, reply, readRequests);
+        _serveTask = ServeAsync(expectedRequests, reply, readRequests, closeConnectionAtRequestIndices);
     }
 
     public int Port { get; }
+
+    public int RequestCount => Volatile.Read(ref _requestCount);
 
     public Task WaitForRequestsAsync() => _serveTask.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -2516,9 +2737,17 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
         {
             // Listener shutdown races its accept loop.
         }
+        catch (SocketException)
+        {
+            // Stopping the listener aborts an outstanding AcceptTcpClientAsync on some platforms.
+        }
     }
 
-    private async Task ServeAsync(int expectedRequests, Func<RpcFixtureCall, int, byte[]> reply, bool readRequests)
+    private async Task ServeAsync(
+        int expectedRequests,
+        Func<RpcFixtureCall, int, byte[]> reply,
+        bool readRequests,
+        IReadOnlySet<int>? closeConnectionAtRequestIndices)
     {
         // Accepts connections until the scripted call count is exhausted; one connection may carry several calls.
         var index = 0;
@@ -2544,8 +2773,19 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
                     // Client closed the connection early; accept a replacement for the remaining calls.
                     break;
                 }
+                catch (IOException)
+                {
+                    // A reset during client teardown has the same meaning as an incomplete request.
+                    break;
+                }
 
-                var response = reply(call, index++);
+                Interlocked.Increment(ref _requestCount);
+
+                var requestIndex = index++;
+                var response = reply(call, requestIndex);
+                if (closeConnectionAtRequestIndices?.Contains(requestIndex) == true)
+                    break;
+
                 await SendRecordAsync(client.GetStream(), response);
             }
         }

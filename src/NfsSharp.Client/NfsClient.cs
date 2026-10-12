@@ -152,6 +152,14 @@ public sealed class NfsClient : IAsyncDisposable
         return RequireMounted().WriteFileAsync(destinationRemotePath, source, ct);
     }
 
+    /// <summary>Write to a sibling temporary file, then replace the destination when the server supports it.</summary>
+    public Task<NfsLookup> WriteSafelyAsync(
+        string destinationRemotePath, Stream source, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return RequireMounted().WriteFileSafelyAsync(destinationRemotePath, source, ct);
+    }
+
     /// <summary>WRITE a local file to an export-relative path.</summary>
     public Task<NfsLookup> WriteAsync(string destinationRemotePath, string sourceLocalPath, CancellationToken ct = default) =>
         RequireMounted().WriteFileAsync(destinationRemotePath, sourceLocalPath, ct);
