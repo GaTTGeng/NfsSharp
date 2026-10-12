@@ -82,6 +82,21 @@ public interface IRpcSecGssQopMechanism
     byte[] Unwrap(byte[] wrappedData, uint qop);
 }
 
+/// <summary>Result of an RPCSEC_GSS privacy wrap or unwrap operation.</summary>
+public readonly record struct RpcSecGssPrivacyResult(byte[] Data, uint Qop, bool ConfidentialityEstablished);
+
+/// <summary>
+/// Optional privacy contract that reports the actual QOP and confidentiality state returned by GSS.
+/// </summary>
+public interface IRpcSecGssPrivacyMechanism
+{
+    /// <summary>Wrap <paramref name="data"/> with confidentiality requested and report the protection state.</summary>
+    RpcSecGssPrivacyResult WrapPrivacy(byte[] data, uint qop);
+
+    /// <summary>Unwrap protected data and report the negotiated QOP and confidentiality state.</summary>
+    RpcSecGssPrivacyResult UnwrapPrivacy(byte[] wrappedData, uint qop);
+}
+
 /// <summary>Interface for GSSAPI security mechanisms (e.g., Kerberos).</summary>
 public interface IRpcSecGssMechanism : IDisposable
 {

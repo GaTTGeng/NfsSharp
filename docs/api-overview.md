@@ -28,12 +28,11 @@ AUTH_SYS NFSv3 calls can be outstanding concurrently on one TCP connection. The 
 
 ### RPCSEC_GSS security limits
 
-RPCSEC_GSS negotiation and mechanism extension points are available (`WithKerberos`, `WithGssMechanism`, `IRpcSecGssMechanism`, `IRpcSecGssQopMechanism`). The client now fail-closes on invalid or missing RPCSEC_GSS data-reply verifiers: an accepted reply is checked against the exact per-attempt sequence number and QOP before any procedure result is exposed, including accepted RPC errors.
+RPCSEC_GSS negotiation and mechanism extension points are available (`WithKerberos`, `WithGssMechanism`, `IRpcSecGssMechanism`, `IRpcSecGssQopMechanism`, `IRpcSecGssPrivacyMechanism`). Context establishment validates the final `seq_window` verifier. Data replies fail closed on invalid or missing RPCSEC_GSS verifiers, and integrity/privacy bodies are verified or unwrapped with the exact per-attempt sequence number and QOP before any procedure result is exposed.
 
 The following remain incomplete and **experimental**:
 
-- Context-establishment (`INIT`/`CONTINUE_INIT`) reply-verifier validation is not yet complete.
-- Integrity and privacy request/result body wrapping is not yet complete.
+- Real Kerberos mechanism support and end-to-end interoperability evidence remain incomplete. A custom mechanism must provide correct MIC and wrap/unwrap behavior; privacy mechanisms must also report the returned QOP and confidentiality state.
 - `NegotiateGssMechanism` performs Kerberos/NTLM token exchange only. .NET `NegotiateAuthentication` does not expose `GSS_GetMIC`/`GSS_VerifyMIC`, so it cannot seal the mandatory data-call header verifier and is rejected for every service, including `rpc_gss_svc_none`. `RpcSecGssMechanism.CanComputeMic` and `ProvidesCryptographicProtection` both report it as false. It is not an end-to-end security guarantee.
 - `NoOpGssMechanism` provides no cryptographic protection and is rejected for integrity/privacy service; it is for deterministic tests only (including `rpc_gss_svc_none` fixtures) and is never interoperability evidence.
 
@@ -67,6 +66,6 @@ Stream reads require a writable output stream, and stream writes require a reada
 - NFSv3 and NFSv4 model types.
 - NFS status codes and exception mapping.
 - AUTH_SYS options shared by client APIs.
-- RPCSEC_GSS extension contracts for authentication, integrity, and privacy work. Reply-verifier validation is fail-closed; full integrity/privacy body protection and Kerberos interoperability remain experimental (see Client layer notes above).
+- RPCSEC_GSS extension contracts for authentication, integrity, and privacy work. Context and data-reply verifiers fail closed, and protected bodies are checked before result decoding; real Kerberos interoperability remains experimental (see Client layer notes above).
 
 Use the protocol package directly for protocol tooling, tests, or integrations that do not need the high-level client package.

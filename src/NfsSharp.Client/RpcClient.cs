@@ -35,6 +35,8 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     private int _xid;
     private int _stopping;
 
+    private readonly record struct RpcCallReply(RpcReply Reply, XdrReader Body);
+
     internal RpcClient(
         RpcTransport transport,
         NfsClientOptions options,
@@ -230,7 +232,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         if (controlProcedure is not (RpcSecGssProc.Init or RpcSecGssProc.ContinueInit))
             throw new ArgumentOutOfRangeException(nameof(controlProcedure));
 
-        return await CallOnceReplyAsync(
+        return (await CallOnceReplyAsync(
             await RequireHealthyConnectionAsync(ct),
             NfsRpcConstants.ProgNfs,
             NfsRpcConstants.VerNfs,
@@ -238,7 +240,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             arguments,
             ct,
             controlProcedure,
-            contextHandle);
+            contextHandle)).Reply;
     }
 
     internal async ValueTask DisposeActiveConnectionForTestingAsync() =>
@@ -332,7 +334,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             controlProcedure: null,
             controlContextHandle: null)).Body;
 
-    private async Task<RpcReply> CallOnceReplyAsync(
+    private async Task<RpcCallReply> CallOnceReplyAsync(
         RpcConnection connection,
         uint program,
         uint version,
@@ -415,7 +417,10 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 writer.UInt(0);
             }
 
-            writer.Raw(arguments);
+            var wireArguments = gssRecord is null
+                ? arguments
+                : _gssSession.ProtectArguments(arguments, gssRecord);
+            writer.Raw(wireArguments);
             _logger?.LogDebug(
                 "Sending RPC call (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, queueMs={QueueMs}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
                 xid,
@@ -433,6 +438,10 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             if (gssRecord is not null)
                 _gssSession.VerifyReply(reply, gssRecord);
             EnsureAcceptSuccess(reply, program, version, procedure);
+            // Decode protected result bodies only after both the RPC verifier and accept status pass.
+            var procedureBody = gssRecord is null
+                ? reply.Body
+                : _gssSession.UnprotectReplyBody(reply, gssRecord);
             _logger?.LogDebug(
                 "Received RPC reply (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
                 xid,
@@ -442,7 +451,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 connection.Generation,
                 connection.PendingCallCount,
                 connection.PendingCallHighWaterMark);
-            return reply;
+            return new RpcCallReply(reply, procedureBody);
         }
         finally
         {

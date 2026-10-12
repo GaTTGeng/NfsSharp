@@ -144,6 +144,160 @@ internal sealed class RpcSecGssSession
             record.ToString());
     }
 
+    /// <summary>Protect procedure arguments according to the attempt's RFC 2203 service.</summary>
+    internal byte[] ProtectArguments(byte[] arguments, RpcSecGssCallRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+        ArgumentNullException.ThrowIfNull(record);
+
+        if (record.Service == RpcSecGssService.None)
+            return arguments;
+
+        var context = RequireCallContext(record);
+        var databody = new XdrWriter();
+        databody.UInt(record.SeqNum);
+        databody.Raw(arguments);
+        var databodyBytes = databody.ToArray();
+        var protectedBody = new XdrWriter();
+
+        switch (record.Service)
+        {
+            case RpcSecGssService.Integrity:
+                // RFC 2203 §5.3.2.2 MIC covers the databody bytes, excluding both opaque wrappers.
+                byte[] checksum;
+                try
+                {
+                    checksum = RpcSecGssMechanism.GetMic(context.Mechanism, databodyBytes, record.Qop);
+                }
+                catch
+                {
+                    throw new NfsException($"RPCSEC_GSS mechanism failed to protect integrity arguments ({record}).");
+                }
+                if (checksum.Length == 0)
+                    throw new NfsException($"RPCSEC_GSS mechanism produced an empty argument MIC ({record}).");
+                protectedBody.Opaque(databodyBytes);
+                protectedBody.Opaque(checksum);
+                break;
+
+            case RpcSecGssService.Privacy:
+                var privacyMechanism = context.Mechanism as IRpcSecGssPrivacyMechanism
+                    ?? throw new NfsException(
+                        $"RPCSEC_GSS privacy requires a mechanism that reports confidentiality and QOP ({record}).");
+                RpcSecGssPrivacyResult wrapped;
+                try
+                {
+                    wrapped = privacyMechanism.WrapPrivacy(databodyBytes, record.Qop);
+                }
+                catch
+                {
+                    throw new NfsException($"RPCSEC_GSS mechanism failed to protect privacy arguments ({record}).");
+                }
+                if (wrapped.Data is null || wrapped.Data.Length == 0)
+                    throw new NfsException($"RPCSEC_GSS mechanism produced an empty privacy body ({record}).");
+                if (wrapped.Qop != record.Qop || !wrapped.ConfidentialityEstablished)
+                    throw new NfsException($"RPCSEC_GSS mechanism did not provide the requested privacy protection ({record}).");
+                protectedBody.Opaque(wrapped.Data);
+                break;
+
+            default:
+                throw new NfsException($"Unsupported RPCSEC_GSS service {record.Service} ({record}).");
+        }
+
+        return protectedBody.ToArray();
+    }
+
+    /// <summary>Authenticate and unwrap a successful procedure result before exposing it to an NFS decoder.</summary>
+    internal XdrReader UnprotectReplyBody(RpcReply reply, RpcSecGssCallRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(reply);
+        ArgumentNullException.ThrowIfNull(record);
+
+        if (record.Service == RpcSecGssService.None)
+            return reply.Body;
+
+        var context = RequireCallContext(record);
+        try
+        {
+            byte[] databodyBytes;
+            var envelope = new XdrReader(reply.Body.ReadRemainingBytes());
+            if (record.Service == RpcSecGssService.Integrity)
+            {
+                // The first opaque contains seq_num + results; the second carries its MIC.
+                databodyBytes = envelope.Opaque();
+                var checksum = envelope.Opaque();
+                if (envelope.Remaining != 0)
+                    throw new NfsException("RPCSEC_GSS integrity result contains trailing data.");
+                bool verified;
+                try
+                {
+                    verified = checksum.Length != 0 && RpcSecGssMechanism.VerifyMic(
+                        context.Mechanism,
+                        databodyBytes,
+                        checksum,
+                        record.Qop);
+                }
+                catch
+                {
+                    throw new NfsException("RPCSEC_GSS mechanism failed to verify the integrity result MIC.");
+                }
+                if (!verified)
+                    throw new NfsException("RPCSEC_GSS integrity result MIC verification failed.");
+            }
+            else if (record.Service == RpcSecGssService.Privacy)
+            {
+                var wrapped = envelope.Opaque();
+                if (envelope.Remaining != 0)
+                    throw new NfsException("RPCSEC_GSS privacy result contains trailing data.");
+                var privacyMechanism = context.Mechanism as IRpcSecGssPrivacyMechanism
+                    ?? throw new NfsException("RPCSEC_GSS privacy requires a mechanism that reports confidentiality and QOP.");
+                RpcSecGssPrivacyResult unwrapped;
+                try
+                {
+                    unwrapped = privacyMechanism.UnwrapPrivacy(wrapped, record.Qop);
+                }
+                catch
+                {
+                    throw new NfsException("RPCSEC_GSS mechanism failed to unwrap the privacy result.");
+                }
+                if (unwrapped.Data is null || unwrapped.Qop != record.Qop || !unwrapped.ConfidentialityEstablished)
+                    throw new NfsException("RPCSEC_GSS privacy result did not provide the requested confidentiality and QOP.");
+                databodyBytes = unwrapped.Data;
+            }
+            else
+            {
+                throw new NfsException($"Unsupported RPCSEC_GSS service {record.Service}.");
+            }
+
+            var data = new XdrReader(databodyBytes);
+            var returnedSequence = data.UInt();
+            if (returnedSequence != record.SeqNum)
+                throw new NfsException(
+                    $"RPCSEC_GSS protected result sequence mismatch: expected {record.SeqNum}, got {returnedSequence} ({record}).");
+
+            return new XdrReader(data.ReadRemainingBytes());
+        }
+        catch (NfsException ex)
+        {
+            if (ex.Message.Contains(record.ToString(), StringComparison.Ordinal))
+                throw;
+            throw new NfsException($"RPCSEC_GSS protected result rejected ({record}): {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            throw new NfsException($"RPCSEC_GSS protected result rejected due to {ex.GetType().Name} ({record}).");
+        }
+    }
+
+    private RpcSecGssContext RequireCallContext(RpcSecGssCallRecord record)
+    {
+        var context = _context ?? throw new NfsException("RPCSEC_GSS context is unavailable.");
+        if (record.ContextGeneration != _contextGeneration ||
+            !ReferenceEquals(context.Mechanism, _options.GssMechanism) ||
+            context.Service != record.Service)
+            throw new NfsException($"RPCSEC_GSS context changed while processing a protected body ({record}).");
+        return context;
+    }
+
     /// <summary>Run RPCSEC_GSS context establishment and store the resulting server context handle.</summary>
     internal async Task EstablishAsync(string server, RpcClient rpcClient, CancellationToken ct)
     {

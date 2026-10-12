@@ -237,6 +237,14 @@ public sealed record NfsClientOptions
                 "The configured GSS mechanism does not provide cryptographic integrity/privacy " +
                 "(NoOpGssMechanism and NegotiateGssMechanism are excluded) and cannot be used with integrity or privacy service.");
         }
+
+        if (GssMechanism is not null &&
+            GssService == RpcSecGssService.Privacy &&
+            GssMechanism is not IRpcSecGssPrivacyMechanism)
+        {
+            throw new NfsException(
+                "RPCSEC_GSS privacy requires a mechanism that reports the negotiated QOP and confidentiality state.");
+        }
     }
 }
 

@@ -181,6 +181,129 @@ public class RpcSecGssTests
     }
 
     [Fact]
+    public void ProtectArguments_IntegrityEncodesSequenceAndMicOverDatabody()
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = CreateEstablishedSession(mechanism);
+        var record = session.BeginDataCall(Xid, 100003, 3, 1);
+        var arguments = new XdrWriter();
+        arguments.UInt(0x0102_0304);
+        arguments.UInt(7);
+
+        var protectedArguments = session.ProtectArguments(arguments.ToArray(), record);
+        var envelope = new XdrReader(protectedArguments);
+        var databody = envelope.Opaque();
+        var checksum = envelope.Opaque();
+        Assert.Equal(0, envelope.Remaining);
+
+        var expected = new XdrWriter();
+        expected.UInt(record.SeqNum);
+        expected.Raw(arguments.ToArray());
+        Assert.Equal(expected.ToArray(), databody);
+        Assert.Equal(FakeGssMechanism.Mac(databody, record.Qop), checksum);
+    }
+
+    [Fact]
+    public void UnprotectReplyBody_IntegrityVerifiesBeforeReturningResult()
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = CreateEstablishedSession(mechanism);
+        var record = session.BeginDataCall(Xid, 100003, 3, 1);
+        var result = new XdrWriter();
+        result.UInt(0x1234);
+        result.UInt(0x5678);
+        var databody = new XdrWriter();
+        databody.UInt(record.SeqNum);
+        databody.Raw(result.ToArray());
+        var envelope = new XdrWriter();
+        envelope.Opaque(databody.ToArray());
+        envelope.Opaque(FakeGssMechanism.Mac(databody.ToArray(), record.Qop));
+
+        var reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: envelope.ToArray());
+        var unprotected = session.UnprotectReplyBody(reply, record);
+        Assert.Equal(result.ToArray(), unprotected.ReadRemainingBytes());
+
+        var tampered = envelope.ToArray();
+        tampered[8] ^= 1; // Change protected result bytes while retaining the original MIC.
+        var badReply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: tampered);
+        var exception = Assert.Throws<NfsException>(() => session.UnprotectReplyBody(badReply, record));
+        Assert.Contains("MIC verification failed", exception.Message);
+    }
+
+    [Fact]
+    public void ProtectAndUnprotectArguments_PrivacyRequiresConfidentialityAndMatchingQop()
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = CreateEstablishedSession(mechanism, RpcSecGssService.Privacy);
+        var record = session.BeginDataCall(Xid, 100003, 3, 1);
+        var arguments = new XdrWriter();
+        arguments.UInt(0x0102_0304);
+        var expected = new XdrWriter();
+        expected.UInt(record.SeqNum);
+        expected.Raw(arguments.ToArray());
+
+        var protectedArguments = session.ProtectArguments(arguments.ToArray(), record);
+        var envelope = new XdrReader(protectedArguments);
+        var wrapped = envelope.Opaque();
+        Assert.Equal(0, envelope.Remaining);
+        Assert.Equal(expected.ToArray(), mechanism.UnwrapPrivacy(wrapped, record.Qop).Data);
+
+        var result = new XdrWriter();
+        result.UInt(42);
+        var replyDatabody = new XdrWriter();
+        replyDatabody.UInt(record.SeqNum);
+        replyDatabody.Raw(result.ToArray());
+        var replyBody = new XdrWriter();
+        replyBody.Opaque(mechanism.WrapPrivacy(replyDatabody.ToArray(), record.Qop).Data);
+        var reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: replyBody.ToArray());
+        Assert.Equal(result.ToArray(), session.UnprotectReplyBody(reply, record).ReadRemainingBytes());
+
+        var tamperedBody = replyBody.ToArray();
+        tamperedBody[^1] ^= 0x01;
+        reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: tamperedBody);
+        Assert.Contains("failed to unwrap", Assert.Throws<NfsException>(() => session.UnprotectReplyBody(reply, record)).Message);
+
+        mechanism.ReportedQopOffset = 1;
+        Assert.Throws<NfsException>(() => session.ProtectArguments(arguments.ToArray(), record));
+        Assert.Throws<NfsException>(() => session.UnprotectReplyBody(
+            ParseAcceptedReply(
+                record,
+                FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop),
+                body: replyBody.ToArray()),
+            record));
+        mechanism.ReportedQopOffset = 0;
+
+        mechanism.ReportConfidentiality = false;
+        Assert.Throws<NfsException>(() => session.ProtectArguments(arguments.ToArray(), record));
+        Assert.Throws<NfsException>(() => session.UnprotectReplyBody(reply, record));
+    }
+
+    [Fact]
+    public void UnprotectReplyBody_RejectsSequenceMismatchAndTrailingEnvelopeData()
+    {
+        var session = CreateEstablishedSession(new FakeGssMechanism());
+        var record = session.BeginDataCall(Xid, 100003, 3, 1);
+        var wrongSequence = new XdrWriter();
+        wrongSequence.UInt(record.SeqNum + 1);
+        var integrity = new XdrWriter();
+        integrity.Opaque(wrongSequence.ToArray());
+        integrity.Opaque(FakeGssMechanism.Mac(wrongSequence.ToArray(), record.Qop));
+        var reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: integrity.ToArray());
+        var sequenceException = Assert.Throws<NfsException>(() => session.UnprotectReplyBody(reply, record));
+        Assert.True(sequenceException.Message.Contains("sequence mismatch", StringComparison.Ordinal), sequenceException.Message);
+
+        var trailing = new XdrWriter();
+        trailing.Opaque(wrongSequence.ToArray());
+        trailing.Opaque(FakeGssMechanism.Mac(wrongSequence.ToArray(), record.Qop));
+        trailing.UInt(0xDEAD_BEEF);
+        reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: trailing.ToArray());
+        Assert.Contains("trailing data", Assert.Throws<NfsException>(() => session.UnprotectReplyBody(reply, record)).Message);
+
+        reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: [0, 0, 0]);
+        Assert.Contains("protected result rejected", Assert.Throws<NfsException>(() => session.UnprotectReplyBody(reply, record)).Message);
+    }
+
+    [Fact]
     public void VerifyReply_RejectsReplyFromReplacedContextGeneration()
     {
         var mechanism = new FakeGssMechanism();
@@ -635,22 +758,25 @@ public class RpcSecGssTests
             Mechanism = mechanism,
         };
 
-    private static RpcSecGssSession CreateEstablishedSession(FakeGssMechanism mechanism)
+    private static RpcSecGssSession CreateEstablishedSession(
+        FakeGssMechanism mechanism,
+        RpcSecGssService service = RpcSecGssService.Integrity)
     {
         var options = new NfsClientOptions
         {
             GssMechanism = mechanism,
-            GssService = RpcSecGssService.Integrity,
+            GssService = service,
         };
         var session = new RpcSecGssSession(options);
-        session.InstallContext(NewContext(mechanism, RpcSecGssService.Integrity));
+        session.InstallContext(NewContext(mechanism, service));
         return session;
     }
 
     private static RpcReply ParseAcceptedReply(
         RpcSecGssCallRecord record,
         byte[] verifier,
-        uint verifierFlavor = (uint)RpcSecGssFlavor.Gss)
+        uint verifierFlavor = (uint)RpcSecGssFlavor.Gss,
+        byte[]? body = null)
     {
         var fixture = new XdrWriter();
         fixture.UInt(record.Xid);
@@ -659,6 +785,8 @@ public class RpcSecGssTests
         fixture.UInt(verifierFlavor);
         fixture.Opaque(verifier);
         fixture.UInt(0); // SUCCESS
+        if (body is not null)
+            fixture.Raw(body);
         return RpcReplyParser.DecodeAccepted(fixture.ToArray(), record.Xid);
     }
 
@@ -779,7 +907,8 @@ public class RpcSecGssTests
     /// Deterministic fake GSS mechanism. The MIC is a function of both the data bytes and the QOP,
     /// so a no-op or QOP-blind verifier cannot accidentally pass negative fixtures.
     /// </summary>
-    private sealed class FakeGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism, IRpcSecGssMechanismCapabilities
+    private sealed class FakeGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism,
+        IRpcSecGssMechanismCapabilities, IRpcSecGssPrivacyMechanism
     {
         public byte[] MechanismOid => [0x2A];
         public bool IsEstablished { get; set; } = true;
@@ -793,6 +922,8 @@ public class RpcSecGssTests
         public RpcSecGssService NegotiatedService { get; set; }
         public bool ProvidesCryptographicProtection => true;
         public bool CanComputeMic => true;
+        public bool ReportConfidentiality { get; set; } = true;
+        public uint ReportedQopOffset { get; set; }
 
         public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
             Task.FromResult(new byte[] { 0x01 });
@@ -818,6 +949,25 @@ public class RpcSecGssTests
         }
         public byte[] Wrap(byte[] data, uint qop) => data;
         public byte[] Unwrap(byte[] wrappedData, uint qop) => wrappedData;
+        public RpcSecGssPrivacyResult WrapPrivacy(byte[] data, uint qop)
+        {
+            var checksum = Mac(data, qop);
+            var wrapped = new byte[data.Length + checksum.Length];
+            data.CopyTo(wrapped, 0);
+            checksum.CopyTo(wrapped, data.Length);
+            return new RpcSecGssPrivacyResult(wrapped, qop + ReportedQopOffset, ReportConfidentiality);
+        }
+
+        public RpcSecGssPrivacyResult UnwrapPrivacy(byte[] wrappedData, uint qop)
+        {
+            if (wrappedData.Length < 8)
+                throw new NfsException("Invalid fake privacy token.");
+            var data = wrappedData.AsSpan(0, wrappedData.Length - 8).ToArray();
+            var checksum = wrappedData.AsSpan(wrappedData.Length - 8).ToArray();
+            if (!VerifyMic(data, checksum, qop))
+                throw new NfsException("Invalid fake privacy MIC.");
+            return new RpcSecGssPrivacyResult(data, qop + ReportedQopOffset, ReportConfidentiality);
+        }
         public void Dispose() => Disposed = true;
 
         internal static byte[] Mac(byte[] data, uint qop)
