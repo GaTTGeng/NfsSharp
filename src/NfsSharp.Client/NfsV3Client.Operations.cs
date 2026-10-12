@@ -178,6 +178,50 @@ public sealed partial class NfsV3Client
         }
     }
 
+    private async Task WriteSafeFileAsync(byte[] fileHandle, Stream input, CancellationToken ct)
+    {
+        var buffer = new byte[_options.MaxWriteSize];
+        ulong offset = 0;
+        byte[]? pendingWriteVerifier = null;
+
+        // Track the verifier only while writes still need COMMIT; a change means earlier unstable data may be lost.
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer.AsMemory(), ct);
+            if (read == 0) break;
+            var written = 0;
+            while (written < read)
+            {
+                var result = await _protocolClient.WriteAsync(
+                    fileHandle, offset, buffer.AsMemory(written, read - written), ct);
+                if (result.Count <= 0) throw new NfsException("WRITE made no progress.");
+
+                if (pendingWriteVerifier is not null &&
+                    !pendingWriteVerifier.AsSpan().SequenceEqual(result.WriteVerifier))
+                {
+                    throw new NfsException("WRITE verifier changed before safe-write data was committed.");
+                }
+
+                if (result.Committed != NfsWriteStableHow.FileSync)
+                {
+                    pendingWriteVerifier ??= result.WriteVerifier;
+                }
+
+                written += result.Count;
+                offset += (ulong)result.Count;
+            }
+        }
+
+        if (pendingWriteVerifier is null) return;
+
+        // A successful COMMIT must confirm the same stable store as every pending WRITE reply.
+        var commit = await CommitWithResultAsync(fileHandle, 0, 0, ct);
+        if (!pendingWriteVerifier.AsSpan().SequenceEqual(commit.WriteVerifier))
+        {
+            throw new NfsException("COMMIT verifier changed after safe-write data was written.");
+        }
+    }
+
     /// <summary>Create or truncate a file, then write stream content.</summary>
     public async Task<NfsLookup> WriteFileAsync(string remotePath, Stream input, CancellationToken ct)
     {
@@ -238,7 +282,7 @@ public sealed partial class NfsV3Client
                 temporaryFile = await LookupAsync(parent, temporaryName, ct);
             }
 
-            await WriteFileAsync(temporaryFile.Handle, input, ct);
+            await WriteSafeFileAsync(temporaryFile.Handle, input, ct);
             var destinationMode = await GetExistingFileModeOrDefaultAsync(parent, name, ct);
             await SetAttributesAsync(
                 temporaryFile.Handle, new NfsSetAttributes { Mode = destinationMode }, ct);

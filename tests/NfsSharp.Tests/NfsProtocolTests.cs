@@ -1383,6 +1383,117 @@ public class NfsModelsTests
         Assert.Equal(6, nfs.RequestCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NfsV3Client_SafeWriteCommitsUnstableDataBeforeRename(bool changeCommitVerifier)
+    {
+        byte[] writeVerifier = [1, 2, 3, 4, 5, 6, 7, 8];
+        byte[] commitVerifier = changeCommitVerifier ? [8, 7, 6, 5, 4, 3, 2, 1] : writeVerifier;
+        string? temporaryName = null;
+        uint[] procedures = changeCommitVerifier ? [8, 7, 21, 12] : [8, 7, 21, 3, 2, 1, 14];
+        await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, procedures[index]);
+            if (index == 0)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                temporaryName = arguments.Str();
+            }
+            else if (index == 1)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal([0xE1], arguments.Opaque());
+                Assert.Equal(0ul, arguments.ULong());
+                Assert.Equal(3u, arguments.UInt());
+                Assert.Equal((uint)NfsWriteStableHow.Unstable, arguments.UInt());
+                Assert.Equal(new byte[] { 0x11, 0x22, 0x33 }, arguments.Opaque());
+            }
+            else if (index == 2)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal([0xE1], arguments.Opaque());
+                Assert.Equal(0ul, arguments.ULong());
+                Assert.Equal(0u, arguments.UInt()); // COMMIT the complete staged file before RENAME.
+            }
+            else if (changeCommitVerifier && index == 3)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                Assert.Equal(temporaryName, arguments.Str());
+            }
+            else if (!changeCommitVerifier && index == 3)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                Assert.Equal("target.bin", arguments.Str());
+            }
+
+            return NfsReply(call, writer =>
+            {
+                writer.UInt(index == 3 && !changeCommitVerifier ? NfsV3Status.NoEnt : NfsV3Status.Ok);
+                switch (index)
+                {
+                    case 0:
+                        WriteDiropResult(writer, [0xE1]);
+                        break;
+                    case 1:
+                        WriteWccData(writer);
+                        writer.UInt(3);
+                        writer.UInt((uint)NfsWriteStableHow.Unstable);
+                        writer.FixedBytes(writeVerifier);
+                        break;
+                    case 2:
+                        WriteWccData(writer);
+                        writer.FixedBytes(commitVerifier);
+                        break;
+                    case 3 when changeCommitVerifier:
+                        WriteWccData(writer);
+                        WriteWccData(writer);
+                        break;
+                    case 3:
+                        WritePostOpAttr(writer, present: false);
+                        break;
+                    case 4:
+                        WriteWccData(writer);
+                        break;
+                    case 5:
+                        WriteFattr3(writer, NfsType.Reg, 3);
+                        break;
+                    case 6:
+                        WriteWccData(writer);
+                        WriteWccData(writer);
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unexpected safe-write durability request {index}.");
+                }
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+        await using var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export",
+            CreateFixtureOptions(portmap.Port) with { StableHow = NfsWriteStableHow.Unstable },
+            CancellationToken.None);
+
+        await using var input = new MemoryStream([0x11, 0x22, 0x33], writable: false);
+        if (changeCommitVerifier)
+        {
+            var failure = await Assert.ThrowsAsync<NfsException>(
+                () => client.WriteFileSafelyAsync("target.bin", input, CancellationToken.None));
+            Assert.Contains("COMMIT verifier changed", failure.Message);
+            Assert.Equal(4, nfs.RequestCount); // Cleanup follows the failed verifier check; RENAME was not sent.
+        }
+        else
+        {
+            var result = await client.WriteFileSafelyAsync("target.bin", input, CancellationToken.None);
+            Assert.Equal([0xE1], result.Handle);
+            Assert.Equal(3L, result.Attr!.Size);
+            Assert.Equal(7, nfs.RequestCount); // COMMIT precedes destination lookup, SETATTR, GETATTR, and RENAME.
+        }
+    }
+
     [Fact]
     // Rejects write replies whose committed field is not a valid stable_how, and verifier fields shorter than 8 bytes.
     public async Task NfsV3Client_WriteAndCommitResultsValidateWireFieldsAndBoundaries()
