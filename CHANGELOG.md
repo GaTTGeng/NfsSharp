@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Added opt-in `WriteSafelyAsync` / `WriteFileSafelyAsync` APIs that stage streamed content in a guarded-created sibling file and rename it into place after a complete transfer.
+- Added opt-in `WriteSafelyAsync` / `WriteFileSafelyAsync` APIs that stage streamed writes privately in a guarded-created sibling file, preserve an existing destination's mode, and rename into place after a complete transfer.
 - Added bounded concurrent AUTH_SYS RPC calls over one NFSv3 TCP connection, dispatched by XID through a single receive loop; RPCSEC_GSS calls remain serialized.
 - Added `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` and `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`, defaulting to 32 outstanding calls.
 - Added immutable per-attempt RPCSEC_GSS security records (`RpcSecGssCallRecord`) carrying XID, sequence number, service, QOP, context generation, and procedure identity. Sequence numbers are allocated once per transmitted attempt, including retries.

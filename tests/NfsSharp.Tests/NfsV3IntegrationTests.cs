@@ -993,6 +993,12 @@ public sealed class NfsV3IntegrationTests
         var destination = fixture.GetRunPath("safe-write.txt");
         var original = new byte[] { 0x10, 0x11, 0x12 };
         await WriteBytesAsync(client, destination, original, timeout.Token);
+        var destinationEntry = Assert.Single(
+            await client.ReadDirPlusAsync(fixture.RunDirectory, timeout.Token),
+            entry => entry.Name == "safe-write.txt");
+        Assert.NotNull(destinationEntry.Handle);
+        await client.SetAttributesAsync(
+            destinationEntry.Handle!, new NfsSetAttributes { Mode = 0x180 }, timeout.Token);
 
         await using (var input = new FailAfterFirstReadStream([0x20, 0x21, 0x22]))
         {
@@ -1001,6 +1007,7 @@ public sealed class NfsV3IntegrationTests
         }
 
         Assert.Equal(original, await ReadBytesAsync(client, destination, timeout.Token));
+        Assert.Equal(0x180u, (await client.GetAttributesAsync(destination, timeout.Token)).Mode & 0x1FF);
         await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
 
         using var canceled = new CancellationTokenSource();
@@ -1011,6 +1018,7 @@ public sealed class NfsV3IntegrationTests
         }
 
         Assert.Equal(original, await ReadBytesAsync(client, destination, timeout.Token));
+        Assert.Equal(0x180u, (await client.GetAttributesAsync(destination, timeout.Token)).Mode & 0x1FF);
         await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
 
         var replacement = new byte[] { 0x35, 0x36 };
@@ -1035,6 +1043,7 @@ public sealed class NfsV3IntegrationTests
             Assert.Equal(expectedReplacementOutcome, replacementOutcome);
         }
 
+        Assert.Equal(0x180u, (await client.GetAttributesAsync(destination, timeout.Token)).Mode & 0x1FF);
         await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
 
         var newDestination = fixture.GetRunPath("safe-write-new.txt");
@@ -1045,6 +1054,7 @@ public sealed class NfsV3IntegrationTests
         }
 
         Assert.Equal(newContent, await ReadBytesAsync(client, newDestination, timeout.Token));
+        Assert.Equal(0x1A4u, (await client.GetAttributesAsync(newDestination, timeout.Token)).Mode & 0x1FF);
         await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
     }
 

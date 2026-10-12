@@ -1154,6 +1154,14 @@ public class NfsModelsTests
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
         {
             AssertNfsProcedure(call, procedures[index]);
+            if (index is 2 or 3)
+            {
+                var arguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, arguments.Opaque());
+                Assert.Equal("created", arguments.Str());
+                Assert.Equal(0u, arguments.UInt()); // Default CREATE mode is UNCHECKED per RFC 1813.
+            }
+
             return NfsReply(call, writer =>
             {
                 switch (index)
@@ -1280,26 +1288,40 @@ public class NfsModelsTests
     [Fact]
     public async Task NfsV3Client_SafeWriteRemovesTemporaryFileAfterTransportFailure()
     {
-        string? temporaryName = null;
+        string? lostCreateName = null;
+        string? interruptedWriteName = null;
         await using var nfs = new RpcFixtureServer(
-            3,
+            5,
             (call, index) =>
             {
                 AssertNfsProcedure(call, index switch
                 {
-                    0 => 8u,  // CREATE temporary file
-                    1 => 7u,  // WRITE; the fixture drops this connection
-                    2 => 12u, // REMOVE temporary file after reconnect
+                    0 or 2 => 8u, // CREATE temporary file
+                    1 or 4 => 12u, // REMOVE temporary file after reconnect
+                    3 => 7u, // WRITE; the fixture drops this connection
                     _ => throw new InvalidOperationException($"Unexpected request {index}.")
                 });
 
-                if (index == 0)
+                if (index is 0 or 2)
                 {
                     var arguments = new XdrReader(call.Arguments);
                     Assert.Equal(FixtureHandle, arguments.Opaque());
-                    temporaryName = arguments.Str();
+                    var temporaryName = arguments.Str();
                     Assert.StartsWith(".nfssharp-", temporaryName);
-                    Assert.Equal(0u, arguments.UInt()); // GUARDED CREATE prevents name-collision truncation.
+                    if (index == 0)
+                        lostCreateName = temporaryName;
+                    else
+                        interruptedWriteName = temporaryName;
+
+                    Assert.Equal(1u, arguments.UInt()); // GUARDED CREATE prevents name-collision truncation.
+                    Assert.True(arguments.Bool());
+                    Assert.Equal(0x180u, arguments.UInt()); // Staged bytes remain private until publish.
+                    Assert.False(arguments.Bool()); // uid
+                    Assert.False(arguments.Bool()); // gid
+                    Assert.False(arguments.Bool()); // size
+                    Assert.False(arguments.Bool()); // atime
+                    Assert.False(arguments.Bool()); // mtime
+                    Assert.Equal(0, arguments.Remaining);
                     return NfsReply(call, writer =>
                     {
                         writer.UInt(NfsV3Status.Ok);
@@ -1311,12 +1333,12 @@ public class NfsModelsTests
                     });
                 }
 
-                if (index == 1)
+                if (index == 3)
                     return NfsReply(call, _ => { });
 
                 var removeArguments = new XdrReader(call.Arguments);
                 Assert.Equal(FixtureHandle, removeArguments.Opaque());
-                Assert.Equal(temporaryName, removeArguments.Str());
+                Assert.Equal(index == 1 ? lostCreateName : interruptedWriteName, removeArguments.Str());
                 return NfsReply(call, writer =>
                 {
                     writer.UInt(NfsV3Status.Ok);
@@ -1324,7 +1346,7 @@ public class NfsModelsTests
                     WritePostOpAttr(writer, present: false);
                 });
             },
-            closeConnectionAtRequestIndices: new HashSet<int> { 1 });
+            closeConnectionAtRequestIndices: new HashSet<int> { 0, 3 });
         await using var mount = CreateMountedExportServer();
         await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
         await using var client = await NfsV3Client.ConnectAsync(
@@ -1335,7 +1357,14 @@ public class NfsModelsTests
             () => client.WriteFileSafelyAsync("target.bin", input, CancellationToken.None));
 
         Assert.NotNull(failure);
-        Assert.True(nfs.RequestCount == 3, $"Received {nfs.RequestCount} NFS requests; operation failed with {failure.GetType().Name}: {failure.Message}");
+        Assert.Equal(2, nfs.RequestCount);
+
+        await using var secondInput = new MemoryStream([0x04, 0x05, 0x06], writable: false);
+        failure = await Record.ExceptionAsync(
+            () => client.WriteFileSafelyAsync("target.bin", secondInput, CancellationToken.None));
+
+        Assert.NotNull(failure);
+        Assert.Equal(5, nfs.RequestCount);
     }
 
     [Fact]
@@ -2626,10 +2655,10 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
                 Interlocked.Increment(ref _requestCount);
 
                 var requestIndex = index++;
+                var response = reply(call, requestIndex);
                 if (closeConnectionAtRequestIndices?.Contains(requestIndex) == true)
                     break;
 
-                var response = reply(call, requestIndex);
                 await SendRecordAsync(client.GetStream(), response);
             }
         }

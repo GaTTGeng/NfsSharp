@@ -435,7 +435,7 @@ internal sealed class NfsV3ProtocolClient
         NfsPathResolver.ValidateName(name);
         var writer = HandleArguments(directoryHandle);
         writer.Str(name);
-        writer.UInt(guarded ? 0u : 1u); // createmode3 GUARDED/UNCHECKED, RFC 1813 §3.3.8.
+        writer.UInt(guarded ? 1u : 0u); // createmode3 GUARDED/UNCHECKED, RFC 1813 §3.3.8.
         WriteSattr3(writer, attributes ?? NfsSetAttributes.FileDefault);
         var reader = await CallAsync(NfsRpcConstants.NfsCreate, writer, ct);
         EnsureOk(reader.UInt(), $"CREATE \"{name}\" failed");
