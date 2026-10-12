@@ -1159,7 +1159,7 @@ public class NfsModelsTests
                 var arguments = new XdrReader(call.Arguments);
                 Assert.Equal(FixtureHandle, arguments.Opaque());
                 Assert.Equal("created", arguments.Str());
-                Assert.Equal(0u, arguments.UInt()); // Default CREATE mode is UNCHECKED per RFC 1813.
+                Assert.Equal(1u, arguments.UInt()); // Public CREATE is exclusive (GUARDED) per RFC 1813.
             }
 
             return NfsReply(call, writer =>

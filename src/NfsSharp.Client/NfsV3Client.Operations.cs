@@ -307,7 +307,7 @@ public sealed partial class NfsV3Client
     /// <summary>CREATE a file in a directory handle.</summary>
     public Task<NfsLookup> CreateFileAsync(
         byte[] dirFh, string name, NfsSetAttributes? attributes, CancellationToken ct) =>
-        _protocolClient.CreateFileAsync(dirFh, name, attributes, ct);
+        _protocolClient.CreateFileAsync(dirFh, name, attributes, ct, guarded: true);
     /// <summary>CREATE an export-relative file.</summary>
     public async Task<NfsLookup> CreateFileAsync(string path, CancellationToken ct)
     {
