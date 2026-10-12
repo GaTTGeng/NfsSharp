@@ -232,6 +232,12 @@ public sealed partial class NfsV3Client
 
         try
         {
+            // CREATE's post_op_fh3 is optional; recover the handle by name when the server omits it.
+            if (temporaryFile.Handle.Length == 0)
+            {
+                temporaryFile = await LookupAsync(parent, temporaryName, ct);
+            }
+
             await WriteFileAsync(temporaryFile.Handle, input, ct);
             var destinationMode = await GetExistingFileModeOrDefaultAsync(parent, name, ct);
             await SetAttributesAsync(

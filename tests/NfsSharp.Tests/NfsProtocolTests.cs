@@ -1291,14 +1291,15 @@ public class NfsModelsTests
         string? lostCreateName = null;
         string? interruptedWriteName = null;
         await using var nfs = new RpcFixtureServer(
-            5,
+            6,
             (call, index) =>
             {
                 AssertNfsProcedure(call, index switch
                 {
                     0 or 2 => 8u, // CREATE temporary file
-                    1 or 4 => 12u, // REMOVE temporary file after reconnect
-                    3 => 7u, // WRITE; the fixture drops this connection
+                    1 or 5 => 12u, // REMOVE temporary file after reconnect
+                    3 => 3u, // LOOKUP temporary name when CREATE omits its optional handle
+                    4 => 7u, // WRITE; the fixture drops this connection
                     _ => throw new InvalidOperationException($"Unexpected request {index}.")
                 });
 
@@ -1325,16 +1326,31 @@ public class NfsModelsTests
                     return NfsReply(call, writer =>
                     {
                         writer.UInt(NfsV3Status.Ok);
-                        writer.Bool(true);
-                        writer.Opaque([0xE1]);
+                        writer.Bool(index == 0);
+                        if (index == 0)
+                            writer.Opaque([0xE1]);
                         WritePostOpAttr(writer, present: false);
                         WritePostOpAttr(writer, present: false);
                         WritePostOpAttr(writer, present: false);
                     });
                 }
 
-                if (index == 3)
+                if (index == 4)
                     return NfsReply(call, _ => { });
+
+                if (index == 3)
+                {
+                    var lookupArguments = new XdrReader(call.Arguments);
+                    Assert.Equal(FixtureHandle, lookupArguments.Opaque());
+                    Assert.Equal(interruptedWriteName, lookupArguments.Str());
+                    return NfsReply(call, writer =>
+                    {
+                        writer.UInt(NfsV3Status.Ok);
+                        writer.Opaque([0xE2]);
+                        WritePostOpAttr(writer, present: false);
+                        WritePostOpAttr(writer, present: false);
+                    });
+                }
 
                 var removeArguments = new XdrReader(call.Arguments);
                 Assert.Equal(FixtureHandle, removeArguments.Opaque());
@@ -1346,7 +1362,7 @@ public class NfsModelsTests
                     WritePostOpAttr(writer, present: false);
                 });
             },
-            closeConnectionAtRequestIndices: new HashSet<int> { 0, 3 });
+            closeConnectionAtRequestIndices: new HashSet<int> { 0, 4 });
         await using var mount = CreateMountedExportServer();
         await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
         await using var client = await NfsV3Client.ConnectAsync(
@@ -1364,7 +1380,7 @@ public class NfsModelsTests
             () => client.WriteFileSafelyAsync("target.bin", secondInput, CancellationToken.None));
 
         Assert.NotNull(failure);
-        Assert.Equal(5, nfs.RequestCount);
+        Assert.Equal(6, nfs.RequestCount);
     }
 
     [Fact]
