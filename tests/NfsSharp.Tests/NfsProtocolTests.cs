@@ -1012,6 +1012,86 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_ReadFileContinuesAtReturnedOffsetAfterShortNonterminalRead()
+    {
+        const int readSize = 4;
+        await using var nfs = new RpcFixtureServer(2, (call, index) =>
+        {
+            AssertNfsProcedure(call, 6);
+            var request = new XdrReader(call.Arguments);
+            Assert.Equal(FixtureHandle, request.Opaque());
+            Assert.Equal(index == 0 ? 0ul : 2ul, request.ULong());
+            Assert.Equal((uint)readSize, request.UInt());
+            return NfsReply(call, writer =>
+            {
+                writer.UInt(NfsV3Status.Ok);
+                WritePostOpAttr(writer, present: false);
+                writer.UInt(index == 0 ? 2u : 1u);
+                writer.Bool(index != 0);
+                writer.Opaque(index == 0 ? [0x10, 0x20] : [0x30]);
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+        await using var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export",
+            CreateFixtureOptions(portmap.Port) with { MaxReadSize = readSize },
+            CancellationToken.None);
+
+        await using var output = new MemoryStream();
+        await client.ReadFileAsync(FixtureHandle, output, CancellationToken.None);
+
+        Assert.Equal(new byte[] { 0x10, 0x20, 0x30 }, output.ToArray());
+        await client.UnmountAsync(CancellationToken.None);
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_WriteFileResendsOnlyUnwrittenSuffixAfterShortWrite()
+    {
+        byte[] verifier = [0, 1, 2, 3, 4, 5, 6, 7];
+        byte[][] expectedData = [[0x10, 0x20, 0x30, 0x40], [0x30, 0x40], [0x50]];
+        ulong[] expectedOffsets = [0, 2, 4];
+        uint[] acceptedCounts = [2, 2, 1];
+        await using var nfs = new RpcFixtureServer(expectedData.Length, (call, index) =>
+        {
+            AssertNfsProcedure(call, 7);
+            var request = new XdrReader(call.Arguments);
+            Assert.Equal(FixtureHandle, request.Opaque());
+            Assert.Equal(expectedOffsets[index], request.ULong());
+            Assert.Equal((uint)expectedData[index].Length, request.UInt());
+            Assert.Equal((uint)NfsWriteStableHow.Unstable, request.UInt());
+            Assert.Equal(expectedData[index], request.Opaque());
+            Assert.Equal(0, request.Remaining);
+            return NfsReply(call, writer =>
+            {
+                writer.UInt(NfsV3Status.Ok);
+                WriteWccData(writer);
+                writer.UInt(acceptedCounts[index]);
+                writer.UInt((uint)NfsWriteStableHow.Unstable);
+                writer.FixedBytes(verifier);
+            });
+        });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+        await using var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export",
+            CreateFixtureOptions(portmap.Port) with
+            {
+                MaxWriteSize = 4,
+                StableHow = NfsWriteStableHow.Unstable
+            },
+            CancellationToken.None);
+
+        await using var input = new MemoryStream([0x10, 0x20, 0x30, 0x40, 0x50], writable: false);
+        await client.WriteFileAsync(FixtureHandle, input, CancellationToken.None);
+
+        Assert.Equal(expectedData.Length, nfs.RequestCount);
+        await client.UnmountAsync(CancellationToken.None);
+        await WaitForRequestsAsync(portmap, mount, nfs);
+    }
+
+    [Fact]
     // fattr3 size is unsigned 64-bit on the wire, but the public model exposes Int64; values above that range must be rejected.
     public async Task NfsV3Client_GetAttrRejectsFileSizesOutsideThePublicModelRange()
     {
