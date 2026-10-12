@@ -1626,9 +1626,9 @@ public sealed class NfsV3IntegrationTests
                 "kernel-service",
                 StringComparison.Ordinal))
         {
-            // The kernel server re-registers mountd on a new dynamic port; the old client reports the stale port failure.
-            Assert.NotNull(unmountFailure);
-            Assert.True(NfsRetryPolicy.IsTransient(unmountFailure));
+            // The kernel server may re-register mountd on a different dynamic port, while the old port can also remain valid.
+            if (unmountFailure is not null)
+                Assert.True(NfsRetryPolicy.IsTransient(unmountFailure));
         }
         else
         {
