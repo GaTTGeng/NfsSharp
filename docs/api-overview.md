@@ -24,6 +24,8 @@ NFSv3 over TCP is the primary supported protocol. The NFSv4 surface is experimen
 
 NFSv3 transient transport retries are conservative: automatic reconnect/retry is limited to retry-safe discovery, mount negotiation, read-only NFS procedures, and `COMMIT`. Mutating procedures such as `SETATTR`, `WRITE`, `CREATE`, `REMOVE`, `RENAME`, and link creation surface the transport failure to the caller instead of being replayed automatically.
 
+`NfsClientOptions.MaxRetries` sets the number of retries after the initial attempt. `RetryDelay` is a fixed delay between attempts, and caller cancellation interrupts that delay. A retry-safe procedure is sent again on a fresh connection after a transient transport failure; the RPC attempt receives a new XID. The client does not use exponential backoff, and applications should apply their own higher-level limits when coordinating repeated operations.
+
 AUTH_SYS NFSv3 calls can be outstanding concurrently on one TCP connection. The default bound is 32 and can be changed with `NfsClientOptions.MaxOutstandingRpcCallsPerConnection` or `NfsClientBuilder.WithMaxOutstandingRpcCallsPerConnection`. Replies are matched by XID. RPCSEC_GSS calls remain serialized and allocate a fresh protocol sequence number per transmitted attempt.
 
 ### RPCSEC_GSS security limits

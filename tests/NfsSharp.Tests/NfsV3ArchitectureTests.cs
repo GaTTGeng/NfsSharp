@@ -103,6 +103,38 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    public void DirectoryCache_ExpiryCheckDoesNotRemoveConcurrentRefresh()
+    {
+        var now = new DateTime(2026, 10, 12, 0, 0, 0, DateTimeKind.Utc);
+        var refreshDuringExpiryCheck = false;
+        NfsDirectoryCache? cache = null;
+        var options = NfsClientOptions.Default with
+        {
+            EnableDirectoryCache = true,
+            DirectoryCacheTtl = TimeSpan.FromMinutes(1)
+        };
+        byte[] directory = [1];
+        cache = new NfsDirectoryCache(options, () =>
+        {
+            if (refreshDuringExpiryCheck)
+            {
+                refreshDuringExpiryCheck = false;
+                cache!.Store(directory, [new NfsEntryPlus("fresh", 2, null, [3])], cache.CaptureMutationGeneration());
+            }
+
+            return now;
+        });
+        cache.Store(directory, [new NfsEntryPlus("expired", 1, null, [2])], cache.CaptureMutationGeneration());
+        now = now.AddMinutes(2);
+        refreshDuringExpiryCheck = true;
+
+        Assert.False(cache.TryGet(directory, out _));
+        Assert.True(cache.TryGet(directory, out var refreshed));
+        Assert.Equal("fresh", Assert.Single(refreshed).Name);
+        Assert.Equal(new byte[] { 3 }, refreshed[0].Handle);
+    }
+
+    [Fact]
     public async Task Transport_RecordSeamWritesAndReadsDeterministicFrames()
     {
         var stream = new MemoryStream();
@@ -502,6 +534,63 @@ public sealed class NfsV3ArchitectureTests
         await RpcTransport.SendRecordAsync(stream, reply.ToArray(), CancellationToken.None);
 
         Assert.Equal(0xCAFE_BABEu, (await nextCall).UInt());
+    }
+
+    [Fact]
+    public async Task RpcClient_RetriesReadOnFreshTcpConnectionAfterPeerDisconnect()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var options = NfsClientOptions.Default with
+        {
+            MaxRetries = 1,
+            RetryDelay = TimeSpan.Zero,
+            UsePrivilegedSourcePort = false
+        };
+        await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), options);
+        await rpc.ConnectAsync(port, CancellationToken.None);
+
+        var peer = Task.Run(async () =>
+        {
+            // The first TCP connection receives a complete request, then closes without a reply.
+            uint firstXid;
+            using (var firstSocket = await listener.AcceptSocketAsync().WaitAsync(TimeSpan.FromSeconds(2)))
+            using (var firstStream = new NetworkStream(firstSocket, ownsSocket: false))
+            {
+                var firstRequest = await RpcRecordStream.ReceiveAsync(firstStream, CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+                firstXid = BinaryPrimitives.ReadUInt32BigEndian(firstRequest);
+            }
+
+            // A complete request with no reply models a peer disappearing after receipt.
+            using var retrySocket = await listener.AcceptSocketAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            using var retryStream = new NetworkStream(retrySocket, ownsSocket: false);
+            var retryRequest = await RpcRecordStream.ReceiveAsync(retryStream, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(2));
+            var retryXid = BinaryPrimitives.ReadUInt32BigEndian(retryRequest);
+            var reply = new XdrWriter();
+            reply.UInt(retryXid);
+            reply.UInt(1);
+            reply.UInt(0);
+            reply.UInt(0);
+            reply.Opaque([]);
+            reply.UInt(0);
+            reply.UInt(0xCAFE_BABE);
+            await RpcTransport.SendRecordAsync(retryStream, reply.ToArray(), CancellationToken.None);
+            return (firstXid, retryXid);
+        });
+
+        var result = await rpc.CallAsync(
+            NfsRpcConstants.ProgNfs,
+            NfsRpcConstants.VerNfs,
+            NfsRpcConstants.NfsGetAttr,
+            UIntArgument(1),
+            CancellationToken.None);
+
+        Assert.Equal(0xCAFE_BABEu, result.UInt());
+        var (firstXid, retryXid) = await peer;
+        Assert.NotEqual(firstXid, retryXid);
     }
 
     [Fact]

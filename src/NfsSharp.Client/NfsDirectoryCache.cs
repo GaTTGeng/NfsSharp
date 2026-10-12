@@ -12,14 +12,16 @@ internal sealed class NfsDirectoryCache
     private readonly ConcurrentDictionary<byte[], Entry> _entries = new(ByteArrayComparer.Instance);
     private readonly bool _enabled;
     private readonly TimeSpan _ttl;
+    private readonly Func<DateTime> _utcNow;
     private readonly object _mutationGate = new();
     // Bumped on every mutation invalidation; lets Store() drop results read across a mutation.
     private long _mutationGeneration;
 
-    internal NfsDirectoryCache(NfsClientOptions options)
+    internal NfsDirectoryCache(NfsClientOptions options, Func<DateTime>? utcNow = null)
     {
         _enabled = options.EnableDirectoryCache;
         _ttl = options.DirectoryCacheTtl;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
     /// <summary>Return a cloned cached listing when present and not expired.</summary>
@@ -30,9 +32,11 @@ internal sealed class NfsDirectoryCache
             return false;
 
         // Lazy TTL expiry: a stale entry is dropped on read instead of by a timer.
-        if (DateTime.UtcNow >= cached.Expiry)
+        if (_utcNow() >= cached.Expiry)
         {
-            _entries.TryRemove(directoryHandle, out _);
+            // Remove only the expired snapshot; a concurrent refresh may have replaced it after TryGetValue.
+            ((ICollection<KeyValuePair<byte[], Entry>>)_entries).Remove(
+                new KeyValuePair<byte[], Entry>(directoryHandle, cached));
             return false;
         }
 
@@ -56,7 +60,7 @@ internal sealed class NfsDirectoryCache
         if (!_enabled)
             return;
 
-        var entry = new Entry(Clone(entries), DateTime.UtcNow.Add(_ttl));
+        var entry = new Entry(Clone(entries), _utcNow().Add(_ttl));
         lock (_mutationGate)
         {
             if (observedMutationGeneration != _mutationGeneration)

@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Prevented an expired directory-cache lookup from removing a fresh entry published concurrently.
 - RPCSEC_GSS context establishment now uses RFC 2203 INIT/CONTINUE_INIT credentials over NULLPROC, validates continuation verifier rules and stable context handles, and verifies the completed context's `seq_window` MIC before publishing it.
 - Preserved NFSv3 Unix epoch timestamps (`nfstime3` seconds=0, nanoseconds=0) instead of treating them as absent values. Absent optional attributes are represented only through `post_op_attr` / `name_attributes` presence flags.
 - RPCSEC_GSS data-reply verifiers are now validated fail-closed against the network-order request sequence number using the request QOP before any procedure result is exposed. Missing, wrong-flavor, empty, mismatched, or unverifiable MICs are rejected, including on accepted RPC errors. Replay against a replaced context generation is rejected.
