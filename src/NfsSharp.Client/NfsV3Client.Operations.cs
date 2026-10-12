@@ -199,6 +199,75 @@ public sealed partial class NfsV3Client
         return file with { Attr = await GetAttributesAsync(file.Handle, ct) };
     }
 
+    /// <summary>Write a sibling temporary file, then RENAME it over the destination when supported by the server.</summary>
+    public async Task<NfsLookup> WriteFileSafelyAsync(string remotePath, Stream input, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        ValidateReadableStream(input);
+        var (parent, name) = await _pathResolver.ResolveParentAsync(remotePath, ct);
+
+        NfsLookup temporaryFile;
+        string temporaryName;
+        // GUARDED CREATE avoids truncating an unrelated file if a generated sibling name collides.
+        while (true)
+        {
+            temporaryName = $".nfssharp-{Guid.NewGuid():N}.tmp";
+            try
+            {
+                temporaryFile = await _protocolClient.CreateFileAsync(
+                    parent, temporaryName, NfsSetAttributes.FileDefault, ct, guarded: true);
+                break;
+            }
+            catch (NfsException ex) when (ex.Status == NfsV3Status.Exist)
+            {
+                ct.ThrowIfCancellationRequested();
+            }
+        }
+
+        try
+        {
+            await WriteFileAsync(temporaryFile.Handle, input, ct);
+            await _protocolClient.RenameAsync(
+                parent, temporaryName, parent, name,
+                $"RENAME temporary file for destination \"{remotePath}\" failed", ct);
+            return await LookupAsync(parent, name, ct);
+        }
+        catch
+        {
+            // Cleanup must still run after caller cancellation; a disconnected transport may make it best-effort.
+            try
+            {
+                await _protocolClient.RemoveAsync(
+                    NfsRpcConstants.NfsRemove, parent, temporaryName,
+                    $"REMOVE temporary file \"{temporaryName}\" failed", CancellationToken.None);
+            }
+            catch (NfsException ex) when (ex.IsNotFound)
+            {
+                // The RENAME may have completed even if its reply was lost.
+            }
+            catch (Exception ex) when (NfsRetryPolicy.IsTransient(ex))
+            {
+                // The failed WRITE may race the receive loop marking its connection unhealthy; retry cleanup once.
+                try
+                {
+                    await _protocolClient.RemoveAsync(
+                        NfsRpcConstants.NfsRemove, parent, temporaryName,
+                        $"REMOVE temporary file \"{temporaryName}\" failed", CancellationToken.None);
+                }
+                catch
+                {
+                    // Preserve the original failure if the server is still unreachable or cleanup is rejected.
+                }
+            }
+            catch
+            {
+                // Preserve the original write, cancellation, or rename failure.
+            }
+
+            throw;
+        }
+    }
+
     /// <summary>WRITE a local file to an export-relative path.</summary>
     public async Task<NfsLookup> WriteFileAsync(string remotePath, string localPath, CancellationToken ct)
     {

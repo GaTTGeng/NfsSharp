@@ -983,6 +983,80 @@ public sealed class NfsV3IntegrationTests
 
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
+    // Failed staged writes must leave the destination unchanged and remove their sibling temporary file.
+    public async Task NfsV3Client_SafeStreamWritesPreserveDestinationOnFailure()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var client = await ConnectV3ClientAsync(timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+
+        var destination = fixture.GetRunPath("safe-write.txt");
+        var original = new byte[] { 0x10, 0x11, 0x12 };
+        await WriteBytesAsync(client, destination, original, timeout.Token);
+
+        await using (var input = new FailAfterFirstReadStream([0x20, 0x21, 0x22]))
+        {
+            await Assert.ThrowsAsync<IOException>(
+                () => client.WriteFileSafelyAsync(destination, input, timeout.Token));
+        }
+
+        Assert.Equal(original, await ReadBytesAsync(client, destination, timeout.Token));
+        await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
+
+        using var canceled = new CancellationTokenSource();
+        await using (var input = new CancelOnSecondReadStream([0x30, 0x31, 0x32], canceled))
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => client.WriteFileSafelyAsync(destination, input, canceled.Token));
+        }
+
+        Assert.Equal(original, await ReadBytesAsync(client, destination, timeout.Token));
+        await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
+
+        var replacement = new byte[] { 0x35, 0x36 };
+        var replacementOutcome = NfsV3ReplacementRenameOutcome.ReplaceTarget;
+        await using (var input = new MemoryStream(replacement, writable: false))
+        {
+            try
+            {
+                await client.WriteFileSafelyAsync(destination, input, timeout.Token);
+                Assert.Equal(replacement, await ReadBytesAsync(client, destination, timeout.Token));
+            }
+            catch (NfsException ex) when (ex.Status == NfsV3Status.Io)
+            {
+                Assert.Equal(original, await ReadBytesAsync(client, destination, timeout.Token));
+                replacementOutcome = NfsV3ReplacementRenameOutcome.IoPreservesBoth;
+            }
+        }
+
+        var expectedReplacementOutcome = NfsV3IntegrationEnvironment.ExpectedReplacementRenameOutcome;
+        if (expectedReplacementOutcome != NfsV3ReplacementRenameOutcome.Unspecified)
+        {
+            Assert.Equal(expectedReplacementOutcome, replacementOutcome);
+        }
+
+        await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
+
+        var newDestination = fixture.GetRunPath("safe-write-new.txt");
+        var newContent = new byte[] { 0x40, 0x41 };
+        await using (var input = new MemoryStream(newContent, writable: false))
+        {
+            await client.WriteFileSafelyAsync(newDestination, input, timeout.Token);
+        }
+
+        Assert.Equal(newContent, await ReadBytesAsync(client, newDestination, timeout.Token));
+        await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
+    }
+
+    private static async Task AssertNoSafeWriteTemporaryFilesAsync(
+        NfsV3Client client, string directory, CancellationToken ct)
+    {
+        var entries = await client.ReadDirAsync(directory, ct);
+        Assert.DoesNotContain(entries, entry => entry.Name.StartsWith(".nfssharp-", StringComparison.Ordinal));
+    }
+
+    [NfsV3IntegrationFact]
+    [Trait("Category", "Integration")]
     public async Task NfsClient_WritesAndCommitsThroughFacade()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -1023,6 +1097,15 @@ public sealed class NfsV3IntegrationTests
         await using var output = new MemoryStream();
         await client.ReadAsync(path, output, timeout.Token);
         Assert.Equal(replacement, output.ToArray());
+
+        var safePath = fixture.GetRunPath("facade-safe-write.bin");
+        var safeContent = new byte[] { 0x91, 0x92, 0x93 };
+        await using (var safeInput = new MemoryStream(safeContent, writable: false))
+        {
+            await client.WriteSafelyAsync(safePath, safeInput, timeout.Token);
+        }
+
+        Assert.Equal(safeContent, await ReadBytesAsync(setupClient, safePath, timeout.Token));
     }
 
     [NfsV3IntegrationFact]
@@ -1994,6 +2077,38 @@ public sealed class NfsV3IntegrationTests
 
         public override void Write(byte[] buffer, int offset, int count)
         {
+        }
+    }
+
+    private sealed class FailAfterFirstReadStream(byte[] firstChunk) : MemoryStream(firstChunk, writable: false)
+    {
+        private bool _returnedChunk;
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_returnedChunk)
+                return ValueTask.FromException<int>(new IOException("Injected input stream failure."));
+
+            _returnedChunk = true;
+            return base.ReadAsync(buffer, cancellationToken);
+        }
+    }
+
+    private sealed class CancelOnSecondReadStream(byte[] firstChunk, CancellationTokenSource cancellation)
+        : MemoryStream(firstChunk, writable: false)
+    {
+        private bool _returnedChunk;
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_returnedChunk)
+            {
+                cancellation.Cancel();
+                return ValueTask.FromCanceled<int>(cancellationToken);
+            }
+
+            _returnedChunk = true;
+            return base.ReadAsync(buffer, cancellationToken);
         }
     }
 }

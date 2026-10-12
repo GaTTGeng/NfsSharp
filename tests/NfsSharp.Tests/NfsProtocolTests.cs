@@ -1278,6 +1278,67 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_SafeWriteRemovesTemporaryFileAfterTransportFailure()
+    {
+        string? temporaryName = null;
+        await using var nfs = new RpcFixtureServer(
+            3,
+            (call, index) =>
+            {
+                AssertNfsProcedure(call, index switch
+                {
+                    0 => 8u,  // CREATE temporary file
+                    1 => 7u,  // WRITE; the fixture drops this connection
+                    2 => 12u, // REMOVE temporary file after reconnect
+                    _ => throw new InvalidOperationException($"Unexpected request {index}.")
+                });
+
+                if (index == 0)
+                {
+                    var arguments = new XdrReader(call.Arguments);
+                    Assert.Equal(FixtureHandle, arguments.Opaque());
+                    temporaryName = arguments.Str();
+                    Assert.StartsWith(".nfssharp-", temporaryName);
+                    Assert.Equal(0u, arguments.UInt()); // GUARDED CREATE prevents name-collision truncation.
+                    return NfsReply(call, writer =>
+                    {
+                        writer.UInt(NfsV3Status.Ok);
+                        writer.Bool(true);
+                        writer.Opaque([0xE1]);
+                        WritePostOpAttr(writer, present: false);
+                        WritePostOpAttr(writer, present: false);
+                        WritePostOpAttr(writer, present: false);
+                    });
+                }
+
+                if (index == 1)
+                    return NfsReply(call, _ => { });
+
+                var removeArguments = new XdrReader(call.Arguments);
+                Assert.Equal(FixtureHandle, removeArguments.Opaque());
+                Assert.Equal(temporaryName, removeArguments.Str());
+                return NfsReply(call, writer =>
+                {
+                    writer.UInt(NfsV3Status.Ok);
+                    WritePostOpAttr(writer, present: false);
+                    WritePostOpAttr(writer, present: false);
+                });
+            },
+            closeConnectionAtRequestIndices: new HashSet<int> { 1 });
+        await using var mount = CreateMountedExportServer();
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+        await using var client = await NfsV3Client.ConnectAsync(
+            "127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
+
+        await using var input = new MemoryStream([0x01, 0x02, 0x03], writable: false);
+        var failure = await Record.ExceptionAsync(
+            () => client.WriteFileSafelyAsync("target.bin", input, CancellationToken.None));
+
+        Assert.NotNull(failure);
+        Assert.True(nfs.RequestCount == 3, $"Received {nfs.RequestCount} NFS requests; operation failed with {failure.GetType().Name}: {failure.Message}");
+    }
+
+    [Fact]
     // Rejects write replies whose committed field is not a valid stable_how, and verifier fields shorter than 8 bytes.
     public async Task NfsV3Client_WriteAndCommitResultsValidateWireFieldsAndBoundaries()
     {
@@ -2440,6 +2501,7 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
 
     private readonly TcpListener _listener;
     private readonly Task _serveTask;
+    private int _requestCount;
 
     public RpcFixtureServer(
         int expectedRequests,
@@ -2452,7 +2514,8 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
     public RpcFixtureServer(
         int expectedRequests,
         Func<RpcFixtureCall, int, byte[]> reply,
-        bool readRequests = true)
+        bool readRequests = true,
+        IReadOnlySet<int>? closeConnectionAtRequestIndices = null)
     {
         if (expectedRequests <= 0)
             throw new ArgumentOutOfRangeException(nameof(expectedRequests));
@@ -2460,10 +2523,12 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start();
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _serveTask = ServeAsync(expectedRequests, reply, readRequests);
+        _serveTask = ServeAsync(expectedRequests, reply, readRequests, closeConnectionAtRequestIndices);
     }
 
     public int Port { get; }
+
+    public int RequestCount => Volatile.Read(ref _requestCount);
 
     public Task WaitForRequestsAsync() => _serveTask.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -2516,9 +2581,17 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
         {
             // Listener shutdown races its accept loop.
         }
+        catch (SocketException)
+        {
+            // Stopping the listener aborts an outstanding AcceptTcpClientAsync on some platforms.
+        }
     }
 
-    private async Task ServeAsync(int expectedRequests, Func<RpcFixtureCall, int, byte[]> reply, bool readRequests)
+    private async Task ServeAsync(
+        int expectedRequests,
+        Func<RpcFixtureCall, int, byte[]> reply,
+        bool readRequests,
+        IReadOnlySet<int>? closeConnectionAtRequestIndices)
     {
         // Accepts connections until the scripted call count is exhausted; one connection may carry several calls.
         var index = 0;
@@ -2544,8 +2617,19 @@ internal sealed class RpcFixtureServer : IAsyncDisposable
                     // Client closed the connection early; accept a replacement for the remaining calls.
                     break;
                 }
+                catch (IOException)
+                {
+                    // A reset during client teardown has the same meaning as an incomplete request.
+                    break;
+                }
 
-                var response = reply(call, index++);
+                Interlocked.Increment(ref _requestCount);
+
+                var requestIndex = index++;
+                if (closeConnectionAtRequestIndices?.Contains(requestIndex) == true)
+                    break;
+
+                var response = reply(call, requestIndex);
                 await SendRecordAsync(client.GetStream(), response);
             }
         }
