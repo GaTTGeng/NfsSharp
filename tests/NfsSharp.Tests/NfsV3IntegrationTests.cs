@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
 using Xunit.Abstractions;
@@ -1596,6 +1597,36 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(before.FileId, after.FileId);
     }
 
+    [NfsV3ServerRestartFact]
+    [Trait("Category", "IntegrationRestart")]
+    // Isolated CI step restarts the selected server, checks stale-handle status, then mounts a fresh client.
+    public async Task NfsV3Client_RecoversAfterServerRestartAndRemount()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var options = CreateOptions(maxRetries: 1, retryDelay: TimeSpan.Zero);
+        await using var client = await ConnectV3ClientAsync(options, timeout.Token);
+        await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
+        var previousRoot = client.RootHandle.ToArray();
+
+        await RestartNfsServerAsync(timeout.Token);
+
+        // A retry-safe GETATTR must recover the transport; a lost export handle is returned as NFS STALE.
+        try
+        {
+            _ = await client.GetAttributesAsync(previousRoot, timeout.Token);
+        }
+        catch (NfsException exception)
+        {
+            Assert.Equal(NfsV3Status.Stale, exception.Status);
+        }
+
+        await client.UnmountAsync(timeout.Token);
+        await using var remounted = await ConnectV3ClientAsync(options, timeout.Token);
+        var root = await remounted.GetAttributesAsync(remounted.RootHandle, timeout.Token);
+        Assert.Equal(NfsType.Dir, root.Type);
+        await remounted.UnmountAsync(timeout.Token);
+    }
+
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
     public async Task NfsV3Client_CanceledExportListThrowsOperationCanceled()
@@ -1723,6 +1754,75 @@ public sealed class NfsV3IntegrationTests
             EnableDirectoryCache = enableDirectoryCache,
             DirectoryCacheTtl = directoryCacheTtl ?? NfsClientOptions.Default.DirectoryCacheTtl
         };
+
+    private static async Task RestartNfsServerAsync(CancellationToken ct)
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var restartKind = Environment.GetEnvironmentVariable("NFSSHARP_NFS_RESTART_KIND");
+        if (string.Equals(restartKind, "ganesha-compose", StringComparison.Ordinal))
+        {
+            await RunProcessAsync(
+                "docker",
+                ["compose", "-f", "compose.integration.yml", "up", "--detach", "--force-recreate", "--wait", "--wait-timeout", "90", "nfs"],
+                repositoryRoot,
+                ct);
+            return;
+        }
+
+        if (string.Equals(restartKind, "kernel-service", StringComparison.Ordinal))
+        {
+            await RunProcessAsync("sudo", ["systemctl", "restart", "nfs-server"], repositoryRoot, ct);
+            await RunProcessAsync("sudo", ["systemctl", "is-active", "--quiet", "nfs-server"], repositoryRoot, ct);
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "NFSSHARP_NFS_RESTART_KIND must be 'ganesha-compose' or 'kernel-service'.");
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(Environment.CurrentDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "NfsSharp.sln")))
+                return directory.FullName;
+        }
+
+        throw new DirectoryNotFoundException("Could not locate NfsSharp.sln from the current directory.");
+    }
+
+    private static async Task RunProcessAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string workingDirectory,
+        CancellationToken ct)
+    {
+        var startInfo = new ProcessStartInfo(fileName)
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        foreach (var argument in arguments)
+            startInfo.ArgumentList.Add(argument);
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Failed to start {fileName}.");
+        var standardOutput = process.StandardOutput.ReadToEndAsync(ct);
+        var standardError = process.StandardError.ReadToEndAsync(ct);
+        await process.WaitForExitAsync(ct);
+        var output = await standardOutput;
+        var error = await standardError;
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"{fileName} {string.Join(' ', arguments)} failed with exit code {process.ExitCode}. " +
+                $"stdout: {output}\nstderr: {error}");
+        }
+    }
 
     // Connect helpers parameterize uid/gid, readdir count, or options against the configured integration server.
     private static Task<NfsV3Client> ConnectV3ClientAsync(CancellationToken ct) =>
