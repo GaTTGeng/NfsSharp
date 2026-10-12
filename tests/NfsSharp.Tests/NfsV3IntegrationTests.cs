@@ -1620,6 +1620,22 @@ public sealed class NfsV3IntegrationTests
             Assert.Equal(NfsV3Status.Stale, exception.Status);
         }
 
+        var unmountFailure = await Record.ExceptionAsync(() => client.UnmountAsync(timeout.Token));
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("NFSSHARP_NFS_RESTART_KIND"),
+                "kernel-service",
+                StringComparison.Ordinal))
+        {
+            // The kernel server re-registers mountd on a new dynamic port; the old client reports the stale port failure.
+            Assert.NotNull(unmountFailure);
+            Assert.True(NfsRetryPolicy.IsTransient(unmountFailure));
+        }
+        else
+        {
+            Assert.Null(unmountFailure);
+        }
+
+        // Even when UMNT cannot reach the old mountd port, cleanup leaves the old client in an idempotent terminal state.
         await client.UnmountAsync(timeout.Token);
         await using var remounted = await ConnectV3ClientAsync(options, timeout.Token);
         var root = await remounted.GetAttributesAsync(remounted.RootHandle, timeout.Token);

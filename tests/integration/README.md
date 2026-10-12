@@ -60,7 +60,7 @@ Without `NFSSHARP_RUN_NFSV3_INTEGRATION=1`, the integration tests are skipped an
 
 ## Verify recovery after a server restart
 
-The restart scenario runs separately from the ordinary integration suite because it interrupts the configured NFS server. It checks that a retry-safe call recovers the transport, that a stale root handle remains a surfaced `STALE` result when the server invalidates it, and that a new client can mount the export afterward. CI runs it once against each maintained server fixture.
+The restart scenario runs separately from the ordinary integration suite because it interrupts the configured NFS server. It checks that a retry-safe call recovers the transport, that a stale root handle remains a surfaced `STALE` result when the server invalidates it, and that a new client can mount the export afterward. NFS-Ganesha keeps mountd reachable for the previous client's `UMNT`; the Linux kernel server can re-register mountd on a new dynamic port, so the old client's `UMNT` may fail transiently. In that case the client closes its connection, treats a second unmount as a no-op, and a new client resolves the current mountd port. CI runs the scenario once against each maintained server fixture.
 
 For the NFS-Ganesha fixture, start the Compose server first and run:
 
