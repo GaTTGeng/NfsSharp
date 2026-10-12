@@ -505,6 +505,63 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    public async Task RpcClient_RetriesReadOnFreshTcpConnectionAfterPeerDisconnect()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var options = NfsClientOptions.Default with
+        {
+            MaxRetries = 1,
+            RetryDelay = TimeSpan.Zero,
+            UsePrivilegedSourcePort = false
+        };
+        await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), options);
+        await rpc.ConnectAsync(port, CancellationToken.None);
+
+        var peer = Task.Run(async () =>
+        {
+            // The first TCP connection receives a complete request, then closes without a reply.
+            uint firstXid;
+            using (var firstSocket = await listener.AcceptSocketAsync().WaitAsync(TimeSpan.FromSeconds(2)))
+            using (var firstStream = new NetworkStream(firstSocket, ownsSocket: false))
+            {
+                var firstRequest = await RpcRecordStream.ReceiveAsync(firstStream, CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+                firstXid = BinaryPrimitives.ReadUInt32BigEndian(firstRequest);
+            }
+
+            // A complete request with no reply models a peer disappearing after receipt.
+            using var retrySocket = await listener.AcceptSocketAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            using var retryStream = new NetworkStream(retrySocket, ownsSocket: false);
+            var retryRequest = await RpcRecordStream.ReceiveAsync(retryStream, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(2));
+            var retryXid = BinaryPrimitives.ReadUInt32BigEndian(retryRequest);
+            var reply = new XdrWriter();
+            reply.UInt(retryXid);
+            reply.UInt(1);
+            reply.UInt(0);
+            reply.UInt(0);
+            reply.Opaque([]);
+            reply.UInt(0);
+            reply.UInt(0xCAFE_BABE);
+            await RpcTransport.SendRecordAsync(retryStream, reply.ToArray(), CancellationToken.None);
+            return (firstXid, retryXid);
+        });
+
+        var result = await rpc.CallAsync(
+            NfsRpcConstants.ProgNfs,
+            NfsRpcConstants.VerNfs,
+            NfsRpcConstants.NfsGetAttr,
+            UIntArgument(1),
+            CancellationToken.None);
+
+        Assert.Equal(0xCAFE_BABEu, result.UInt());
+        var (firstXid, retryXid) = await peer;
+        Assert.NotEqual(firstXid, retryXid);
+    }
+
+    [Fact]
     public async Task RpcClient_ExplicitStopClosesTheConnectionAndPreventsFurtherCalls()
     {
         await using var rpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), NfsClientOptions.Default);
