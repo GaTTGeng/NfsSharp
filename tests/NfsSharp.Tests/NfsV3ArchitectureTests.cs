@@ -103,6 +103,38 @@ public sealed class NfsV3ArchitectureTests
     }
 
     [Fact]
+    public void DirectoryCache_ExpiryCheckDoesNotRemoveConcurrentRefresh()
+    {
+        var now = new DateTime(2026, 10, 12, 0, 0, 0, DateTimeKind.Utc);
+        var refreshDuringExpiryCheck = false;
+        NfsDirectoryCache? cache = null;
+        var options = NfsClientOptions.Default with
+        {
+            EnableDirectoryCache = true,
+            DirectoryCacheTtl = TimeSpan.FromMinutes(1)
+        };
+        byte[] directory = [1];
+        cache = new NfsDirectoryCache(options, () =>
+        {
+            if (refreshDuringExpiryCheck)
+            {
+                refreshDuringExpiryCheck = false;
+                cache!.Store(directory, [new NfsEntryPlus("fresh", 2, null, [3])], cache.CaptureMutationGeneration());
+            }
+
+            return now;
+        });
+        cache.Store(directory, [new NfsEntryPlus("expired", 1, null, [2])], cache.CaptureMutationGeneration());
+        now = now.AddMinutes(2);
+        refreshDuringExpiryCheck = true;
+
+        Assert.False(cache.TryGet(directory, out _));
+        Assert.True(cache.TryGet(directory, out var refreshed));
+        Assert.Equal("fresh", Assert.Single(refreshed).Name);
+        Assert.Equal(new byte[] { 3 }, refreshed[0].Handle);
+    }
+
+    [Fact]
     public async Task Transport_RecordSeamWritesAndReadsDeterministicFrames()
     {
         var stream = new MemoryStream();
