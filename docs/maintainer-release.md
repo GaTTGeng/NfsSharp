@@ -54,18 +54,33 @@ $artifactDirectory = "artifacts/release-assets"
 $releaseNotesPath = "artifacts/release-notes.md" # Prepare this file using the checklist below.
 $releaseCommit = gh run view $runId --repo GaTTGeng/NfsSharp --json headSha --jq .headSha
 if ($LASTEXITCODE -ne 0 -or -not $releaseCommit) { throw "Could not read the release workflow commit." }
-if (git ls-remote --exit-code --tags origin "refs/tags/$version" 2>$null) {
-  throw "Tag $version already exists; use the workflow run triggered by that tag instead."
+$tagRef = "refs/tags/$version"
+$remoteTagRefs = @(git ls-remote --tags origin $tagRef "$tagRef^{}")
+if ($LASTEXITCODE -ne 0) { throw "Could not check the remote tag." }
+$peeledTag = $remoteTagRefs | Where-Object { $_ -match "\s$([regex]::Escape($tagRef))\^\{\}$" }
+$directTag = $remoteTagRefs | Where-Object { $_ -match "\s$([regex]::Escape($tagRef))$" }
+if ($peeledTag) {
+  $tagCommit = ($peeledTag -split "\s+")[0]
+} elseif ($directTag) {
+  $tagCommit = ($directTag -split "\s+")[0]
+} else {
+  # workflow_dispatch has no triggering tag, so create it at the tested workflow commit.
+  git tag $version $releaseCommit
+  if ($LASTEXITCODE -ne 0) { throw "Could not create tag $version at $releaseCommit." }
+  git push origin $version
+  if ($LASTEXITCODE -ne 0) { throw "Could not push tag $version." }
+  $tagCommit = $releaseCommit
 }
+if ($tagCommit -ne $releaseCommit) { throw "Tag $version points to $tagCommit, not the release workflow commit $releaseCommit." }
 gh run download $runId --repo GaTTGeng/NfsSharp --name "nuget-packages-$version" --dir $artifactDirectory
 $assets = @(Get-ChildItem -LiteralPath $artifactDirectory -File | Where-Object { $_.Extension -in ".nupkg", ".snupkg" } | ForEach-Object FullName)
 if ($assets.Count -ne 4) { throw "Expected four package and symbol assets; found $($assets.Count)." }
 $releaseOptions = @()
-if ($version -match '-') { $releaseOptions += "--prerelease" }
-gh release create $version --repo GaTTGeng/NfsSharp --title "NfsSharp $version" --target $releaseCommit --notes-file $releaseNotesPath @releaseOptions @assets
+if ($version -match '^[0-9]+\.[0-9]+\.[0-9]+-') { $releaseOptions += "--prerelease" }
+gh release create $version --repo GaTTGeng/NfsSharp --title "NfsSharp $version" --target $releaseCommit --verify-tag --notes-file $releaseNotesPath @releaseOptions @assets
 ```
 
-For a manual `workflow_dispatch` release, this command creates the version tag at the exact commit used by that run. It refuses to proceed if the remote tag already exists. Versions with a prerelease suffix such as `1.4.0-preview.1` are marked as prereleases on GitHub.
+For a normal tag-triggered release, the existing remote tag must point to the exact commit used by that run. For a manual `workflow_dispatch` release, this command creates and pushes the version tag at that exact commit if the tag is absent. It stops if an existing tag points elsewhere. Versions with a prerelease suffix such as `1.4.0-preview.1` are marked as prereleases on GitHub.
 
 Write release notes from the dated changelog section. Include an install command, a NuGet link for each package at the released version, concise user-facing highlights, the compatibility boundary and known scope (including that NFSv4 and RPCSEC_GSS remain experimental), and a link to the versioned `CHANGELOG.md`.
 
