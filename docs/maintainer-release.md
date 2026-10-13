@@ -65,6 +65,12 @@ if ($peeledTag) {
   $tagCommit = ($directTag -split "\s+")[0]
 } else {
   # workflow_dispatch has no triggering tag, so create it at the tested workflow commit.
+  git fetch origin master
+  if ($LASTEXITCODE -ne 0) { throw "Could not fetch origin/master." }
+  git cat-file -e "$releaseCommit^{commit}" 2>$null
+  if ($LASTEXITCODE -ne 0) { throw "Release workflow commit $releaseCommit is not available locally after fetching master." }
+  git merge-base --is-ancestor $releaseCommit origin/master
+  if ($LASTEXITCODE -ne 0) { throw "Release workflow commit $releaseCommit is not reachable from origin/master." }
   git tag $version $releaseCommit
   if ($LASTEXITCODE -ne 0) { throw "Could not create tag $version at $releaseCommit." }
   git push origin $version
