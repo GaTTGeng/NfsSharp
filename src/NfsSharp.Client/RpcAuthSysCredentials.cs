@@ -25,6 +25,6 @@ internal static class RpcAuthSysCredentials
             machineName,
             options.UserId,
             options.GroupId,
-            options.AuxiliaryGroups ?? Array.Empty<uint>());
+            options.AuxiliaryGroups);
     }
 }

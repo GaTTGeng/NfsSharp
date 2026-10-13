@@ -155,6 +155,8 @@ internal sealed class RpcConnection : IAsyncDisposable
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly TimeSpan _recordCompletionTimeout;
+    // Keep object for the net8.0 target, where System.Threading.Lock is unavailable.
+    // ReSharper disable once ChangeFieldTypeToSystemThreadingLock
     private readonly object _receiveSync = new();
     private Task? _receiveLoop;
     private Exception? _failure;
@@ -191,6 +193,8 @@ internal sealed class RpcConnection : IAsyncDisposable
         Generation = generation;
     }
 
+    // Shared with RpcClient and protocol test fixtures.
+    // ReSharper disable once MemberCanBePrivate.Global
     internal Stream Stream { get; }
     internal long Generation { get; }
     internal bool IsHealthy => Volatile.Read(ref _disposed) == 0 && Volatile.Read(ref _failure) is null;
@@ -236,13 +240,12 @@ internal sealed class RpcConnection : IAsyncDisposable
         }
     }
 
-    private bool TryRemovePending(uint xid, TaskCompletionSource<byte[]> pending)
+    private void TryRemovePending(uint xid, TaskCompletionSource<byte[]> pending)
     {
         if (!_pendingCalls.TryRemove(new KeyValuePair<uint, TaskCompletionSource<byte[]>>(xid, pending)))
-            return false;
+            return;
 
         Interlocked.Decrement(ref _pendingCallCount);
-        return true;
     }
 
     internal void RemovePending(uint xid, TaskCompletionSource<byte[]> pending) =>

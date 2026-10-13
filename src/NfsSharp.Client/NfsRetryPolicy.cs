@@ -25,7 +25,7 @@ internal sealed class NfsRetryPolicy
     /// <summary>Transport-level failures that are safe to treat as transient.</summary>
     internal static bool IsTransient(Exception ex) =>
         ex is SocketException or IOException or ObjectDisposedException ||
-        ex is NfsException { InnerException: Exception inner } && IsTransient(inner);
+        ex is NfsException { InnerException: { } inner } && IsTransient(inner);
 
     /// <summary>
     /// Only idempotent procedures may be replayed automatically; mutating ops

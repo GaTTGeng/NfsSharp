@@ -5,6 +5,8 @@ using NfsSharp.Protocol;
 namespace NfsSharp.Client;
 
 /// <summary>Managed high-level NFSv3 client.</summary>
+// Public operations are the NFSv3 client API and are called by external consumers.
+// ReSharper disable UnusedMember.Global
 public sealed partial class NfsV3Client : IAsyncDisposable
 {
     private readonly NfsClientOptions _options;
@@ -21,6 +23,8 @@ public sealed partial class NfsV3Client : IAsyncDisposable
     private bool _unmounted;
     private bool _disposed;
 
+    // ReSharper disable once UnusedMember.Local
+    // Unit tests instantiate this constructor through reflection without opening a socket.
     private NfsV3Client(IPAddress address, NfsClientOptions options)
         : this(new RpcTransport(address, options), options) { }
 
@@ -54,7 +58,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
 
     /// <summary>Resolve a server, mount an export, and open the NFSv3 connection.</summary>
     public static async Task<NfsV3Client> ConnectAsync(
-        string server, string exportPath, NfsClientOptions options, CancellationToken ct)
+        string server, string exportPath, NfsClientOptions? options, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(server)) throw new NfsException("NFS server is empty.");
         if (string.IsNullOrWhiteSpace(exportPath)) throw new NfsException("NFS export path is empty.");
@@ -100,7 +104,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
 
     /// <summary>List exports advertised by mountd without mounting any export.</summary>
     public static async Task<IReadOnlyList<NfsExport>> ListExportsAsync(
-        string server, NfsClientOptions options, CancellationToken ct)
+        string server, NfsClientOptions? options, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(server)) throw new NfsException("NFS server is empty.");
         options ??= NfsClientOptions.Default;
@@ -225,6 +229,8 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         NfsRetryPolicy.CanRetry(program, version, procedure);
 
     // Thin forwarders that let tests reach the internal RPC/protocol helpers through this type.
+    // ReSharper disable once UnusedMember.Local
+    // NfsProtocolTests invokes this helper through reflection.
     private static RpcReply DecodeRpcReplyWithContext(
         byte[] reply, uint xid, uint program, uint version, uint procedure)
     {
@@ -232,7 +238,11 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         RpcClient.EnsureAcceptSuccess(decoded, program, version, procedure);
         return decoded;
     }
+
+    // ReSharper disable once UnusedMember.Local
+    // NfsProtocolTests invokes this helper through reflection.
     private static void EnsureDirectoryReadProgress(
         ulong requestCookie, ulong responseCookie, int entryCount, bool eof, string procedure) =>
         NfsV3ProtocolClient.EnsureDirectoryReadProgress(requestCookie, responseCookie, entryCount, eof, procedure);
 }
+// ReSharper restore UnusedMember.Global

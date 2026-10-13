@@ -56,8 +56,12 @@ public static class RpcSecGssConstants
     /// Local recommended bound for outstanding authenticated requests.
     /// RFC 2203 does not cap the server-selected <c>seq_window</c>; peers may negotiate larger values.
     /// </summary>
+    // ReSharper disable once UnusedMember.Global
+    // Public recommendation for caller-side bounds on concurrent sequence usage.
     public const int MaxSeqWindowSize = 64;
     /// <summary>Local default window size used when the peer has not negotiated one.</summary>
+    // ReSharper disable once UnusedMember.Global
+    // Public default for callers constructing RPCSEC_GSS contexts.
     public const int DefaultSeqWindowSize = 64;
     /// <summary>QOP used for the context-completion seq_window checksum (RFC 2203 §5.2.3.1).</summary>
     public const uint DefaultQop = 0;
@@ -75,9 +79,17 @@ public interface IRpcSecGssQopMechanism
     /// <summary>Verify a MIC against <paramref name="data"/> using <paramref name="qop"/>.</summary>
     bool VerifyMic(byte[] data, byte[] mic, uint qop);
 
+    // ReSharper disable once UnusedParameter.Global
+    // Implementations receive the selected QOP even when a mechanism supports only QOP zero.
+    // ReSharper disable once UnusedMember.Global
+    // This optional extension contract is consumed by RPCSEC_GSS callers outside this assembly.
     /// <summary>Wrap (encrypt or sign) data using <paramref name="qop"/>.</summary>
     byte[] Wrap(byte[] data, uint qop);
 
+    // ReSharper disable once UnusedParameter.Global
+    // Implementations receive the selected QOP even when a mechanism supports only QOP zero.
+    // ReSharper disable once UnusedMember.Global
+    // This optional extension contract is consumed by RPCSEC_GSS callers outside this assembly.
     /// <summary>Unwrap protected data using <paramref name="qop"/>.</summary>
     byte[] Unwrap(byte[] wrappedData, uint qop);
 }
@@ -126,6 +138,8 @@ public interface IRpcSecGssPrivacyMechanism
 /// <summary>Interface for GSSAPI security mechanisms (e.g., Kerberos).</summary>
 public interface IRpcSecGssMechanism : IDisposable
 {
+    // ReSharper disable UnusedMemberInSuper.Global UnusedParameter.Global UnusedMember.Global
+    // These members form the public mechanism extension contract implemented by consumer assemblies.
     /// <summary>Mechanism OID (e.g., 1.2.840.113554.1.2.2 for Kerberos v5).</summary>
     byte[] MechanismOid { get; }
 
@@ -165,9 +179,12 @@ public interface IRpcSecGssMechanism : IDisposable
 
     /// <summary>Service level negotiated with the server.</summary>
     RpcSecGssService NegotiatedService { get; set; }
+    // ReSharper restore UnusedMemberInSuper.Global UnusedParameter.Global UnusedMember.Global
 }
 
 /// <summary>GSS credentials for authentication.</summary>
+// ReSharper disable ClassNeverInstantiated.Global UnusedMember.Global UnusedAutoPropertyAccessor.Global
+// Credentials are configured by SDK callers; the mechanism implementation is supplied externally.
 public sealed class GssCredentials
 {
     /// <summary>Username or principal name.</summary>
@@ -185,8 +202,11 @@ public sealed class GssCredentials
     /// <summary>KDC server address (optional, uses system config if not set).</summary>
     public string? KdcAddress { get; init; }
 }
+// ReSharper restore ClassNeverInstantiated.Global UnusedMember.Global UnusedAutoPropertyAccessor.Global
 
 /// <summary>RPCSEC_GSS context state returned after the INIT/CONTINUE_INIT exchange.</summary>
+// ReSharper disable UnusedAutoPropertyAccessor.Global
+// SeqWindow remains for source compatibility with callers using the legacy context shape.
 public sealed class RpcSecGssContext
 {
     /// <summary>Opaque server-issued context handle for subsequent RPCs.</summary>
@@ -200,6 +220,7 @@ public sealed class RpcSecGssContext
     /// <summary>Mechanism that established and secures this context.</summary>
     public IRpcSecGssMechanism Mechanism { get; init; } = null!;
 }
+// ReSharper restore UnusedAutoPropertyAccessor.Global
 
 /// <summary>
 /// NegotiateAuthentication-based GSS mechanism for .NET 8+.
@@ -208,13 +229,14 @@ public sealed class RpcSecGssContext
 /// so MIC and wrap/unwrap operations fail closed until a real GSS integrity API is wired.
 /// Token-exchange success is never evidence of integrity/privacy correctness.
 /// </summary>
-public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism, IRpcSecGssMechanismCapabilities
+public sealed class NegotiateGssMechanism(string package = "Kerberos") : IRpcSecGssMechanism, IRpcSecGssQopMechanism, IRpcSecGssMechanismCapabilities
 {
     private System.Net.Security.NegotiateAuthentication? _auth;
     private bool _established;
-    private uint _nextSeqNum;
 
-    public byte[] MechanismOid { get; }
+    public byte[] MechanismOid { get; } = package == "Kerberos"
+        ? [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02]
+        : Array.Empty<byte>();
 
     /// <summary>
     /// False: NegotiateAuthentication exposes token exchange only, not GSS_GetMIC/GSS_VerifyMIC
@@ -227,14 +249,6 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMe
     /// does not expose. No RPCSEC_GSS data call (including rpc_gss_svc_none) can be sealed.
     /// </summary>
     public bool CanComputeMic => false;
-
-    public NegotiateGssMechanism(string package = "Kerberos")
-    {
-        // Kerberos v5 OID: 1.2.840.113554.1.2.2
-        MechanismOid = package == "Kerberos"
-            ? new byte[] { 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02 }
-            : Array.Empty<byte>();
-    }
 
     public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct)
     {
@@ -302,8 +316,10 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMe
         throw new NfsException(
             "NegotiateGssMechanism cannot unwrap RPCSEC_GSS payloads: .NET NegotiateAuthentication does not expose GSS_Unwrap.");
 
+    // ReSharper disable once AutoPropertyCanBeMadeGetOnly.Global
+    // Keep the public setter for callers that adjust their mechanism's advertised message cap.
     public uint MaxMessageSize { get; set; } = 1024 * 1024;
-    public uint NextSeqNum { get => _nextSeqNum; set => _nextSeqNum = value; }
+    public uint NextSeqNum { get; set; }
     public RpcSecGssService NegotiatedService { get; set; }
 
     /// <summary>QOP-aware MIC. Fails closed for the same reason as <see cref="GetMic(byte[])"/>.</summary>
@@ -330,6 +346,8 @@ public sealed class NegotiateGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMe
 /// </summary>
 public sealed class RpcSecGssCallRecord
 {
+    // ReSharper disable ReplaceWithFieldKeyword
+    // Return a fresh copy so callers cannot mutate the stored GSS context handle.
     private readonly byte[] _contextHandle;
 
     /// <summary>Creates a record for one transmitted attempt.</summary>
@@ -373,10 +391,16 @@ public sealed class RpcSecGssCallRecord
     public uint Qop { get; }
     /// <summary>Generation of the GSS context that signed this attempt.</summary>
     public uint ContextGeneration { get; }
+    // ReSharper disable once MemberCanBePrivate.Global
+    // The public attempt record exposes RPC routing fields to callers for diagnostics.
     /// <summary>RPC program number of the protected call.</summary>
     public uint Program { get; }
+    // ReSharper disable once MemberCanBePrivate.Global
+    // The public attempt record exposes RPC routing fields to callers for diagnostics.
     /// <summary>RPC program version of the protected call.</summary>
     public uint Version { get; }
+    // ReSharper disable once MemberCanBePrivate.Global
+    // The public attempt record exposes RPC routing fields to callers for diagnostics.
     /// <summary>RPC procedure number of the protected call.</summary>
     public uint Procedure { get; }
     /// <summary>RPCSEC_GSS control procedure encoded in the credential.</summary>
@@ -384,6 +408,7 @@ public sealed class RpcSecGssCallRecord
 
     /// <summary>Context handle sealed into the credential (defensive copy).</summary>
     public byte[] ContextHandle => _contextHandle.ToArray();
+    // ReSharper restore ReplaceWithFieldKeyword
 
     /// <summary>Four-byte network-order encoding of <see cref="SeqNum"/> used for MIC inputs.</summary>
     public byte[] SeqNumNetworkOrder()
@@ -514,6 +539,8 @@ public static class RpcSecGssMechanism
         ArgumentNullException.ThrowIfNull(mechanism);
         ArgumentNullException.ThrowIfNull(data);
         ArgumentNullException.ThrowIfNull(mic);
+        // Applications may implement this public extension alongside the base mechanism interface.
+        // ReSharper disable once SuspiciousTypeConversion.Global
         if (mechanism is IRpcSecGssMicResultMechanism resultMechanism)
         {
             var result = resultMechanism.VerifyMicWithResult(data, mic, qop);

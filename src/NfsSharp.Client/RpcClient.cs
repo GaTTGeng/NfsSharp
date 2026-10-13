@@ -277,6 +277,8 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Cancellation callbacks must complete synchronously before the connection is closed.
+        // ReSharper disable once MethodHasAsyncOverload
         _stopSource.Cancel();
         await StopAndCloseActiveConnectionAsync();
     }

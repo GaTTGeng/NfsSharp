@@ -22,6 +22,8 @@ internal sealed class RpcSecGssSession
     internal bool IsEstablished => _context?.Mechanism.IsEstablished == true;
 
     /// <summary>Generation counter for the active GSS context; bumped whenever a context is published.</summary>
+    // Used by session and record validation; keep the accessor for the state contract.
+    // ReSharper disable once UnusedMember.Global
     internal uint ContextGeneration => _contextGeneration;
 
     /// <summary>Install a fully established context. Used by establishment and deterministic tests.</summary>
@@ -179,6 +181,8 @@ internal sealed class RpcSecGssSession
                 break;
 
             case RpcSecGssService.Privacy:
+                // External mechanisms may implement both the base and privacy extension interfaces.
+                // ReSharper disable once SuspiciousTypeConversion.Global
                 var privacyMechanism = context.Mechanism as IRpcSecGssPrivacyMechanism
                     ?? throw new NfsException(
                         $"RPCSEC_GSS privacy requires a mechanism that reports confidentiality and QOP ({record}).");
@@ -247,6 +251,8 @@ internal sealed class RpcSecGssSession
                 var wrapped = envelope.Opaque();
                 if (envelope.Remaining != 0)
                     throw new NfsException("RPCSEC_GSS privacy result contains trailing data.");
+                // External mechanisms may implement both the base and privacy extension interfaces.
+                // ReSharper disable once SuspiciousTypeConversion.Global
                 var privacyMechanism = context.Mechanism as IRpcSecGssPrivacyMechanism
                     ?? throw new NfsException("RPCSEC_GSS privacy requires a mechanism that reports confidentiality and QOP.");
                 RpcSecGssPrivacyResult unwrapped;
@@ -325,7 +331,6 @@ internal sealed class RpcSecGssSession
             var token = await InitiateMechanismAsync(mechanism, targetName, _options.GssCredentials, ct);
             var controlProcedure = RpcSecGssProc.Init;
             byte[] contextHandle = [];
-            uint seqWindow = 0;
             var clientNeedsFinalToken = !mechanism.IsEstablished;
             var contextCompleted = false;
 
@@ -368,7 +373,6 @@ internal sealed class RpcSecGssSession
                     throw new NfsException("RPCSEC_GSS context response returned an invalid sequence window: 0.");
 
                 contextHandle = returnedHandle;
-                seqWindow = returnedSeqWindow;
 
                 if (majorStatus == GssContinueNeeded)
                 {
@@ -395,7 +399,7 @@ internal sealed class RpcSecGssSession
                 InstallContext(new RpcSecGssContext
                 {
                     ContextHandle = contextHandle,
-                    SeqWindowSize = seqWindow,
+                    SeqWindowSize = returnedSeqWindow,
                     SeqWindow = new byte[8],
                     Service = _options.GssService,
                     Mechanism = mechanism,

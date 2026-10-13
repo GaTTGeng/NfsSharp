@@ -46,10 +46,10 @@ public sealed class NfsV3ArchitectureTests
         var observed = new List<string>();
         var resolver = new NfsPathResolver(
             () => [1],
-            (parent, name, _) =>
+            (parentHandle, childName, _) =>
             {
-                observed.Add(name);
-                return Task.FromResult(new NfsLookup([checked((byte)(parent[0] + 1))],
+                observed.Add(childName);
+                return Task.FromResult(new NfsLookup([checked((byte)(parentHandle[0] + 1))],
                     new NfsFattr(NfsType.Dir, 0, null)));
             },
             (_, _) => throw new InvalidOperationException());
@@ -114,6 +114,8 @@ public sealed class NfsV3ArchitectureTests
             DirectoryCacheTtl = TimeSpan.FromMinutes(1)
         };
         byte[] directory = [1];
+        // This clock callback deliberately refreshes the cache during expiry evaluation.
+        // ReSharper disable AccessToModifiedClosure
         cache = new NfsDirectoryCache(options, () =>
         {
             if (refreshDuringExpiryCheck)
@@ -124,6 +126,7 @@ public sealed class NfsV3ArchitectureTests
 
             return now;
         });
+        // ReSharper restore AccessToModifiedClosure
         cache.Store(directory, [new NfsEntryPlus("expired", 1, null, [2])], cache.CaptureMutationGeneration());
         now = now.AddMinutes(2);
         refreshDuringExpiryCheck = true;
@@ -199,7 +202,7 @@ public sealed class NfsV3ArchitectureTests
         Assert.Contains("timed out", timeout.Message, StringComparison.OrdinalIgnoreCase);
 
         using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
+        await cancellation.CancelAsync();
         await using var cancelledRpc = new RpcClient(new ScriptedDuplexStream([], stallReads: true), options);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => cancelledRpc.CallAsync(100003, 3, 1, [], cancellation.Token));
@@ -242,7 +245,7 @@ public sealed class NfsV3ArchitectureTests
         var cancelled = rpc.CallAsync(100003, 3, 1, UIntArgument(1), cancellation.Token);
         var survivor = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
         await stream.WaitForRequestsAsync(2);
-        cancellation.Cancel();
+        await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
 
         await stream.ReplyForXidAsync(0xDEAD_BEEFu, 99); // Unknown XID is discarded.
@@ -518,7 +521,7 @@ public sealed class NfsV3ArchitectureTests
         var nextServerConnection = listener.AcceptSocketAsync();
         var nextCall = rpc.CallAsync(100003, 3, 1, UIntArgument(2), CancellationToken.None);
         using var socket = await nextServerConnection.WaitAsync(TimeSpan.FromSeconds(2));
-        using var stream = new NetworkStream(socket, ownsSocket: false);
+        await using var stream = new NetworkStream(socket, ownsSocket: false);
         // Serve the replacement connection by hand: echo the request XID into a minimal MSG_ACCEPTED reply.
         var request = await RpcRecordStream.ReceiveAsync(stream, CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(2));
@@ -554,23 +557,27 @@ public sealed class NfsV3ArchitectureTests
         var peer = Task.Run(async () =>
         {
             // The first TCP connection receives a complete request, then closes without a reply.
-            uint firstXid;
+            uint firstRequestXid;
+            // The peer task owns each socket until it has read the corresponding request.
+            // ReSharper disable once AccessToDisposedClosure
             using (var firstSocket = await listener.AcceptSocketAsync().WaitAsync(TimeSpan.FromSeconds(2)))
-            using (var firstStream = new NetworkStream(firstSocket, ownsSocket: false))
+            await using (var firstStream = new NetworkStream(firstSocket, ownsSocket: false))
             {
                 var firstRequest = await RpcRecordStream.ReceiveAsync(firstStream, CancellationToken.None)
                     .WaitAsync(TimeSpan.FromSeconds(2));
-                firstXid = BinaryPrimitives.ReadUInt32BigEndian(firstRequest);
+                firstRequestXid = BinaryPrimitives.ReadUInt32BigEndian(firstRequest);
             }
 
             // A complete request with no reply models a peer disappearing after receipt.
+            // The peer task owns this socket until it has read and answered the retry.
+            // ReSharper disable once AccessToDisposedClosure
             using var retrySocket = await listener.AcceptSocketAsync().WaitAsync(TimeSpan.FromSeconds(2));
-            using var retryStream = new NetworkStream(retrySocket, ownsSocket: false);
+            await using var retryStream = new NetworkStream(retrySocket, ownsSocket: false);
             var retryRequest = await RpcRecordStream.ReceiveAsync(retryStream, CancellationToken.None)
                 .WaitAsync(TimeSpan.FromSeconds(2));
-            var retryXid = BinaryPrimitives.ReadUInt32BigEndian(retryRequest);
+            var retryRequestXid = BinaryPrimitives.ReadUInt32BigEndian(retryRequest);
             var reply = new XdrWriter();
-            reply.UInt(retryXid);
+            reply.UInt(retryRequestXid);
             reply.UInt(1);
             reply.UInt(0);
             reply.UInt(0);
@@ -578,7 +585,7 @@ public sealed class NfsV3ArchitectureTests
             reply.UInt(0);
             reply.UInt(0xCAFE_BABE);
             await RpcTransport.SendRecordAsync(retryStream, reply.ToArray(), CancellationToken.None);
-            return (firstXid, retryXid);
+            return (firstXid: firstRequestXid, retryXid: retryRequestXid);
         });
 
         var result = await rpc.CallAsync(
@@ -708,7 +715,7 @@ public sealed class NfsV3ArchitectureTests
     // Multiplexed RPC stream: tracks request XIDs/tags and lets tests reply out of order, duplicate, or with unknown XIDs.
     private sealed class MultiplexingTestStream(bool autoReplyAfterTwoRequests) : Stream
     {
-        private readonly object _writeSync = new();
+        private readonly Lock _writeSync = new();
         private readonly MemoryStream _writeBuffer = new();
         // Outbound reply queue consumed by ReadAsync; each item is already record-marked.
         private readonly Channel<byte[]> _replies = Channel.CreateUnbounded<byte[]>();
