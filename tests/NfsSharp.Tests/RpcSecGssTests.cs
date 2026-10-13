@@ -203,6 +203,21 @@ public class RpcSecGssTests
     }
 
     [Fact]
+    public void MicVerificationResult_DefaultValueFailsClosed()
+    {
+        var mechanism = new FakeGssMechanism { ReturnDefaultMicResult = true };
+
+        var exception = Assert.Throws<NfsException>(() => RpcSecGssMechanism.VerifyMic(
+            mechanism,
+            [1, 2, 3],
+            [0xAA],
+            qop: 0));
+
+        Assert.Equal(RpcSecGssMicVerificationStatus.Failed, default(RpcSecGssMicVerificationResult).Status);
+        Assert.Contains("failed to verify the MIC", exception.Message);
+    }
+
+    [Fact]
     public void ProtectArguments_IntegrityEncodesSequenceAndMicOverDatabody()
     {
         var mechanism = new FakeGssMechanism();
@@ -944,6 +959,7 @@ public class RpcSecGssTests
         public uint ReportedQopOffset { get; set; }
         public uint ReportedMicQopOffset { get; set; }
         public Exception? VerificationException { get; set; }
+        public bool ReturnDefaultMicResult { get; set; }
 
         public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
             Task.FromResult(new byte[] { 0x01 });
@@ -969,6 +985,8 @@ public class RpcSecGssTests
         }
         public RpcSecGssMicVerificationResult VerifyMicWithResult(byte[] data, byte[] mic, uint qop)
         {
+            if (ReturnDefaultMicResult)
+                return default;
             if (VerificationException is not null)
                 throw VerificationException;
             var valid = VerifyMic(data, mic, qop);

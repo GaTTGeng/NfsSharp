@@ -88,14 +88,14 @@ public readonly record struct RpcSecGssMicVerificationResult(RpcSecGssMicVerific
 /// <summary>Result codes for QOP-aware MIC verification.</summary>
 public enum RpcSecGssMicVerificationStatus
 {
+    /// <summary>The mechanism could not complete verification; this is the default value and must fail closed.</summary>
+    Failed = 0,
     /// <summary>The MIC is valid for the reported QOP.</summary>
-    Verified,
+    Verified = 1,
     /// <summary>The MIC does not match the supplied data.</summary>
-    Invalid,
+    Invalid = 2,
     /// <summary>The mechanism does not support the requested QOP.</summary>
-    UnsupportedQop,
-    /// <summary>The mechanism could not complete verification.</summary>
-    Failed,
+    UnsupportedQop = 3,
 }
 
 /// <summary>
