@@ -78,7 +78,7 @@ await client.UnMountDeviceAsync();
 - 导出目录发现、挂载和卸载。
 - 路径查询和属性查询。
 - READDIR 和 READDIRPLUS 目录读取。
-- 流式与偏移量文件读写，包括可返回写入稳定性和 verifier 的写入与提交 API。
+- 流式与偏移量文件读写，包括暂存式流文件替换，以及可返回写入稳定性和 verifier 的写入与提交 API。
 - 文件和目录创建、删除与重命名。
 - 符号链接和硬链接。
 - 权限、所有者、时间戳、文件大小和 guarded 属性更新。
@@ -93,16 +93,12 @@ await client.UnMountDeviceAsync();
 - 尚未实现 NFSv2。
 - NFSv4 API 仍处于实验阶段，尚缺少专门的自动化测试和多服务端集成验证。
 - 端到端行为取决于服务端导出策略、身份映射、防火墙、rpcbind 和 mountd 配置。
-- 自动化测试覆盖协议编码和本地行为；CI 还会针对仓库自有的 NFS-Ganesha 服务端运行 NFSv3 集成测试。针对多种 NFS 服务端的集成测试仍属于后续路线图。
+- 自动化测试覆盖协议编码和本地行为；CI 会针对 NFS-Ganesha 和 Ubuntu Linux 内核 NFS 服务端运行 NFSv3 集成测试。更广泛的服务端互操作矩阵仍属于后续路线图。
 
 ## 文档
 
-- [快速开始](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/getting-started.md)
-- [API 概览](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/api-overview.md)
-- [路线图](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/roadmap.md)
-- [NFS 兼容性矩阵](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)
+- [文档导航](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/README.md)
 - [NFSv3 集成测试](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/tests/integration/README.md)
-- [维护者发布指南](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/maintainer-release.md)
 
 ## 构建与测试
 

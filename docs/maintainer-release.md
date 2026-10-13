@@ -27,8 +27,12 @@ Before tagging, prepare and review a release PR that:
 - updates `src/Directory.Build.props` to the intended package version;
 - moves completed entries from `Unreleased` into a dated `CHANGELOG.md` section;
 - keeps README, compatibility, and release documentation aligned with the version and support scope;
-- passes `dotnet test NfsSharp.sln --configuration Release`;
+- passes `dotnet restore NfsSharp.sln`;
+- passes `dotnet build NfsSharp.sln --configuration Release --no-restore`;
+- passes `dotnet test NfsSharp.sln --configuration Release --no-build --no-restore`;
 - passes `dotnet pack NfsSharp.sln --configuration Release --no-build --output artifacts/packages`.
+
+For changes to NFSv3 wire behavior, mount/export handling, file operations, retries, caching, or compatibility claims, also run the Docker-backed integration suite in [the integration guide](../tests/integration/README.md) and tear down its fixture afterward.
 
 Use NuGet SemVer tags without a leading `v`:
 

@@ -105,7 +105,7 @@ Console.WriteLine($"{attributes.Size} bytes");
 - Export discovery and mount/unmount.
 - Path lookup and attribute queries.
 - Directory listing through READDIR and READDIRPLUS.
-- Streaming and offset-based file reads and writes, including result-returning write and commit APIs for stability and verifier inspection.
+- Streaming and offset-based file reads and writes, including staged streamed file replacement and result-returning write and commit APIs for stability and verifier inspection.
 - File and directory creation and deletion.
 - Rename, symbolic links, and hard links.
 - Permission, ownership, timestamp, file-size, and guarded attribute updates.
@@ -120,16 +120,12 @@ Console.WriteLine($"{attributes.Size} bytes");
 - NFSv2 is not implemented.
 - NFSv4 APIs are experimental and currently lack dedicated automated and multi-server integration coverage.
 - End-to-end behavior depends on the server's export policy, identity mapping, firewall, rpcbind, and mountd configuration.
-- The automated suite covers protocol encoding and local behavior, and CI also runs a repository-owned NFS-Ganesha integration suite for NFSv3. Integration tests against multiple NFS server implementations remain a roadmap item.
+- The automated suite covers protocol encoding and local behavior. CI runs the NFSv3 integration suite against NFS-Ganesha and the Ubuntu Linux kernel NFS server; a broader server interoperability matrix remains a roadmap item.
 
 ## Documentation
 
-- [Getting started](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/getting-started.md)
-- [API overview](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/api-overview.md)
-- [Roadmap](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/roadmap.md)
-- [NFS compatibility matrix](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)
+- [Documentation index](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/README.md)
 - [NFSv3 integration tests](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/tests/integration/README.md)
-- [Maintainer release guide](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/maintainer-release.md)
 
 ## Build
 

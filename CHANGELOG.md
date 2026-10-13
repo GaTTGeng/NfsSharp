@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-13
+
 ### Added
 
 - Added opt-in `WriteSafelyAsync` / `WriteFileSafelyAsync` APIs that stage streamed writes privately in a guarded-created sibling file, preserve an existing destination's mode, COMMIT writes that are not `FILE_SYNC`, validate write verifiers, and rename into place after a complete transfer.
@@ -37,6 +39,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Security
 
 - `NoOpGssMechanism` is rejected when integrity or privacy service is requested; it remains deterministic-test-only and is never interoperability evidence.
+
+### Dependencies
+
+- Updated `Microsoft.Extensions.Logging.Abstractions` to 10.0.12 and `Microsoft.SourceLink.GitHub` to 10.0.401.
+- Updated the test toolchain: `Microsoft.NET.Test.Sdk` to 18.10.0, `xunit.runner.visualstudio` to 4.0.0, and `coverlet.collector` to 10.1.0.
 
 ## [1.2.0] - 2026-08-13
 
