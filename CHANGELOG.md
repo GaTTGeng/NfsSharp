@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-13
+
 ### Added
 
 - Added opt-in `WriteSafelyAsync` / `WriteFileSafelyAsync` APIs that stage streamed writes privately in a guarded-created sibling file, preserve an existing destination's mode, COMMIT writes that are not `FILE_SYNC`, validate write verifiers, and rename into place after a complete transfer.
