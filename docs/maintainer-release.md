@@ -22,10 +22,10 @@ No `NUGET_API_KEY` repository secret is required.
 
 ## Release a version
 
-Before tagging, prepare and review a release PR that:
+Review commits since the previous release tag and prepare a focused release PR that:
 
 - updates `src/Directory.Build.props` to the intended package version;
-- moves completed entries from `Unreleased` into a dated `CHANGELOG.md` section;
+- moves completed entries from `Unreleased` into a dated `CHANGELOG.md` section and leaves a fresh empty `Unreleased` section;
 - keeps README, compatibility, and release documentation aligned with the version and support scope;
 - passes `dotnet restore NfsSharp.sln`;
 - passes `dotnet build NfsSharp.sln --configuration Release --no-restore`;
@@ -34,16 +34,39 @@ Before tagging, prepare and review a release PR that:
 
 For changes to NFSv3 wire behavior, mount/export handling, file operations, retries, caching, or compatibility claims, also run the Docker-backed integration suite in [the integration guide](../tests/integration/README.md) and tear down its fixture afterward.
 
-Use NuGet SemVer tags without a leading `v`:
+After the PR is merged, push a plain NuGet SemVer tag from the tested commit on `master`:
 
 ```powershell
 git tag <version>
 git push origin <version>
 ```
 
-The release workflow strips a leading `v` if one is used, but plain SemVer tags match the NuGet package version directly.
+The tag triggers `Release NuGet`, which builds, tests, packs, uploads packages, and publishes through NuGet Trusted Publishing. Merging the PR does not publish the package or create a GitHub Release page. Wait for the tag workflow to finish successfully and confirm its `nuget-packages-<version>` artifact contains `.nupkg` and `.snupkg` files for both packages. NuGet indexing can take several minutes; workflow success is the publishing signal.
 
-The release commit must be reachable from `master`.
+## Create the GitHub Release page
+
+The GitHub Release page is a separate manual step. Download the artifact from the successful tag workflow and attach all four package files:
+
+```powershell
+$version = "<version>"
+$runId = "<release-workflow-run-id>"
+$artifactDirectory = "artifacts/release-assets"
+$releaseNotesPath = "artifacts/release-notes.md" # Prepare this file using the checklist below.
+gh run download $runId --repo GaTTGeng/NfsSharp --name "nuget-packages-$version" --dir $artifactDirectory
+$assets = @(Get-ChildItem -LiteralPath $artifactDirectory -File | Where-Object { $_.Extension -in ".nupkg", ".snupkg" } | ForEach-Object FullName)
+if ($assets.Count -ne 4) { throw "Expected four package and symbol assets; found $($assets.Count)." }
+gh release create $version --repo GaTTGeng/NfsSharp --title "NfsSharp $version" --verify-tag --notes-file $releaseNotesPath @assets
+```
+
+Write release notes from the dated changelog section. Include an install command, a NuGet link for each package at the released version, concise user-facing highlights, the compatibility boundary and known scope (including that NFSv4 and RPCSEC_GSS remain experimental), and a link to the versioned `CHANGELOG.md`.
+
+Verify the page and every package asset:
+
+```powershell
+gh release view <version> --repo GaTTGeng/NfsSharp --json name,body,assets,url
+```
+
+Do not announce the release until the workflow succeeded and the GitHub Release page contains the expected notes and package assets. If publishing fails, fix and rerun that workflow; never reuse a version that has already been published.
 
 To run a manual release, open the `Release NuGet` workflow, enter the package version, and enable publishing.
 
