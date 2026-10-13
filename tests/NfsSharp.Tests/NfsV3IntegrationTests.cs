@@ -1789,6 +1789,29 @@ public sealed class NfsV3IntegrationTests
         {
             await RunProcessAsync("sudo", ["systemctl", "restart", "nfs-server"], repositoryRoot, ct);
             await RunProcessAsync("sudo", ["systemctl", "is-active", "--quiet", "nfs-server"], repositoryRoot, ct);
+            // Unit activation can precede RPC registration; match the kernel fixture's readiness probes.
+            await RunProcessAsync(
+                "bash",
+                [
+                    "-c",
+                    """
+                    for attempt in {1..30}; do
+                      if rpcinfo -t 127.0.0.1 100000 2 >/dev/null 2>&1 &&
+                         rpcinfo -t 127.0.0.1 100005 3 >/dev/null 2>&1 &&
+                         rpcinfo -t 127.0.0.1 100003 3 >/dev/null 2>&1; then
+                        exit 0
+                      fi
+
+                      sleep 2
+                    done
+
+                    echo "Linux kernel NFSv3 RPC programs did not become ready after restart." >&2
+                    rpcinfo -p 127.0.0.1 >&2 || true
+                    exit 1
+                    """
+                ],
+                repositoryRoot,
+                ct);
             return;
         }
 
