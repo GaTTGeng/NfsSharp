@@ -113,6 +113,24 @@ jobs:
           --logger trx
           --results-directory TestResults/NfsV3Integration
 
+      - name: Run NFSv3 server-restart recovery test
+        env:
+          NFSSHARP_RUN_NFSV3_INTEGRATION: "1"
+          NFSSHARP_RUN_NFS_SERVER_RESTART_TEST: "1"
+          NFSSHARP_NFS_RESTART_KIND: ganesha-compose
+          NFSSHARP_NFS_SERVER: 127.0.0.1
+          NFSSHARP_NFS_EXPORT: /export
+          NFSSHARP_NFS_UID: "0"
+          NFSSHARP_NFS_GID: "0"
+        run: >
+          dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj
+          --configuration ${{ env.CONFIGURATION }}
+          --no-build
+          --no-restore
+          --filter "Category=IntegrationRestart"
+          --logger trx
+          --results-directory TestResults/NfsV3Integration
+
       - name: Capture NFSv3 server logs
         if: always()
         run: |
@@ -164,6 +182,24 @@ jobs:
           dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj
           --configuration ${{ env.CONFIGURATION }}
           --filter "Category=Integration"
+          --logger trx
+          --results-directory TestResults/NfsV3KernelIntegration
+
+      - name: Run NFSv3 server-restart recovery test
+        env:
+          NFSSHARP_RUN_NFSV3_INTEGRATION: "1"
+          NFSSHARP_RUN_NFS_SERVER_RESTART_TEST: "1"
+          NFSSHARP_NFS_RESTART_KIND: kernel-service
+          NFSSHARP_NFS_SERVER: 127.0.0.1
+          NFSSHARP_NFS_EXPORT: /srv/nfssharp-kernel-export
+          NFSSHARP_NFS_UID: "0"
+          NFSSHARP_NFS_GID: "0"
+        run: >
+          dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj
+          --configuration ${{ env.CONFIGURATION }}
+          --no-build
+          --no-restore
+          --filter "Category=IntegrationRestart"
           --logger trx
           --results-directory TestResults/NfsV3KernelIntegration
 

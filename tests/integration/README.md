@@ -58,6 +58,23 @@ docker compose -f compose.integration.yml down --volumes --remove-orphans
 
 Without `NFSSHARP_RUN_NFSV3_INTEGRATION=1`, the integration tests are skipped and the normal unit-test workflow does not require Docker.
 
+## Verify recovery after a server restart
+
+The restart scenario runs separately from the ordinary integration suite because it interrupts the configured NFS server. It checks that a retry-safe call recovers the transport, that a stale root handle remains a surfaced `STALE` result when the server invalidates it, and that a new client can mount the export afterward. NFS-Ganesha keeps mountd reachable for the previous client's `UMNT`; the Linux kernel server can re-register mountd on a new dynamic port, so the old client's `UMNT` may fail transiently. In that case the client closes its connection, treats a second unmount as a no-op, and a new client resolves the current mountd port. CI runs the scenario once against each maintained server fixture.
+
+For the NFS-Ganesha fixture, start the Compose server first and run:
+
+```powershell
+$env:NFSSHARP_RUN_NFSV3_INTEGRATION = "1"
+$env:NFSSHARP_RUN_NFS_SERVER_RESTART_TEST = "1"
+$env:NFSSHARP_NFS_RESTART_KIND = "ganesha-compose"
+$env:NFSSHARP_NFS_SERVER = "127.0.0.1"
+$env:NFSSHARP_NFS_EXPORT = "/export"
+dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release --filter "Category=IntegrationRestart"
+```
+
+For the Linux kernel fixture, run the same test variables with `NFSSHARP_NFS_RESTART_KIND="kernel-service"` after setup. The test uses `sudo systemctl restart nfs-server`; keep the teardown trap from the kernel fixture instructions active.
+
 ## Measure concurrent RPC reads
 
 The opt-in benchmark test compares a serialized baseline (`MaxOutstandingRpcCallsPerConnection=1`) with bounds of 8 and 32. For each bound it runs 64 concurrent AUTH_SYS reads using a 32-byte payload and 64 KiB reads from a generated 256 KiB file, then reports throughput, p50/p95 latency, process allocation delta, the worker connection count, and the observed pending-call high-water mark through xUnit output.

@@ -13,6 +13,21 @@ public sealed class NfsV3IntegrationFactAttribute : FactAttribute
     }
 }
 
+/// <summary>Marks an opt-in integration fact that restarts its NFS server fixture.</summary>
+public sealed class NfsV3ServerRestartFactAttribute : FactAttribute
+{
+    public NfsV3ServerRestartFactAttribute()
+    {
+        if (!NfsV3IntegrationEnvironment.IsEnabled)
+            Skip = "Set NFSSHARP_RUN_NFSV3_INTEGRATION=1 to run real-server NFSv3 tests.";
+        else if (!string.Equals(
+                     Environment.GetEnvironmentVariable("NFSSHARP_RUN_NFS_SERVER_RESTART_TEST"),
+                     "1",
+                     StringComparison.Ordinal))
+            Skip = "Set NFSSHARP_RUN_NFS_SERVER_RESTART_TEST=1 to run tests that restart the server fixture.";
+    }
+}
+
 /// <summary>
 /// Reads the NFSv3 integration environment (NFSSHARP_NFS_*): server, export path, uid/gid,
 /// portmap port, expected export group, and optional server-behavior expectations.
