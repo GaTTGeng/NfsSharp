@@ -336,7 +336,7 @@ public class RpcSecGssTests
         reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: trailing.ToArray());
         Assert.Contains("trailing data", Assert.Throws<NfsException>(() => session.UnprotectReplyBody(reply, record)).Message);
 
-        reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: [0, 0, 0]);
+        reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop), body: "\0\0\0"u8.ToArray());
         Assert.Contains("protected result rejected", Assert.Throws<NfsException>(() => session.UnprotectReplyBody(reply, record)).Message);
     }
 
@@ -364,7 +364,7 @@ public class RpcSecGssTests
                 GssMechanism = new NoOpGssMechanism(),
                 GssService = service,
             };
-            var ex = Assert.Throws<NfsException>(() => options.Validate());
+            var ex = Assert.Throws<NfsException>(options.Validate);
             Assert.Contains("restricted to deterministic protocol tests", ex.Message);
         }
     }
@@ -396,7 +396,7 @@ public class RpcSecGssTests
                 GssMechanism = new NegotiateGssMechanism(),
                 GssService = service,
             };
-            var ex = Assert.Throws<NfsException>(() => options.Validate());
+            var ex = Assert.Throws<NfsException>(options.Validate);
             Assert.Contains("cannot compute the RPCSEC_GSS data-call header verifier", ex.Message);
         }
     }
@@ -945,8 +945,8 @@ public class RpcSecGssTests
     {
         public byte[] MechanismOid => [0x2A];
         public bool IsEstablished { get; set; } = true;
-        public int EstablishOnContinueCall { get; set; } = 1;
-        public bool RequireEstablishedForVerification { get; set; }
+        public int EstablishOnContinueCall { get; init; } = 1;
+        public bool RequireEstablishedForVerification { get; init; }
         public bool Disposed { get; private set; }
         public List<byte[]> ServerTokens { get; } = [];
         private int _continueCalls;
@@ -959,7 +959,7 @@ public class RpcSecGssTests
         public uint ReportedQopOffset { get; set; }
         public uint ReportedMicQopOffset { get; set; }
         public Exception? VerificationException { get; set; }
-        public bool ReturnDefaultMicResult { get; set; }
+        public bool ReturnDefaultMicResult { get; init; }
 
         public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
             Task.FromResult(new byte[] { 0x01 });

@@ -68,6 +68,7 @@ public sealed class XdrReader
     private readonly byte[] _buffer;
     private int _position;
 
+    /// <summary>Creates a reader over an XDR-encoded message buffer.</summary>
     public XdrReader(byte[] buffer)
     {
         _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
@@ -148,6 +149,8 @@ public sealed class XdrReader
     /// <summary>Skips a length-prefixed opaque value up to the default size cap.</summary>
     public void SkipOpaque() => SkipOpaque(MaxOpaqueLength);
 
+    // ReSharper disable once MemberCanBePrivate.Global
+    // This public helper is part of the XDR reader API for callers consuming opaque fields.
     /// <summary>Skips an opaque value constrained to <paramref name="maxLength"/> bytes.</summary>
     public void SkipOpaque(int maxLength)
     {
@@ -158,6 +161,8 @@ public sealed class XdrReader
     }
 
     /// <summary>Validates an untrusted opaque length against a caller-supplied cap.</summary>
+    // maxLength is intentionally used only to reject values outside the allowed wire-size range.
+    // ReSharper disable once ParameterOnlyUsedForPreconditionCheck.Local
     private static int CheckedLength(uint value, int maxLength)
     {
         // Caller cap must itself be sane and cannot exceed the global allocation ceiling.

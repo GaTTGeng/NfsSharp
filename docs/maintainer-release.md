@@ -52,11 +52,20 @@ $version = "<version>"
 $runId = "<release-workflow-run-id>"
 $artifactDirectory = "artifacts/release-assets"
 $releaseNotesPath = "artifacts/release-notes.md" # Prepare this file using the checklist below.
+$releaseCommit = gh run view $runId --repo GaTTGeng/NfsSharp --json headSha --jq .headSha
+if ($LASTEXITCODE -ne 0 -or -not $releaseCommit) { throw "Could not read the release workflow commit." }
+if (git ls-remote --exit-code --tags origin "refs/tags/$version" 2>$null) {
+  throw "Tag $version already exists; use the workflow run triggered by that tag instead."
+}
 gh run download $runId --repo GaTTGeng/NfsSharp --name "nuget-packages-$version" --dir $artifactDirectory
 $assets = @(Get-ChildItem -LiteralPath $artifactDirectory -File | Where-Object { $_.Extension -in ".nupkg", ".snupkg" } | ForEach-Object FullName)
 if ($assets.Count -ne 4) { throw "Expected four package and symbol assets; found $($assets.Count)." }
-gh release create $version --repo GaTTGeng/NfsSharp --title "NfsSharp $version" --verify-tag --notes-file $releaseNotesPath @assets
+$releaseOptions = @()
+if ($version -match '-') { $releaseOptions += "--prerelease" }
+gh release create $version --repo GaTTGeng/NfsSharp --title "NfsSharp $version" --target $releaseCommit --notes-file $releaseNotesPath @releaseOptions @assets
 ```
+
+For a manual `workflow_dispatch` release, this command creates the version tag at the exact commit used by that run. It refuses to proceed if the remote tag already exists. Versions with a prerelease suffix such as `1.4.0-preview.1` are marked as prereleases on GitHub.
 
 Write release notes from the dated changelog section. Include an install command, a NuGet link for each package at the released version, concise user-facing highlights, the compatibility boundary and known scope (including that NFSv4 and RPCSEC_GSS remain experimental), and a link to the versioned `CHANGELOG.md`.
 

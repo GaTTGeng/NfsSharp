@@ -4,16 +4,12 @@ using System.Net.Sockets;
 using System.Reflection;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
-using Xunit.Abstractions;
 
 namespace NfsSharp.Tests;
 
 /// <summary>XDR primitive encode/decode round-trips and rejection of malformed wire values.</summary>
 public class XdrTests
 {
-    private readonly ITestOutputHelper _output;
-    public XdrTests(ITestOutputHelper output) { _output = output; }
-
     [Fact]
     public void XdrWriterReader_UInt_Roundtrip()
     {
@@ -94,7 +90,7 @@ public class XdrTests
         writer.UInt(1);
         writer.Str("name");
         writer.Bool(true);
-        writer.Opaque(new byte[] { 0xFF });
+        writer.Opaque([0xFF]);
         writer.ULong(999);
         var bytes = writer.ToArray();
 
@@ -564,6 +560,8 @@ public class NfsModelsTests
         // Scenario 1: MOUNT MNT succeeds at the RPC layer but returns mountstat3=ACCESS; the status must survive on NfsException.
         await using var deniedMount = new RpcFixtureServer(1, call =>
             RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(MountV3Status.Access)));
+        // Both fixture servers stay alive until the awaited portmap and mount requests finish.
+        // ReSharper disable once AccessToDisposedClosure
         await using var deniedPortmap = new RpcFixtureServer(2, (call, index) =>
             RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(index == 0 ? (uint)deniedMount.Port : 2048)));
 
@@ -589,8 +587,11 @@ public class NfsModelsTests
                 writer.UInt(0);
             })
             : RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.ProcedureUnavailable));
+        // The callback is awaited before this method's await-using servers are disposed.
+        // ReSharper disable AccessToDisposedClosure
         await using var portmap = new RpcFixtureServer(2, (call, index) =>
             RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(index == 0 ? (uint)mount.Port : (uint)nfs.Port)));
+        // ReSharper restore AccessToDisposedClosure
 
         await using var client = await NfsV3Client.ConnectAsync("127.0.0.1", "/export", CreateFixtureOptions(portmap.Port), CancellationToken.None);
         var unmountException = await Assert.ThrowsAsync<NfsException>(() => client.UnmountAsync(CancellationToken.None));
@@ -733,8 +734,8 @@ public class NfsModelsTests
         // signaled only by post_op_attr / name_attributes presence bits, never by zero timestamps.
         var nonZeroAtime = new NfsTimestamp(1_704_158_645, 123_456_789);
         var nonZeroCtime = new NfsTimestamp(1_704_158_700, 0);
-        byte[] readDirVerifier = [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37];
-        byte[] readDirPlusVerifier = [0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47];
+        byte[] readDirVerifier = "01234567"u8.ToArray();
+        byte[] readDirPlusVerifier = "@ABCDEFG"u8.ToArray();
         uint[] procedures = [1, 1, 16, 17, 17];
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
         {
@@ -851,6 +852,8 @@ public class NfsModelsTests
             var mixedPlus = await client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None);
             Assert.Collection(
                 mixedPlus,
+                // Assert.Collection uses each parameter to identify the item under test.
+                // ReSharper disable once ParameterOnlyUsedForPreconditionCheck.Local
                 entry =>
                 {
                     Assert.Equal("mixed-entry", entry.Name);
@@ -859,6 +862,7 @@ public class NfsModelsTests
                     Assert.Equal(nonZeroAtime, entry.Attr.AtimeTimestamp);
                     Assert.Equal(nonZeroCtime, entry.Attr.CtimeTimestamp);
                 },
+                // ReSharper disable once ParameterOnlyUsedForPreconditionCheck.Local
                 entry =>
                 {
                     // Absent attributes remain null via the name_attributes presence bit.
@@ -1050,6 +1054,8 @@ public class NfsModelsTests
     public async Task NfsV3Client_WriteFileResendsOnlyUnwrittenSuffixAfterShortWrite()
     {
         byte[] verifier = [0, 1, 2, 3, 4, 5, 6, 7];
+        // These are protocol payload bytes selected to exercise short-write offsets.
+        // ReSharper disable once UseUtf8StringLiteral
         byte[][] expectedData = [[0x10, 0x20, 0x30, 0x40], [0x30, 0x40], [0x50]];
         ulong[] expectedOffsets = [0, 2, 4];
         uint[] acceptedCounts = [2, 2, 1];
@@ -1126,7 +1132,10 @@ public class NfsModelsTests
     {
         // RFC 1813 §§3.3.16-3.3.17 require cookie/verifier continuation for non-terminal pages.
         // Two multi-page traversals (READDIR and READDIRPLUS) followed by status and paging-defect cases.
+        // Directory verifiers are opaque protocol bytes, not UTF-8 text.
+        // ReSharper disable once UseUtf8StringLiteral
         byte[] readDirVerifier = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        // ReSharper disable once UseUtf8StringLiteral
         byte[] readDirPlusVerifier = [0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27];
         uint[] procedures = [16, 16, 17, 17, 16, 17, 16, 17];
         await using var nfs = new RpcFixtureServer(procedures.Length, (call, index) =>
@@ -1187,12 +1196,15 @@ public class NfsModelsTests
             var plusEntries = await client.ReadDirPlusAsync(FixtureHandle, CancellationToken.None);
             Assert.Collection(
                 plusEntries,
+                // Assert.Collection uses each parameter to identify the item under test.
+                // ReSharper disable once ParameterOnlyUsedForPreconditionCheck.Local
                 entry =>
                 {
                     Assert.Equal("third", entry.Name);
                     Assert.Null(entry.Attr);
                     Assert.Null(entry.Handle);
                 },
+                // ReSharper disable once ParameterOnlyUsedForPreconditionCheck.Local
                 entry =>
                 {
                     Assert.Equal("fourth", entry.Name);
@@ -1845,7 +1857,7 @@ public class NfsModelsTests
     {
         await using var client = CreateNfsV3Client();
         using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
+        await cancellation.CancelAsync();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
             () => client.WriteAtWithResultAsync([0x01], 0, new byte[] { 0x02 }, cancellation.Token));
@@ -1863,7 +1875,7 @@ public class NfsModelsTests
     {
         await using var client = new NfsClient(NfsVersion.V3, NfsClientOptions.Default);
         using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
+        await cancellation.CancelAsync();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
             () => client.WriteAtAsync([0x01], 0, new byte[] { 0x02 }, cancellation.Token));

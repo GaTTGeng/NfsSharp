@@ -6,6 +6,8 @@ namespace NfsSharp.Client;
 /// <summary>
 /// Fluent builder for configuring and creating <see cref="NfsClient"/> instances.
 /// </summary>
+// The builder is a public SDK entry point used by external consumers.
+// ReSharper disable UnusedMember.Global, UnusedType.Global
 public sealed class NfsClientBuilder
 {
     private NfsVersion _version = NfsVersion.V3;
@@ -44,6 +46,7 @@ public sealed class NfsClientBuilder
         return this;
     }
 
+    /// <summary>Set the AUTH_SYS user and primary group identifiers.</summary>
     public NfsClientBuilder WithCredentials(uint userId, uint groupId)
     {
         _userId = userId;
@@ -51,6 +54,7 @@ public sealed class NfsClientBuilder
         return this;
     }
 
+    /// <summary>Set the AUTH_SYS user, primary group, and auxiliary group identifiers.</summary>
     public NfsClientBuilder WithCredentials(uint userId, uint groupId, IReadOnlyList<uint> auxiliaryGroups)
     {
         _userId = userId;
@@ -59,6 +63,7 @@ public sealed class NfsClientBuilder
         return this;
     }
 
+    /// <summary>Set the timeout for client operations.</summary>
     public NfsClientBuilder WithCommandTimeout(TimeSpan timeout)
     {
         _commandTimeout = timeout;
@@ -137,6 +142,7 @@ public sealed class NfsClientBuilder
         return this;
     }
 
+    /// <summary>Configure TCP keep-alive behavior.</summary>
     public NfsClientBuilder WithTcpKeepAlive(bool enabled, TimeSpan? interval = null)
     {
         _tcpKeepAlive = enabled;
@@ -145,12 +151,14 @@ public sealed class NfsClientBuilder
         return this;
     }
 
+    /// <summary>Configure TCP_NODELAY for client connections.</summary>
     public NfsClientBuilder WithTcpNoDelay(bool enabled)
     {
         _tcpNoDelay = enabled;
         return this;
     }
 
+    /// <summary>Set the logger used by the client.</summary>
     public NfsClientBuilder WithLogger(ILogger logger)
     {
         _logger = logger;
@@ -165,7 +173,7 @@ public sealed class NfsClientBuilder
     /// </summary>
     public NfsClientBuilder WithKerberos(string targetSpn, RpcSecGssService service = RpcSecGssService.Integrity)
     {
-        _gssMechanism = new NegotiateGssMechanism("Kerberos");
+        _gssMechanism = new NegotiateGssMechanism();
         _gssService = service;
         _gssTargetName = targetSpn;
         return this;
@@ -187,6 +195,7 @@ public sealed class NfsClientBuilder
     }
 
     /// <summary>Materialize the configured <see cref="NfsClientOptions"/> without creating a client.</summary>
+    // ReSharper disable once MemberCanBePrivate.Global
     public NfsClientOptions BuildOptions() => new()
     {
         UserId = _userId,
@@ -217,3 +226,4 @@ public sealed class NfsClientBuilder
     /// <summary>Create a <see cref="NfsClient"/> with the configured options.</summary>
     public NfsClient Build() => new(_version, BuildOptions());
 }
+// ReSharper restore UnusedMember.Global, UnusedType.Global

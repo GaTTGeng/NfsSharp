@@ -1,4 +1,3 @@
-using System.Text;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
 
@@ -16,8 +15,8 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
     public const string RootDirectory = "nfssharp-fixtures";
     public const string EmptyDirectory = $"{RootDirectory}/empty-dir";
     public const string NestedDirectory = $"{RootDirectory}/nested/child";
-    public const string MutableRunsDirectory = $"{RootDirectory}/runs";
-    public const string EmptyFilePath = $"{RootDirectory}/empty.txt";
+    private const string MutableRunsDirectory = $"{RootDirectory}/runs";
+    private const string EmptyFilePath = $"{RootDirectory}/empty.txt";
     public const string SmallFilePath = $"{RootDirectory}/hello.txt";
     public const string NestedFilePath = $"{NestedDirectory}/data.bin";
     public const string UnicodeFilePath = $"{RootDirectory}/unicode-\u6d4b\u8bd5.txt";
@@ -33,26 +32,26 @@ internal sealed class NfsV3IntegrationFixture : IAsyncDisposable
     public static readonly string BoundaryFileName =
         "boundary-" + new string('x', 246);
 
-    public static readonly string BoundaryFilePath =
+    private static readonly string BoundaryFilePath =
         $"{RootDirectory}/{BoundaryFileName}";
 
     public static readonly NfsV3FixtureFile EmptyFile =
         new(EmptyFilePath, Array.Empty<byte>(), 0x1A4);
 
     public static readonly NfsV3FixtureFile SmallFile =
-        new(SmallFilePath, Encoding.UTF8.GetBytes("NfsSharp NFSv3 fixture\r\nline 2\r\n"), 0x1A4);
+        new(SmallFilePath, "NfsSharp NFSv3 fixture\r\nline 2\r\n"u8.ToArray(), 0x1A4);
 
     public static readonly NfsV3FixtureFile NestedFile =
         new(NestedFilePath, CreateBinaryContent(513), 0x180);
 
     public static readonly NfsV3FixtureFile UnicodeFile =
-        new(UnicodeFilePath, Encoding.UTF8.GetBytes("unicode path fixture\r\n"), 0x1A4);
+        new(UnicodeFilePath, "unicode path fixture\r\n"u8.ToArray(), 0x1A4);
 
     public static readonly NfsV3FixtureFile BoundaryFile =
         new(BoundaryFilePath, CreateBinaryContent(4096), 0x1A4);
 
-    public static readonly NfsV3FixtureFile RestrictedFile =
-        new(RestrictedFilePath, Encoding.UTF8.GetBytes("permission fixture\r\n"), 0x180);
+    private static readonly NfsV3FixtureFile RestrictedFile =
+        new(RestrictedFilePath, "permission fixture\r\n"u8.ToArray(), 0x180);
 
     private readonly NfsV3Client _client;
     private bool _disposed;

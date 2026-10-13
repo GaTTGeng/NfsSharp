@@ -5,6 +5,8 @@ namespace NfsSharp.Protocol;
 /// <summary>NFS file types as defined by RFC 1813 ftype3.</summary>
 public enum NfsType
 {
+    // ReSharper disable once UnusedMember.Global
+    // None remains a valid wire value for callers decoding absent or unknown file types.
     None = 0,
     Reg = 1,
     Dir = 2,
@@ -47,6 +49,8 @@ public sealed record NfsFattr(NfsType Type, long Size, DateTime? Mtime)
     public uint LinkCount { get; init; }
     public uint Uid { get; init; }
     public uint Gid { get; init; }
+    // ReSharper disable once UnusedAutoPropertyAccessor.Global
+    // Public attribute retained for callers even when this assembly does not read it.
     public ulong Used { get; init; }
     public ulong FileSystemId { get; init; }
     public ulong FileId { get; init; }
@@ -103,6 +107,8 @@ public sealed record NfsPathConf
     public uint LinkMax { get; init; }
     public uint NameMax { get; init; }
     public bool NoTrunc { get; init; }
+    // ReSharper disable once UnusedAutoPropertyAccessor.Global
+    // Public PATHCONF attribute retained for callers even when this assembly does not read it.
     public bool ChownRestricted { get; init; }
     public bool CaseInsensitive { get; init; }
     public bool CasePreserving { get; init; }
@@ -232,6 +238,8 @@ public sealed record NfsClientOptions
         }
 
         // Mechanisms without real GSS integrity/privacy must not claim those services.
+        // Applications may provide a mechanism implementing both public extension interfaces.
+        // ReSharper disable once SuspiciousTypeConversion.Global
         if (GssMechanism is not null &&
             GssService != RpcSecGssService.None &&
             !RpcSecGssMechanism.ProvidesCryptographicProtection(GssMechanism))
@@ -243,6 +251,7 @@ public sealed record NfsClientOptions
 
         if (GssMechanism is not null &&
             GssService == RpcSecGssService.Privacy &&
+            // ReSharper disable once SuspiciousTypeConversion.Global
             GssMechanism is not IRpcSecGssPrivacyMechanism)
         {
             throw new NfsException(
@@ -252,11 +261,18 @@ public sealed record NfsClientOptions
 }
 
 /// <summary>Result of ACCESS procedure — granted access mask.</summary>
+// ReSharper disable UnusedType.Global UnusedMember.Global
+// This public result record is consumed by SDK callers even though this assembly does not inspect it.
+// ReSharper disable once NotAccessedPositionalProperty.Global
+// Public protocol result consumed by SDK callers.
 public sealed record NfsAccessResult(NfsAccessMode Granted);
+// ReSharper restore UnusedType.Global UnusedMember.Global
 
 /// <summary>Result of WRITE procedure — count, committed stability, and write verifier.</summary>
 public sealed record NfsWriteResult
 {
+    // ReSharper disable ReplaceWithFieldKeyword
+    // Retain a defensive copy when exposing the verifier to callers.
     private readonly byte[] _writeVerifier;
 
     public NfsWriteResult(int count, NfsWriteStableHow committed, byte[] writeVerifier)
@@ -283,11 +299,14 @@ public sealed record NfsWriteResult
 
     /// <summary>Write verifier; a fresh copy per call so callers cannot mutate the stored value.</summary>
     public byte[] WriteVerifier => _writeVerifier.ToArray();
+    // ReSharper restore ReplaceWithFieldKeyword
 }
 
 /// <summary>Result of COMMIT procedure — write verifier.</summary>
 public sealed record NfsCommitResult
 {
+    // ReSharper disable ReplaceWithFieldKeyword
+    // Retain a defensive copy when exposing the verifier to callers.
     private readonly byte[] _writeVerifier;
 
     public NfsCommitResult(byte[] writeVerifier)
@@ -303,6 +322,7 @@ public sealed record NfsCommitResult
 
     /// <summary>Write verifier; a fresh copy per call so callers cannot mutate the stored value.</summary>
     public byte[] WriteVerifier => _writeVerifier.ToArray();
+    // ReSharper restore ReplaceWithFieldKeyword
 }
 
 /// <summary>NFS protocol exception with optional nfsstat3/mountstat3 status.</summary>
@@ -324,6 +344,8 @@ public sealed class NfsException : Exception
 }
 
 /// <summary>NFSv3 status values (nfsstat3) defined by RFC 1813.</summary>
+// ReSharper disable MemberCanBePrivate.Global
+// Status constants are public protocol values for SDK callers.
 public static class NfsV3Status
 {
     public const uint Ok = 0;
@@ -388,8 +410,11 @@ public static class NfsV3Status
         _ => status.ToString()
     };
 }
+// ReSharper restore MemberCanBePrivate.Global
 
 /// <summary>mount protocol v3 status values defined by RFC 1813 appendix I.</summary>
+// ReSharper disable MemberCanBePrivate.Global
+// Status constants are public protocol values for SDK callers.
 public static class MountV3Status
 {
     public const uint Ok = 0;
@@ -418,3 +443,4 @@ public static class MountV3Status
         _ => status.ToString()
     };
 }
+// ReSharper restore MemberCanBePrivate.Global

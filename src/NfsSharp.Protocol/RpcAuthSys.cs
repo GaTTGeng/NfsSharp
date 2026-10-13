@@ -4,6 +4,8 @@ namespace NfsSharp.Protocol;
 public static class RpcAuthSys
 {
     /// <summary>Maximum AUTH_SYS machine-name length in UTF-8 bytes.</summary>
+    // Public wire-format limit is useful to callers preparing compatible credentials.
+    // ReSharper disable once MemberCanBePrivate.Global
     public const int MaxMachineNameLength = 255;
 
     /// <summary>Maximum number of AUTH_SYS auxiliary groups.</summary>

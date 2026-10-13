@@ -2,6 +2,8 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Client;
 
+// These public operations form part of the NFSv3 SDK API for external callers.
+// ReSharper disable UnusedMember.Global, MemberCanBePrivate.Global
 public sealed partial class NfsV3Client
 {
     /// <summary>Create a file and return its handle.</summary>
@@ -469,3 +471,4 @@ public sealed partial class NfsV3Client
         if (!output.CanWrite) throw new NfsException("Output stream must be writable.");
     }
 }
+// ReSharper restore UnusedMember.Global, MemberCanBePrivate.Global

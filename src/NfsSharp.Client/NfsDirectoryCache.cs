@@ -13,6 +13,8 @@ internal sealed class NfsDirectoryCache
     private readonly bool _enabled;
     private readonly TimeSpan _ttl;
     private readonly Func<DateTime> _utcNow;
+    // Keep object for the net8.0 target, where System.Threading.Lock is unavailable.
+    // ReSharper disable once ChangeFieldTypeToSystemThreadingLock
     private readonly object _mutationGate = new();
     // Bumped on every mutation invalidation; lets Store() drop results read across a mutation.
     private long _mutationGeneration;

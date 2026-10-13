@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
@@ -11,10 +10,11 @@ namespace NfsSharp.Client;
 /// Experimental NFSv4 client supporting COMPOUND operations for v4.0, v4.1, and v4.2.
 /// Covers wire encoding of the listed operations only; not a full-featured NFSv4 implementation.
 /// </summary>
+// Public methods expose the documented experimental client API to external consumers.
+// ReSharper disable UnusedMember.Global
 public sealed class NfsV4Client : IAsyncDisposable
 {
     private const uint ProgPortmap = 100000;
-    private const uint VerPortmap = 2;
     private const uint ProgNfs = 100003;
     private const uint IpprotoTcp = 6;
     private const int DefaultNfsPort = 2049;
@@ -30,15 +30,11 @@ public sealed class NfsV4Client : IAsyncDisposable
     private readonly uint _minorVersion;
 
     private Conn? _nfs;
-    private int _nfsPort;
     private uint _xid;
 
-    // Current/saved file handles used by SAVEFH and PUTFH within COMPOUND sequences.
-    private byte[] _currentFh = Array.Empty<byte>();
-    private byte[] _savedFh = Array.Empty<byte>();
     private ulong _clientId;
-    private byte[] _clientVerifier = new byte[8];
-    private NfsV4StateId? _currentStateId = NfsV4StateId.Anonymous;
+    private readonly byte[] _clientVerifier = new byte[8];
+    private readonly NfsV4StateId? _currentStateId = NfsV4StateId.Anonymous;
     private ulong _sequenceId;
 
     private NfsV4Client(IPAddress ip, NfsClientOptions options, uint minorVersion)
@@ -52,6 +48,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     }
 
     /// <summary>Connect to an NFSv4 server.</summary>
+    // ReSharper disable once MemberCanBePrivate.Global
     public static async Task<NfsV4Client> ConnectAsync(
         string server,
         uint minorVersion,
@@ -72,10 +69,9 @@ public sealed class NfsV4Client : IAsyncDisposable
 
         // Portmapper is optional; without it NFSv4 conventionally listens on 2049.
         var nfsPort = options.PortmapPort > 0
-            ? await client.DiscoverNfsPortAsync(ip, options, ct)
+            ? await client.DiscoverNfsPortAsync(options, ct)
             : DefaultNfsPort;
 
-        client._nfsPort = nfsPort;
         client._nfs = await client.OpenAsync(nfsPort, ct);
 
         // v4.0 negotiates with SETCLIENTID; v4.1+ negotiates a session via EXCHANGE_ID/CREATE_SESSION.
@@ -93,6 +89,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         ConnectAsync(server, 0, null, ct);
 
     /// <summary>Execute a COMPOUND request. Results are positional and match the request operations.</summary>
+    // ReSharper disable once MemberCanBePrivate.Global
     public async Task<NfsV4CompoundResponse> CompoundAsync(NfsV4CompoundRequest request, CancellationToken ct)
     {
         request.MinorVersion = _minorVersion;
@@ -138,8 +135,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>PUTROOTFH + LOOKUP path, then GETATTR.</summary>
     public async Task<NfsV4Fattr> GetAttributesAsync(string path, CancellationToken ct)
     {
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(path))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeGetAttrOp(NfsV4Attr.Type, NfsV4Attr.Size, NfsV4Attr.Mode, NfsV4Attr.Owner,
@@ -156,8 +152,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     public async Task<byte[]> ReadAsync(string path, ulong offset, uint count, CancellationToken ct)
     {
         // v4.1+ READs carry the open stateid; v4.0 and anonymous access use the all-zero stateid.
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(path))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeReadOp(offset, count, _minorVersion >= 1 ? _currentStateId ?? NfsV4StateId.Anonymous : NfsV4StateId.Anonymous));
@@ -166,7 +161,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         EnsureCompoundOk(resp, "READ");
 
         var readResult = resp.Results[^1];
-        var eof = readResult.Data!.Bool();
+        _ = readResult.Data!.Bool();
         var data = readResult.Data.Opaque();
         return data;
     }
@@ -175,8 +170,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     public async Task<int> WriteAsync(string path, ulong offset, ReadOnlyMemory<byte> data, NfsWriteStableHow stableHow, CancellationToken ct)
     {
         var stateId = _minorVersion >= 1 ? _currentStateId ?? NfsV4StateId.Anonymous : NfsV4StateId.Anonymous;
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(path))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeWriteOp(offset, data.ToArray(), stableHow, stateId));
@@ -186,15 +180,14 @@ public sealed class NfsV4Client : IAsyncDisposable
 
         var writeResult = resp.Results[^1];
         var count = writeResult.Data!.UInt();
-        var committed = (NfsWriteStableHow)writeResult.Data.UInt();
+        _ = writeResult.Data.UInt();
         return (int)count;
     }
 
     /// <summary>PUTROOTFH + LOOKUP dir, then CREATE.</summary>
     public async Task CreateAsync(string dirPath, string name, NfsV4FType type, NfsSetAttributes? attributes, CancellationToken ct)
     {
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(dirPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeCreateOp(name, type, attributes));
@@ -206,8 +199,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>PUTROOTFH + LOOKUP dir, then REMOVE.</summary>
     public async Task RemoveAsync(string dirPath, string name, CancellationToken ct)
     {
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(dirPath))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeRemoveOp(name));
@@ -219,8 +211,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>PUTROOTFH + LOOKUP dir, then RENAME.</summary>
     public async Task RenameAsync(string fromDir, string fromName, string toDir, string toName, CancellationToken ct)
     {
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(fromDir))
             ops.Add(MakeLookupOp(part));
         // SAVEFH parks the source directory; RENAME needs both source and target dirs current.
@@ -237,8 +228,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     /// <summary>PUTROOTFH + LOOKUP path, then READDIR.</summary>
     public async Task<List<NfsV4DirEntry>> ReadDirAsync(string path, CancellationToken ct)
     {
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(path))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeReadDirOp(0));
@@ -254,9 +244,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     public async Task<int> OpenWriteCloseAsync(string path, ulong offset, ReadOnlyMemory<byte> data, NfsWriteStableHow stableHow, CancellationToken ct)
     {
         // Phase 1: walk to the parent directory, OPEN the leaf for write, and capture its file handle.
-        var ops = new List<NfsV4Operation>();
-
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         var parts = SplitPath(path).ToArray();
         for (var i = 0; i < parts.Length - 1; i++)
             ops.Add(MakeLookupOp(parts[i]));
@@ -273,14 +261,14 @@ public sealed class NfsV4Client : IAsyncDisposable
         var stateId = NfsV4StateId.Decode(openResult.Data!);
         var fh = resp.Results[^1].Data!.Opaque();
 
-        _currentFh = fh;
-
         // Phase 2: reuse the handle/stateid in a second COMPOUND that writes, commits, and closes.
-        var writeOps = new List<NfsV4Operation>();
-        writeOps.Add(MakeOp(NfsV4Op.Putfh, w => w.Opaque(fh)));
-        writeOps.Add(MakeWriteOp(offset, data.ToArray(), stableHow, stateId));
-        writeOps.Add(MakeCommitOp(offset, (uint)data.Length));
-        writeOps.Add(MakeCloseOp(stateId));
+        var writeOps = new List<NfsV4Operation>
+        {
+            MakeOp(NfsV4Op.Putfh, w => w.Opaque(fh)),
+            MakeWriteOp(offset, data.ToArray(), stableHow, stateId),
+            MakeCommitOp(offset, (uint)data.Length),
+            MakeCloseOp(stateId)
+        };
 
         var writeResp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "write-commit-close", Operations = writeOps }, ct);
         EnsureCompoundOk(writeResp, "WRITE/COMMIT/CLOSE");
@@ -327,8 +315,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     private async Task SetClientIdAsync(CancellationToken ct)
     {
         // Step 1: SETCLIENTID returns the server-assigned clientid plus a confirm verifier.
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeSetClientIdOp());
+        var ops = new List<NfsV4Operation> { MakeSetClientIdOp() };
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "setclientid", Operations = ops }, ct);
         EnsureCompoundOk(resp, "SETCLIENTID");
 
@@ -337,8 +324,10 @@ public sealed class NfsV4Client : IAsyncDisposable
         result.FixedBytes(8); // setclientid_confirm verifier
 
         // Step 2: confirm the id; until this succeeds the server may reclaim it after a restart.
-        var confirmOps = new List<NfsV4Operation>();
-        confirmOps.Add(MakeOp(NfsV4Op.SetClientIdConfirm, w => { w.ULong(_clientId); w.FixedBytes(_clientVerifier); }));
+        var confirmOps = new List<NfsV4Operation>
+        {
+            MakeOp(NfsV4Op.SetClientIdConfirm, w => { w.ULong(_clientId); w.FixedBytes(_clientVerifier); })
+        };
         var confirmResp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "setclientid-confirm", Operations = confirmOps }, ct);
         EnsureCompoundOk(confirmResp, "SETCLIENTID_CONFIRM");
     }
@@ -347,8 +336,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     private async Task EstablishSessionAsync(CancellationToken ct)
     {
         // Step 1: EXCHANGE_ID registers the client and returns clientid/sequence id.
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeExchangeIdOp());
+        var ops = new List<NfsV4Operation> { MakeExchangeIdOp() };
         var resp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "exchange_id", Operations = ops }, ct);
         EnsureCompoundOk(resp, "EXCHANGE_ID");
 
@@ -357,8 +345,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         _sequenceId = result.ULong();
 
         // Step 2: CREATE_SESSION binds channels; compound calls are unusable until it completes.
-        var createOps = new List<NfsV4Operation>();
-        createOps.Add(MakeCreateSessionOp());
+        var createOps = new List<NfsV4Operation> { MakeCreateSessionOp() };
         var createResp = await CompoundAsync(new NfsV4CompoundRequest { Tag = "create_session", Operations = createOps }, ct);
         EnsureCompoundOk(createResp, "CREATE_SESSION");
 
@@ -373,8 +360,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         if (_minorVersion < 2)
             throw new NfsException("SEEK requires NFSv4.2+.");
 
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(path))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeSeekOp(offset, seekHole));
@@ -394,8 +380,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         if (_minorVersion < 2)
             throw new NfsException("ALLOCATE requires NFSv4.2+.");
 
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(path))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeAllocateOp(offset, length));
@@ -410,8 +395,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         if (_minorVersion < 2)
             throw new NfsException("DEALLOCATE requires NFSv4.2+.");
 
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(path))
             ops.Add(MakeLookupOp(part));
         ops.Add(MakeDeallocateOp(offset, length));
@@ -426,8 +410,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         if (_minorVersion < 2)
             throw new NfsException("COPY requires NFSv4.2+.");
 
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
         // SAVEFH parks the source handle while the destination path is walked from the root again.
@@ -453,8 +436,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         if (_minorVersion < 2)
             throw new NfsException("CLONE requires NFSv4.2+.");
 
-        var ops = new List<NfsV4Operation>();
-        ops.Add(MakeOp(NfsV4Op.PutRootFh));
+        var ops = new List<NfsV4Operation> { MakeOp(NfsV4Op.PutRootFh) };
         foreach (var part in SplitPath(srcPath))
             ops.Add(MakeLookupOp(part));
         // Same SAVEFH pattern as COPY: keep the source current while the target path is walked.
@@ -731,7 +713,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     // --- Connection Infrastructure ---
 
     /// <summary>Ask the portmapper for the NFSv4 TCP port; falls back to 2049 when unmapped.</summary>
-    private async Task<int> DiscoverNfsPortAsync(IPAddress ip, NfsClientOptions options, CancellationToken ct)
+    private async Task<int> DiscoverNfsPortAsync(NfsClientOptions options, CancellationToken ct)
     {
         // Portmap GETPORT runs on its own short-lived connection, not the NFS stream.
         await using var pm = await OpenAsync(options.PortmapPort, ct);
@@ -862,7 +844,7 @@ public sealed class NfsV4Client : IAsyncDisposable
     {
         string machine;
         try { machine = Dns.GetHostName(); } catch { machine = "nfs-sharp"; }
-        return RpcAuthSys.Encode(0, machine, options.UserId, options.GroupId, options.AuxiliaryGroups ?? Array.Empty<uint>());
+        return RpcAuthSys.Encode(0, machine, options.UserId, options.GroupId, options.AuxiliaryGroups);
     }
 
     private static async Task<IPAddress> ResolveAddressAsync(string server, CancellationToken ct)
@@ -888,6 +870,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         }
     }
 
+    /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
         // Close the shared stream first so any in-flight COMPOUND fails fast.
@@ -899,15 +882,15 @@ public sealed class NfsV4Client : IAsyncDisposable
         _rpcLock.Dispose();
     }
 
-    private sealed class Conn : IAsyncDisposable
+    private sealed class Conn(Socket socket) : IAsyncDisposable
     {
-        private readonly Socket _socket;
-        public Conn(Socket socket) { _socket = socket; Stream = new NetworkStream(socket, ownsSocket: false); }
-        public NetworkStream Stream { get; }
+        public NetworkStream Stream { get; } = new(socket, ownsSocket: false);
         public async ValueTask DisposeAsync()
         {
-            try { await Stream.DisposeAsync(); } catch { }
-            try { _socket.Dispose(); } catch { }
+            // Always release the socket even if the stream reports a close failure.
+            try { await Stream.DisposeAsync(); }
+            finally { socket.Dispose(); }
         }
     }
 }
+// ReSharper restore UnusedMember.Global

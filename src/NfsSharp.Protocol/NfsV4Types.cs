@@ -3,6 +3,8 @@ using System.Buffers.Binary;
 namespace NfsSharp.Protocol;
 
 /// <summary>NFSv4 operation opcodes (RFC 7530).</summary>
+// ReSharper disable UnusedMember.Global
+// The enum exposes the complete protocol opcode set, including operations not yet implemented here.
 public enum NfsV4Op : uint
 {
     Access = 3,
@@ -78,8 +80,11 @@ public enum NfsV4Op : uint
     Clone = 71,
     Illegal = 10044,
 }
+// ReSharper restore UnusedMember.Global
 
 /// <summary>NFSv4 status codes (nfsstat4).</summary>
+// ReSharper disable MemberCanBePrivate.Global
+// Status constants are public protocol values for SDK callers.
 public static class NfsV4Status
 {
     public const uint Ok = 0;
@@ -220,8 +225,11 @@ public static class NfsV4Status
         _ => status.ToString()
     };
 }
+// ReSharper restore MemberCanBePrivate.Global
 
 /// <summary>NFSv4 file types.</summary>
+// ReSharper disable UnusedMember.Global
+// The enum retains all protocol file type values for external decoders.
 public enum NfsV4FType : uint
 {
     Reg = 1,
@@ -234,17 +242,22 @@ public enum NfsV4FType : uint
     AttrDir = 8,
     NamedAttr = 9,
 }
+// ReSharper restore UnusedMember.Global
 
 /// <summary>NFSv4 bitmap4 for attribute numbers.</summary>
 public sealed class NfsV4Bitmap
 {
     private readonly uint[] _masks;
 
+    // ReSharper disable MemberCanBePrivate.Global
+    // Callers construct bitmaps to compose NFSv4 attribute requests.
+    /// <summary>Creates an attribute bitmap from its 32-bit mask words.</summary>
     public NfsV4Bitmap(params uint[] masks)
     {
         ArgumentNullException.ThrowIfNull(masks);
         _masks = masks.ToArray();
     }
+    // ReSharper restore MemberCanBePrivate.Global
 
     /// <summary>Whether the given attribute number is set in the bitmap.</summary>
     public bool HasAttr(uint attrNum)
@@ -254,8 +267,11 @@ public sealed class NfsV4Bitmap
         return word < _masks.Length && (_masks[word] & (1u << (int)bit)) != 0;
     }
 
+    // ReSharper disable UnusedMember.Global
+    // Callers inspect the bitmap words when composing and validating wire requests.
     /// <summary>Copy of the 32-bit mask words.</summary>
     public uint[] Masks => _masks.ToArray();
+    // ReSharper restore UnusedMember.Global
 
     /// <summary>Encodes bitmap4: a word count followed by the big-endian masks.</summary>
     public void Encode(XdrWriter writer)
@@ -295,6 +311,8 @@ public sealed class NfsV4Bitmap
 }
 
 /// <summary>NFSv4 common attribute numbers (RFC 7530 §5.6).</summary>
+// ReSharper disable UnusedMember.Global
+// Attribute numbers are public protocol constants for callers building bitmap requests.
 public static class NfsV4Attr
 {
     public const uint SupportedAttrs = 0;
@@ -373,19 +391,31 @@ public static class NfsV4Attr
     public const uint XattrSupport = 75;
     public const uint SeekHoleData = 77;
 }
+// ReSharper restore UnusedMember.Global
 
 /// <summary>NFSv4 COMPOUND request arguments.</summary>
+// ReSharper disable PropertyCanBeMadeInitOnly.Global
+// Request models remain mutable for serializers and caller-built COMPOUND operations.
 public sealed class NfsV4CompoundRequest
 {
+    // ReSharper disable UnusedAutoPropertyAccessor.Global
+    // Callers inspect the tag on request objects after constructing them.
     public string Tag { get; set; } = "";
+    // ReSharper restore UnusedAutoPropertyAccessor.Global
     public uint MinorVersion { get; set; }
     public List<NfsV4Operation> Operations { get; set; } = new();
 }
+// ReSharper restore PropertyCanBeMadeInitOnly.Global
 
 /// <summary>NFSv4 COMPOUND response.</summary>
+// ReSharper disable PropertyCanBeMadeInitOnly.Global MemberCanBePrivate.Global AutoPropertyCanBeMadeGetOnly.Global
+// Response members are populated during decoding and remain public for SDK consumers.
 public sealed class NfsV4CompoundResponse
 {
+    // ReSharper disable UnusedAutoPropertyAccessor.Global
+    // Decoded response tags remain publicly readable by SDK callers.
     public string Tag { get; set; } = "";
+    // ReSharper restore UnusedAutoPropertyAccessor.Global
     public uint Status { get; set; }
     public List<NfsV4OperationResult> Results { get; set; } = new();
 
@@ -519,11 +549,10 @@ public sealed class NfsV4CompoundResponse
         return value;
     }
 
-    private static ulong CaptureULong(XdrWriter writer, XdrReader reader)
+    private static void CaptureULong(XdrWriter writer, XdrReader reader)
     {
         var value = reader.ULong();
         writer.ULong(value);
-        return value;
     }
 
     private static bool CaptureBool(XdrWriter writer, XdrReader reader)
@@ -696,23 +725,34 @@ public sealed class NfsV4CompoundResponse
         CaptureBool(writer, reader);
     }
 }
+// ReSharper restore PropertyCanBeMadeInitOnly.Global MemberCanBePrivate.Global AutoPropertyCanBeMadeGetOnly.Global
 
 /// <summary>A single NFSv4 operation in a COMPOUND request.</summary>
+// ReSharper disable PropertyCanBeMadeInitOnly.Global
+// Operation arguments are mutable so callers can assemble and revise requests.
 public sealed class NfsV4Operation
 {
     public NfsV4Op Op { get; set; }
     public byte[]? Args { get; set; }
 }
+// ReSharper restore PropertyCanBeMadeInitOnly.Global
 
 /// <summary>A single NFSv4 operation result in a COMPOUND response.</summary>
+// ReSharper disable PropertyCanBeMadeInitOnly.Global
+// Results are populated by the decoder and remain public mutable wire models.
 public sealed class NfsV4OperationResult
 {
     public NfsV4Op Op { get; set; }
     public uint Status { get; set; }
     public XdrReader? Data { get; set; }
 }
+// ReSharper restore PropertyCanBeMadeInitOnly.Global
 
 /// <summary>NFSv4 attributes decoded from GETATTR response.</summary>
+// ReSharper disable UnusedMember.Global
+// Public NFSv4 attribute properties preserve wire data for callers even when this client does not consume it.
+// ReSharper disable UnusedAutoPropertyAccessor.Global
+// Public wire-model properties are part of the library contract for callers and serializers.
 public sealed record NfsV4Fattr
 {
     public NfsV4FType Type { get; init; }
@@ -745,16 +785,23 @@ public sealed record NfsV4Fattr
     public uint[]? SupportedAttrs { get; init; }
     public uint Aclsupport { get; init; }
 }
+// ReSharper restore UnusedAutoPropertyAccessor.Global
+// ReSharper restore UnusedMember.Global
 
 /// <summary>NFSv4 OPEN arguments.</summary>
+// ReSharper disable UnusedMember.Global
+// Share access values are public protocol options for callers.
 public enum NfsV4OpenShareAccess : uint
 {
     Read = 1,
     Write = 2,
     Both = 3,
 }
+// ReSharper restore UnusedMember.Global
 
 /// <summary>NFSv4 OPEN share_deny values.</summary>
+// ReSharper disable UnusedMember.Global
+// Share-deny values are public protocol options for callers.
 [Flags]
 public enum NfsV4OpenShareDeny : uint
 {
@@ -763,8 +810,11 @@ public enum NfsV4OpenShareDeny : uint
     Write = 2,
     Both = 3,
 }
+// ReSharper restore UnusedMember.Global
 
 /// <summary>NFSv4 OPEN claim types (open_claim_type4).</summary>
+// ReSharper disable UnusedMember.Global
+// The enum retains protocol claim values for callers implementing OPEN workflows.
 public enum NfsV4OpenClaimType : uint
 {
     Null = 0,
@@ -772,30 +822,48 @@ public enum NfsV4OpenClaimType : uint
     DelegateCur = 2,
     DelegatePrev = 3,
 }
+// ReSharper restore UnusedMember.Global
 
 /// <summary>NFSv4 CREATE createmode4 values.</summary>
+// ReSharper disable UnusedType.Global UnusedMember.Global
+// This protocol enum is retained for callers preparing NFSv4 CREATE arguments.
 public enum NfsV4CreateMode : uint
 {
     Unchecked = 0,
     Guarded = 1,
     Exclusive = 2,
 }
+// ReSharper restore UnusedType.Global UnusedMember.Global
 
 /// <summary>NFSv4 stateid — 128-bit opaque identifier for file state.</summary>
 public sealed class NfsV4StateId
 {
+    // ReSharper disable once UnusedMember.Global
+    // Zero is a public well-known stateid value for callers.
+    // ReSharper disable once UseUtf8StringLiteral
+    // The byte-array form keeps the exact stateid wire value explicit.
     /// <summary>All-zero stateid used as an explicit "no state" value.</summary>
-    public static readonly NfsV4StateId Zero = new(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    public static readonly NfsV4StateId Zero = new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    // ReSharper disable once UseUtf8StringLiteral
+    // The byte-array form keeps the exact stateid wire value explicit.
     /// <summary>Anonymous stateid (all zeros) for share access without an OPEN.</summary>
-    public static readonly NfsV4StateId Anonymous = new(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    public static readonly NfsV4StateId Anonymous = new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    // ReSharper disable UnusedMember.Global
+    // This well-known stateid value is part of the public NFSv4 state model.
     /// <summary>Special stateid (all ones) for operations without explicit state.</summary>
-    public static readonly NfsV4StateId Special = new(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
+    public static readonly NfsV4StateId Special = new([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    // ReSharper restore UnusedMember.Global
 
     private readonly byte[] _data;
 
+    // ReSharper disable UnusedMember.Global
+    // Callers encode stateids and inspect the copied opaque bytes.
     /// <summary>Copy of the 16 stateid bytes.</summary>
     public byte[] Data => _data.ToArray();
+    // ReSharper restore UnusedMember.Global
 
+    // ReSharper disable MemberCanBePrivate.Global
+    // Callers construct stateids from server replies and application state.
     public NfsV4StateId(byte[] data)
     {
         ArgumentNullException.ThrowIfNull(data);
@@ -803,6 +871,7 @@ public sealed class NfsV4StateId
             throw new ArgumentException("StateId must be exactly 16 bytes.");
         _data = data.ToArray();
     }
+    // ReSharper restore MemberCanBePrivate.Global
 
     /// <summary>Encodes stateid4 as a 32-bit seqid followed by 12 "other" bytes (RFC 7530).</summary>
     public void Encode(XdrWriter writer)
@@ -822,6 +891,8 @@ public sealed class NfsV4StateId
 }
 
 /// <summary>NFSv4 OPEN result.</summary>
+// ReSharper disable UnusedType.Global UnusedMember.Global
+// This result model is retained for callers and future NFSv4 client operations.
 public sealed class NfsV4OpenResult
 {
     public uint Status { get; init; }
@@ -830,16 +901,22 @@ public sealed class NfsV4OpenResult
     public NfsV4Fattr? Attributes { get; init; }
     public bool Delegation { get; init; }
 }
+// ReSharper restore UnusedType.Global UnusedMember.Global
 
 /// <summary>NFSv4 READDIR entry.</summary>
+// ReSharper disable UnusedAutoPropertyAccessor.Global
+// Public wire-model properties are part of the library contract for callers and serializers.
 public sealed class NfsV4DirEntry
 {
     public ulong Cookie { get; init; }
     public string Name { get; init; } = "";
     public NfsV4Fattr? Attributes { get; init; }
 }
+// ReSharper restore UnusedAutoPropertyAccessor.Global
 
 /// <summary>NFSv4 session info for v4.1+.</summary>
+// ReSharper disable UnusedType.Global UnusedMember.Global
+// Session fields are public protocol data for callers even while v4.1 sessions remain experimental.
 public sealed class NfsV4SessionInfo
 {
     public ulong ClientId { get; init; }
@@ -849,3 +926,4 @@ public sealed class NfsV4SessionInfo
     public uint[] ChannelAttributes { get; init; } = Array.Empty<uint>();
     public uint LeaseTime { get; init; }
 }
+// ReSharper restore UnusedType.Global UnusedMember.Global

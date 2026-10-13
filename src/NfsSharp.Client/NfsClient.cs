@@ -4,27 +4,31 @@ using NfsSharp.Protocol;
 namespace NfsSharp.Client;
 
 /// <summary>Protocol versions accepted by the high-level <see cref="NfsClient"/> facade.</summary>
+// These version values are part of the public configuration contract, including currently unsupported versions.
+// ReSharper disable UnusedMember.Global
 public enum NfsVersion
 {
     V2 = 2,
     V3 = 3,
     V41 = 41
 }
+// ReSharper restore UnusedMember.Global
 
 /// <summary>
 /// Stateful convenience facade over <see cref="NfsV3Client"/> with terminology close to
 /// common NFS client libraries: connect, list exports, mount, operate, unmount.
 /// </summary>
+// These public facade methods are intended for library consumers and are not referenced internally.
+// ReSharper disable UnusedMember.Global
 public sealed class NfsClient : IAsyncDisposable
 {
-    private readonly NfsVersion _version;
     private readonly NfsClientOptions _options;
     private string? _server;
     private NfsV3Client? _mounted;
 
+    /// <summary>Create a client for the selected protocol version and options.</summary>
     public NfsClient(NfsVersion version = NfsVersion.V3, NfsClientOptions? options = null)
     {
-        _version = version;
         _options = options ?? NfsClientOptions.Default;
         EnsureSupportedVersion(version);
         _options.Validate();
@@ -40,6 +44,8 @@ public sealed class NfsClient : IAsyncDisposable
     public byte[] RootHandle => RequireMounted().RootHandle;
 
     /// <summary>Store the server address for later export listing or mounting.</summary>
+    // Preserve the cancellation-token parameter consistently across the async connection API.
+    // ReSharper disable once UnusedParameter.Global
     public Task ConnectAsync(string server, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(server))
@@ -273,3 +279,4 @@ public sealed class NfsClient : IAsyncDisposable
             throw new NotSupportedException("NfsSharp.Client currently implements NFSv3. NFSv2 and NFSv4.1 are not implemented.");
     }
 }
+// ReSharper restore UnusedMember.Global

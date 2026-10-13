@@ -10,13 +10,9 @@ namespace NfsSharp.Tests;
 /// NFSSHARP_RUN_NFSV3_INTEGRATION=1 is set (see NfsV3IntegrationFactAttribute), with the target
 /// server/export/uid/gid supplied via the NFSSHARP_NFS_* environment variables.
 /// </summary>
-public sealed class NfsV3IntegrationTests
+public sealed class NfsV3IntegrationTests(ITestOutputHelper testOutput)
 {
     private const string MissingExportPath = "/missing-export";
-    private readonly ITestOutputHelper _output;
-
-    public NfsV3IntegrationTests(ITestOutputHelper output) => _output = output;
-
     [NfsV3IntegrationFact]
     [Trait("Category", "Integration")]
     public async Task NfsV3Client_ListsAdvertisedExportAndAccessGroups()
@@ -419,7 +415,7 @@ public sealed class NfsV3IntegrationTests
         var nestedEntries = await client.ReadDirAsync(NfsV3IntegrationFixture.NestedDirectory, timeout.Token);
         var nestedFile = AssertContainsEntry(nestedEntries, "data.bin");
         var nestedAttributes = await client.GetAttributesAsync(NfsV3IntegrationFixture.NestedFilePath, timeout.Token);
-        Assert.Equal((ulong)nestedAttributes.FileId, nestedFile.FileId);
+        Assert.Equal(nestedAttributes.FileId, nestedFile.FileId);
         AssertNoDuplicateEntryNames(nestedEntries);
     }
 
@@ -436,7 +432,7 @@ public sealed class NfsV3IntegrationTests
         var fileEntry = AssertContainsEntry(entries, "hello.txt");
         Assert.NotNull(fileEntry.Attr);
         Assert.Equal(NfsType.Reg, fileEntry.Attr.Type);
-        Assert.Equal((ulong)fileEntry.Attr.FileId, fileEntry.FileId);
+        Assert.Equal(fileEntry.Attr.FileId, fileEntry.FileId);
         Assert.NotNull(fileEntry.Handle);
         Assert.NotEmpty(fileEntry.Handle);
 
@@ -447,7 +443,7 @@ public sealed class NfsV3IntegrationTests
         var directoryEntry = AssertContainsEntry(entries, "nested");
         Assert.NotNull(directoryEntry.Attr);
         Assert.Equal(NfsType.Dir, directoryEntry.Attr.Type);
-        Assert.Equal((ulong)directoryEntry.Attr.FileId, directoryEntry.FileId);
+        Assert.Equal(directoryEntry.Attr.FileId, directoryEntry.FileId);
 
         AssertNoDuplicateEntryNames(entries);
     }
@@ -490,7 +486,7 @@ public sealed class NfsV3IntegrationTests
             Assert.NotNull(entry.Attr);
             Assert.Equal(NfsType.Reg, entry.Attr.Type);
             Assert.Equal(1, entry.Attr.Size);
-            Assert.Equal((ulong)entry.Attr.FileId, entry.FileId);
+            Assert.Equal(entry.Attr.FileId, entry.FileId);
             Assert.NotNull(entry.Handle);
             Assert.NotEmpty(entry.Handle);
         }
@@ -653,6 +649,8 @@ public sealed class NfsV3IntegrationTests
             var count = Math.Min(index % 2 == 0 ? 16 : 1024, file.Content.Length);
             var offset = file.Content.Length <= count ? 0 : (index * 97) % (file.Content.Length - count + 1);
             var buffer = new byte[count];
+            // Task.WhenAll completes these reads before the enclosing client is disposed.
+            // ReSharper disable AccessToDisposedClosure
             var (bytesRead, eof) = await client.ReadAtAsync(
                 handle,
                 (ulong)offset,
@@ -660,6 +658,7 @@ public sealed class NfsV3IntegrationTests
                 0,
                 count,
                 timeout.Token);
+            // ReSharper restore AccessToDisposedClosure
 
             // Each caller must see exactly its own slice of bytes and the correct eof for that offset.
             Assert.Equal(count, bytesRead);
@@ -686,10 +685,11 @@ public sealed class NfsV3IntegrationTests
         await using (var input = new MemoryStream(largeContent, writable: false))
             await setupClient.WriteFileAsync(largePath, input, timeout.Token);
         var large = await setupClient.LookupPathAsync(largePath, timeout.Token);
+        var smallContent = NfsV3IntegrationFixture.SmallFile.Content;
         var scenarios = new[]
         {
-            (Name: "small", Handle: small.Handle, Content: NfsV3IntegrationFixture.SmallFile.Content, RequestedLength: 64),
-            (Name: "large", Handle: large.Handle, Content: largeContent, RequestedLength: 64 * 1024)
+            (Name: "small", small.Handle, Content: smallContent, RequestedLength: 64),
+            (Name: "large", large.Handle, Content: largeContent, RequestedLength: 64 * 1024)
         };
 
         foreach (var concurrency in new[] { 1, 8, 32 })
@@ -705,7 +705,7 @@ public sealed class NfsV3IntegrationTests
                 var payloadSize = Math.Min(scenario.RequestedLength, scenario.Content.Length);
                 var latencies = new System.Collections.Concurrent.ConcurrentBag<double>();
                 var allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
-                var wall = System.Diagnostics.Stopwatch.StartNew();
+                var wall = Stopwatch.StartNew();
                 await Task.WhenAll(Enumerable.Range(0, operations).Select(async index =>
                 {
                     var count = payloadSize;
@@ -714,7 +714,9 @@ public sealed class NfsV3IntegrationTests
                         ? index * 13 % (scenario.Content.Length - count + 1)
                         : 0;
                     var buffer = new byte[count];
-                    var elapsed = System.Diagnostics.Stopwatch.StartNew();
+                    var elapsed = Stopwatch.StartNew();
+                    // Task.WhenAll completes these reads before the enclosing client is disposed.
+                    // ReSharper disable AccessToDisposedClosure
                     var (bytesRead, _) = await client.ReadAtAsync(
                         scenario.Handle,
                         (ulong)offset,
@@ -722,6 +724,7 @@ public sealed class NfsV3IntegrationTests
                         0,
                         count,
                         timeout.Token);
+                    // ReSharper restore AccessToDisposedClosure
                     elapsed.Stop();
                     Assert.Equal(count, bytesRead);
                     latencies.Add(elapsed.Elapsed.TotalMilliseconds);
@@ -730,7 +733,7 @@ public sealed class NfsV3IntegrationTests
 
                 var sorted = latencies.Order().ToArray();
                 var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
-                _output.WriteLine(
+                testOutput.WriteLine(
                 "rpc-load server={0} auth=AUTH_SYS concurrency={1} payload={2} bytes={3} operations={4} elapsed_ms={5:F1} ops_per_second={6:F1} p50_ms={7:F2} p95_ms={8:F2} allocated_bytes={9} worker_nfs_sockets=1 pending_high_water={10}",
                     NfsV3IntegrationEnvironment.Server,
                     concurrency,
@@ -873,7 +876,7 @@ public sealed class NfsV3IntegrationTests
         var overwrite = await client.WriteAtAsync(
             created.Handle,
             2,
-            new byte[] { 0x20, 0x21, 0x22, 0x23 },
+            " !\"#"u8.ToArray(),
             timeout.Token);
         Assert.Equal(4, overwrite);
 
@@ -902,7 +905,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(streamContent, await ReadBytesAsync(client, streamPath, timeout.Token));
 
         // Rewriting the same path must replace the content and shrink the reported size.
-        var replacementContent = new byte[] { 0x55, 0x56, 0x57 };
+        var replacementContent = "UVW"u8.ToArray();
         await using (var input = new MemoryStream(replacementContent, writable: false))
         {
             streamLookup = await client.WriteFileAsync(streamPath, input, timeout.Token);
@@ -976,7 +979,7 @@ public sealed class NfsV3IntegrationTests
             () => client.WriteAtAsync(created.Handle, 0, new byte[] { 0x20 }, canceled.Token));
         Assert.Equal(originalContent, await ReadBytesAsync(client, existingPath, timeout.Token));
 
-        await using var input = new MemoryStream(new byte[] { 0x30 }, writable: false);
+        await using var input = new MemoryStream([0x30], writable: false);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => client.WriteFileAsync(newPath, input, canceled.Token));
         await AssertMissingPathAsync(client, newPath, timeout.Token);
@@ -1001,7 +1004,7 @@ public sealed class NfsV3IntegrationTests
         await client.SetAttributesAsync(
             destinationEntry.Handle!, new NfsSetAttributes { Mode = 0x180 }, timeout.Token);
 
-        await using (var input = new FailAfterFirstReadStream([0x20, 0x21, 0x22]))
+        await using (var input = new FailAfterFirstReadStream(" !\""u8.ToArray()))
         {
             await Assert.ThrowsAsync<IOException>(
                 () => client.WriteFileSafelyAsync(destination, input, timeout.Token));
@@ -1012,7 +1015,7 @@ public sealed class NfsV3IntegrationTests
         await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
 
         using var canceled = new CancellationTokenSource();
-        await using (var input = new CancelOnSecondReadStream([0x30, 0x31, 0x32], canceled))
+        await using (var input = new CancelOnSecondReadStream("012"u8.ToArray(), canceled))
         {
             await Assert.ThrowsAnyAsync<OperationCanceledException>(
                 () => client.WriteFileSafelyAsync(destination, input, canceled.Token));
@@ -1022,7 +1025,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(0x180u, (await client.GetAttributesAsync(destination, timeout.Token)).Mode & 0x1FF);
         await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
 
-        var replacement = new byte[] { 0x35, 0x36 };
+        var replacement = "56"u8.ToArray();
         var replacementOutcome = NfsV3ReplacementRenameOutcome.ReplaceTarget;
         await using (var input = new MemoryStream(replacement, writable: false))
         {
@@ -1048,7 +1051,7 @@ public sealed class NfsV3IntegrationTests
         await AssertNoSafeWriteTemporaryFilesAsync(client, fixture.RunDirectory, timeout.Token);
 
         var newDestination = fixture.GetRunPath("safe-write-new.txt");
-        var newContent = new byte[] { 0x40, 0x41 };
+        var newContent = "@A"u8.ToArray();
         await using (var input = new MemoryStream(newContent, writable: false))
         {
             await client.WriteFileSafelyAsync(newDestination, input, timeout.Token);
@@ -1296,7 +1299,7 @@ public sealed class NfsV3IntegrationTests
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
         var source = fixture.GetRunPath("link-source.txt");
-        await WriteBytesAsync(client, source, [0x48, 0x4C], timeout.Token);
+        await WriteBytesAsync(client, source, "HL"u8.ToArray(), timeout.Token);
 
         // Symlink: creation yields a link object; READLINK returns the stored target text unchanged.
         if (fixture.Capabilities.SupportsSymbolicLinks)
@@ -1325,7 +1328,7 @@ public sealed class NfsV3IntegrationTests
 
             await client.DeleteFileAsync(source, timeout.Token);
             await AssertMissingPathAsync(client, source, timeout.Token);
-            Assert.Equal(new byte[] { 0x48, 0x4C }, await ReadBytesAsync(client, hardLink, timeout.Token));
+            Assert.Equal("HL"u8.ToArray(), await ReadBytesAsync(client, hardLink, timeout.Token));
         }
     }
 
@@ -1338,7 +1341,7 @@ public sealed class NfsV3IntegrationTests
         await using var fixture = await NfsV3IntegrationFixture.CreateAsync(client, timeout.Token);
 
         var path = fixture.GetRunPath("attribute-mutation.txt");
-        await WriteBytesAsync(client, path, [0x41, 0x42, 0x43, 0x44, 0x45], timeout.Token);
+        await WriteBytesAsync(client, path, "ABCDE"u8.ToArray(), timeout.Token);
 
         // Path-based SETATTR updates mode, size, and mtime together; size 3 truncates the content.
         var pathMtime = new DateTime(2024, 02, 03, 05, 06, 07, DateTimeKind.Utc);
@@ -1356,7 +1359,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(0x180u, pathAttributes.Mode & 0x1FF);
         Assert.Equal(3, pathAttributes.Size);
         AssertCloseTo(pathMtime, pathAttributes.Mtime);
-        Assert.Equal(new byte[] { 0x41, 0x42, 0x43 }, await ReadBytesAsync(client, path, timeout.Token));
+        Assert.Equal("ABC"u8.ToArray(), await ReadBytesAsync(client, path, timeout.Token));
         Assert.NotNull(pathAttributes.CtimeTimestamp);
 
         // Guarded SETATTR succeeds only while the recorded ctime matches (weak cache consistency).
@@ -1419,7 +1422,7 @@ public sealed class NfsV3IntegrationTests
         Assert.Equal(handleAttributes.Gid, finalAttributes.Gid);
         AssertCloseTo(pathMtime, finalAttributes.Atime);
         AssertCloseTo(handleMtime, finalAttributes.Mtime);
-        Assert.Equal(new byte[] { 0x41, 0x42 }, await ReadBytesAsync(client, path, timeout.Token));
+        Assert.Equal("AB"u8.ToArray(), await ReadBytesAsync(client, path, timeout.Token));
 
         // Unix epoch is a valid nfstime3 (0, 0) and must round-trip as a present timestamp, not null.
         await client.UtimesAsync(path, DateTime.UnixEpoch, DateTime.UnixEpoch, timeout.Token);
@@ -1482,7 +1485,7 @@ public sealed class NfsV3IntegrationTests
         await client.MountDeviceAsync(NfsV3IntegrationEnvironment.ExportPath, timeout.Token);
 
         var path = fixture.GetRunPath("facade-attribute-mutation.txt");
-        await using (var content = new MemoryStream([0x61, 0x62, 0x63, 0x64], writable: false))
+        await using (var content = new MemoryStream("abcd"u8.ToArray(), writable: false))
         {
             await client.WriteAsync(path, content, timeout.Token);
         }
@@ -1525,7 +1528,7 @@ public sealed class NfsV3IntegrationTests
         // Size 2 truncates the four-byte file to its first two bytes.
         await using var output = new MemoryStream();
         await client.ReadAsync(path, output, timeout.Token);
-        Assert.Equal(new byte[] { 0x61, 0x62 }, output.ToArray());
+        Assert.Equal("ab"u8.ToArray(), output.ToArray());
     }
 
     [NfsV3IntegrationFact]
@@ -1838,6 +1841,7 @@ public sealed class NfsV3IntegrationTests
         string workingDirectory,
         CancellationToken ct)
     {
+        var argumentList = arguments.ToArray();
         var startInfo = new ProcessStartInfo(fileName)
         {
             WorkingDirectory = workingDirectory,
@@ -1845,7 +1849,7 @@ public sealed class NfsV3IntegrationTests
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        foreach (var argument in arguments)
+        foreach (var argument in argumentList)
             startInfo.ArgumentList.Add(argument);
 
         using var process = Process.Start(startInfo)
@@ -1858,7 +1862,7 @@ public sealed class NfsV3IntegrationTests
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"{fileName} {string.Join(' ', arguments)} failed with exit code {process.ExitCode}. " +
+                $"{fileName} {string.Join(' ', argumentList)} failed with exit code {process.ExitCode}. " +
                 $"stdout: {output}\nstderr: {error}");
         }
     }
@@ -1951,7 +1955,7 @@ public sealed class NfsV3IntegrationTests
             () => client.LookupPathAsync(path, ct));
     }
 
-    private static async Task<NfsException> AssertNfsStatusAsync(
+    private static async Task AssertNfsStatusAsync(
         uint expectedStatus,
         bool isNotFound,
         string messageFragment,
@@ -1963,7 +1967,6 @@ public sealed class NfsV3IntegrationTests
         Assert.Contains(messageFragment, exception.Message);
         Assert.Contains(NfsV3Status.Describe(expectedStatus), exception.Message);
         Assert.Null(exception.InnerException);
-        return exception;
     }
 
     private static async Task AssertReadAtAsync(
@@ -2099,11 +2102,11 @@ public sealed class NfsV3IntegrationTests
         NfsFileSystemInfo info,
         NfsV3FixtureCapabilities capabilities)
     {
-        const uint FsF3Link = 0x0001;
-        const uint FsF3Symlink = 0x0002;
-        const uint FsF3Homogeneous = 0x0008;
-        const uint FsF3CanSetTime = 0x0010;
-        const uint KnownFsInfoProperties = FsF3Link | FsF3Symlink | FsF3Homogeneous | FsF3CanSetTime;
+        const uint fsF3Link = 0x0001;
+        const uint fsF3Symlink = 0x0002;
+        const uint fsF3Homogeneous = 0x0008;
+        const uint fsF3CanSetTime = 0x0010;
+        const uint knownFsInfoProperties = fsF3Link | fsF3Symlink | fsF3Homogeneous | fsF3CanSetTime;
 
         // Preferred and multiple sizes must fit inside their corresponding maximums.
         Assert.True(info.MaxReadSize > 0);
@@ -2122,16 +2125,16 @@ public sealed class NfsV3IntegrationTests
         Assert.True(info.PreferredReaddirSize > 0);
         Assert.True(info.MaxFileSize >= (ulong)NfsV3IntegrationFixture.BoundaryFile.Size);
         Assert.True(info.TimeDelta >= TimeSpan.Zero);
-        Assert.Equal(0u, info.Properties & ~KnownFsInfoProperties);
+        Assert.Equal(0u, info.Properties & ~knownFsInfoProperties);
 
         // Property flags must agree with the capabilities the fixture probed at setup time.
         if (capabilities.SupportsHardLinks)
-            Assert.NotEqual(0u, info.Properties & FsF3Link);
+            Assert.NotEqual(0u, info.Properties & fsF3Link);
 
         if (capabilities.SupportsSymbolicLinks)
-            Assert.NotEqual(0u, info.Properties & FsF3Symlink);
+            Assert.NotEqual(0u, info.Properties & fsF3Symlink);
 
-        Assert.NotEqual(0u, info.Properties & FsF3CanSetTime);
+        Assert.NotEqual(0u, info.Properties & fsF3CanSetTime);
     }
 
     private static void AssertPathConf(
