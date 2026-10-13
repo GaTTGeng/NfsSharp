@@ -128,11 +128,10 @@ internal sealed class RpcSecGssSession
         {
             verified = RpcSecGssMechanism.VerifyMic(context.Mechanism, seqBytes, reply.Verifier, record.Qop);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             throw new NfsException(
-                $"RPCSEC_GSS reply verifier rejected: mechanism failed to verify the sequence number MIC ({record}).",
-                ex);
+                $"RPCSEC_GSS reply verifier rejected: mechanism failed to verify the sequence number MIC ({record}).");
         }
 
         if (!verified)
@@ -323,7 +322,7 @@ internal sealed class RpcSecGssSession
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
         try
         {
-            var token = await mechanism.InitiateContextAsync(targetName, _options.GssCredentials, ct);
+            var token = await InitiateMechanismAsync(mechanism, targetName, _options.GssCredentials, ct);
             var controlProcedure = RpcSecGssProc.Init;
             byte[] contextHandle = [];
             uint seqWindow = 0;
@@ -374,7 +373,7 @@ internal sealed class RpcSecGssSession
                 if (majorStatus == GssContinueNeeded)
                 {
                     RequireNullContextVerifier(reply);
-                    token = await mechanism.ContinueContextAsync(serverToken, ct);
+                    token = await ContinueMechanismAsync(mechanism, serverToken, ct);
                     if (token.Length == 0)
                         throw new NfsException("RPCSEC_GSS mechanism returned no token while the server requested continuation.");
                     clientNeedsFinalToken = !mechanism.IsEstablished;
@@ -384,7 +383,7 @@ internal sealed class RpcSecGssSession
 
                 if (clientNeedsFinalToken)
                 {
-                    await mechanism.ContinueContextAsync(serverToken, ct);
+                    await ContinueMechanismAsync(mechanism, serverToken, ct);
                 }
                 if (!mechanism.IsEstablished)
                     throw new NfsException("RPCSEC_GSS server completed context establishment before the client mechanism.");
@@ -427,6 +426,45 @@ internal sealed class RpcSecGssSession
     private const uint GssContinueNeeded = 1;
     private const int MaxContextCreationRounds = 16;
 
+    private static async Task<byte[]> InitiateMechanismAsync(
+        IRpcSecGssMechanism mechanism,
+        string targetName,
+        GssCredentials? credentials,
+        CancellationToken ct)
+    {
+        try
+        {
+            return await mechanism.InitiateContextAsync(targetName, credentials, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            throw new NfsException("RPCSEC_GSS mechanism failed during context initiation; mechanism details were redacted.");
+        }
+    }
+
+    private static async Task<byte[]> ContinueMechanismAsync(
+        IRpcSecGssMechanism mechanism,
+        byte[] serverToken,
+        CancellationToken ct)
+    {
+        try
+        {
+            return await mechanism.ContinueContextAsync(serverToken, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            throw new NfsException("RPCSEC_GSS mechanism failed during context continuation; mechanism details were redacted.");
+        }
+    }
+
     private static void RequireNullContextVerifier(RpcReply reply)
     {
         if (reply.VerifierFlavor != (uint)RpcSecGssFlavor.None || reply.Verifier.Length != 0)
@@ -456,9 +494,9 @@ internal sealed class RpcSecGssSession
                 reply.Verifier,
                 RpcSecGssConstants.DefaultQop);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            throw new NfsException("RPCSEC_GSS completed context verifier mechanism failed to verify seq_window.", ex);
+            throw new NfsException("RPCSEC_GSS completed context verifier mechanism failed to verify seq_window; mechanism details were redacted.");
         }
 
         if (!verified)

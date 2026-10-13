@@ -82,6 +82,32 @@ public interface IRpcSecGssQopMechanism
     byte[] Unwrap(byte[] wrappedData, uint qop);
 }
 
+/// <summary>Outcome of verifying an RPCSEC_GSS MIC with an explicit QOP.</summary>
+public readonly record struct RpcSecGssMicVerificationResult(RpcSecGssMicVerificationStatus Status, uint Qop);
+
+/// <summary>Result codes for QOP-aware MIC verification.</summary>
+public enum RpcSecGssMicVerificationStatus
+{
+    /// <summary>The mechanism could not complete verification; this is the default value and must fail closed.</summary>
+    Failed = 0,
+    /// <summary>The MIC is valid for the reported QOP.</summary>
+    Verified = 1,
+    /// <summary>The MIC does not match the supplied data.</summary>
+    Invalid = 2,
+    /// <summary>The mechanism does not support the requested QOP.</summary>
+    UnsupportedQop = 3,
+}
+
+/// <summary>
+/// Optional result contract for mechanisms that report the QOP selected during MIC verification.
+/// This supplements the source-compatible boolean contract in <see cref="IRpcSecGssQopMechanism"/>.
+/// </summary>
+public interface IRpcSecGssMicResultMechanism
+{
+    /// <summary>Verify a MIC and report both the outcome and the QOP actually used.</summary>
+    RpcSecGssMicVerificationResult VerifyMicWithResult(byte[] data, byte[] mic, uint qop);
+}
+
 /// <summary>Result of an RPCSEC_GSS privacy wrap or unwrap operation.</summary>
 public readonly record struct RpcSecGssPrivacyResult(byte[] Data, uint Qop, bool ConfidentialityEstablished);
 
@@ -378,9 +404,8 @@ public sealed class RpcSecGssCallRecord
 }
 
 /// <summary>
-/// Deterministic non-cryptographic GSS stand-in for testing and environments where Kerberos
-/// is not available. Provides no actual security. Must not be configured with integrity or
-/// privacy service. Verifier bytes are nonempty so the rpc_gss_svc_none call path stays usable.
+/// Deterministic non-cryptographic GSS stand-in for protocol fixtures only. Provides no actual
+/// security and is rejected by client configuration for every service.
 /// </summary>
 public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism, IRpcSecGssMechanismCapabilities
 {
@@ -394,8 +419,7 @@ public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechani
     public bool ProvidesCryptographicProtection => false;
 
     /// <summary>
-    /// True: the deterministic placeholder MIC can seal data-call headers for
-    /// <c>rpc_gss_svc_none</c> fixtures. Integrity/privacy remain rejected separately.
+    /// True only so internal protocol fixtures can exercise header encoding. Client configuration rejects this mechanism.
     /// </summary>
     public bool CanComputeMic => true;
 
@@ -406,8 +430,7 @@ public sealed class NoOpGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechani
         Task.FromResult(Array.Empty<byte>());
 
     /// <summary>
-    /// Deterministic nonempty placeholder so data calls can carry a verifier body.
-    /// Not a MAC: integrity/privacy are rejected at configuration time.
+    /// Deterministic nonempty placeholder for protocol fixtures. Not a MAC.
     /// </summary>
     public byte[] GetMic(byte[] data)
     {
@@ -491,6 +514,20 @@ public static class RpcSecGssMechanism
         ArgumentNullException.ThrowIfNull(mechanism);
         ArgumentNullException.ThrowIfNull(data);
         ArgumentNullException.ThrowIfNull(mic);
+        if (mechanism is IRpcSecGssMicResultMechanism resultMechanism)
+        {
+            var result = resultMechanism.VerifyMicWithResult(data, mic, qop);
+            if (result.Qop != qop || result.Status == RpcSecGssMicVerificationStatus.UnsupportedQop)
+                throw new NfsException("RPCSEC_GSS mechanism could not verify the MIC with the requested QOP.");
+            return result.Status switch
+            {
+                RpcSecGssMicVerificationStatus.Verified => true,
+                RpcSecGssMicVerificationStatus.Invalid => false,
+                RpcSecGssMicVerificationStatus.Failed => throw new NfsException("RPCSEC_GSS mechanism failed to verify the MIC."),
+                _ => throw new NfsException("RPCSEC_GSS mechanism returned an invalid MIC verification status."),
+            };
+        }
+
         return mechanism is IRpcSecGssQopMechanism qopMechanism
             ? qopMechanism.VerifyMic(data, mic, qop)
             : mechanism.VerifyMic(data, mic);

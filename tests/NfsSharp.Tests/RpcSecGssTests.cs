@@ -181,6 +181,43 @@ public class RpcSecGssTests
     }
 
     [Fact]
+    public void VerifyReply_RejectsMechanismReportedQopMismatchWithoutLeakingMechanismErrors()
+    {
+        var mechanism = new FakeGssMechanism { ReportedMicQopOffset = 1 };
+        var session = CreateEstablishedSession(mechanism);
+        var record = session.BeginDataCall(Xid, 100003, 3, 1);
+        var reply = ParseAcceptedReply(record, FakeGssMechanism.Mac(record.SeqNumNetworkOrder(), record.Qop));
+
+        var qopException = Assert.Throws<NfsException>(() => RpcSecGssMechanism.VerifyMic(
+            mechanism,
+            record.SeqNumNetworkOrder(),
+            reply.Verifier,
+            record.Qop));
+        Assert.Contains("requested QOP", qopException.Message);
+
+        mechanism.ReportedMicQopOffset = 0;
+        mechanism.VerificationException = new InvalidOperationException("secret-token-and-mic");
+        var failure = Assert.Throws<NfsException>(() => session.VerifyReply(reply, record));
+        Assert.Null(failure.InnerException);
+        Assert.DoesNotContain("secret-token-and-mic", failure.ToString());
+    }
+
+    [Fact]
+    public void MicVerificationResult_DefaultValueFailsClosed()
+    {
+        var mechanism = new FakeGssMechanism { ReturnDefaultMicResult = true };
+
+        var exception = Assert.Throws<NfsException>(() => RpcSecGssMechanism.VerifyMic(
+            mechanism,
+            [1, 2, 3],
+            [0xAA],
+            qop: 0));
+
+        Assert.Equal(RpcSecGssMicVerificationStatus.Failed, default(RpcSecGssMicVerificationResult).Status);
+        Assert.Contains("failed to verify the MIC", exception.Message);
+    }
+
+    [Fact]
     public void ProtectArguments_IntegrityEncodesSequenceAndMicOverDatabody()
     {
         var mechanism = new FakeGssMechanism();
@@ -318,9 +355,9 @@ public class RpcSecGssTests
     }
 
     [Fact]
-    public void NoOpMechanism_IsRejectedForIntegrityAndPrivacy()
+    public void NoOpMechanism_IsRejectedForEveryClientService()
     {
-        foreach (var service in new[] { RpcSecGssService.Integrity, RpcSecGssService.Privacy })
+        foreach (var service in new[] { RpcSecGssService.None, RpcSecGssService.Integrity, RpcSecGssService.Privacy })
         {
             var options = new NfsClientOptions
             {
@@ -328,16 +365,8 @@ public class RpcSecGssTests
                 GssService = service,
             };
             var ex = Assert.Throws<NfsException>(() => options.Validate());
-            Assert.Contains("does not provide cryptographic integrity/privacy", ex.Message);
+            Assert.Contains("restricted to deterministic protocol tests", ex.Message);
         }
-
-        // NoOp remains legal for rpc_gss_svc_none in deterministic tests.
-        var noneOptions = new NfsClientOptions
-        {
-            GssMechanism = new NoOpGssMechanism(),
-            GssService = RpcSecGssService.None,
-        };
-        noneOptions.Validate();
     }
 
     [Fact]
@@ -429,43 +458,11 @@ public class RpcSecGssTests
     }
 
     [Fact]
-    public void NoOpMechanism_ServiceNoneDataCallCarriesNonemptyVerifier()
+    public void NoOpMechanism_HasDeterministicFixtureMicButNoSecurityCapability()
     {
-        // The permitted NoOp + svc_none path must stay usable end-to-end, including header MICs.
         var mechanism = new NoOpGssMechanism();
-        var options = new NfsClientOptions
-        {
-            GssMechanism = mechanism,
-            GssService = RpcSecGssService.None,
-        };
-        options.Validate();
-
-        var session = new RpcSecGssSession(options);
-        session.InstallContext(new RpcSecGssContext
-        {
-            ContextHandle = ContextHandle,
-            SeqWindowSize = 16,
-            SeqWindow = new byte[8],
-            Service = RpcSecGssService.None,
-            Mechanism = mechanism,
-        });
-
-        var record = session.BeginDataCall(Xid, 100003, 3, 1);
-        var header = new XdrWriter();
-        header.UInt(Xid);
-        header.UInt(0);
-        header.UInt(2);
-        header.UInt(100003);
-        header.UInt(3);
-        header.UInt(3);
-        header.UInt((uint)RpcSecGssFlavor.Gss);
-        session.WriteCredential(header, record);
-
-        var headerVerifier = session.CreateHeaderVerifier(header.ToArray(), record);
-        Assert.NotEmpty(headerVerifier);
-
-        var reply = ParseAcceptedReply(record, mechanism.GetMic(record.SeqNumNetworkOrder()));
-        session.VerifyReply(reply, record);
+        Assert.NotEmpty(mechanism.GetMic([1, 2, 3]));
+        Assert.False(RpcSecGssMechanism.ProvidesCryptographicProtection(mechanism));
     }
 
     [Fact]
@@ -648,6 +645,41 @@ public class RpcSecGssTests
             () => session.EstablishAsync("server.example", rpc, CancellationToken.None));
 
         Assert.Contains("MIC mismatch", exception.Message);
+        Assert.True(mechanism.Disposed);
+        Assert.False(session.IsEstablished);
+    }
+
+    [Fact]
+    public async Task EstablishAsync_RedactsMechanismFailureAndDisposesContext()
+    {
+        var mechanism = new FakeGssMechanism
+        {
+            VerificationException = new InvalidOperationException("secret-token-and-mic"),
+        };
+        Span<byte> seqWindowBytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32BigEndian(seqWindowBytes, 16);
+        var stream = new ContextReplyStream(ContextReply(
+            xid: 1,
+            verifierFlavor: (uint)RpcSecGssFlavor.Gss,
+            verifier: FakeGssMechanism.Mac(seqWindowBytes.ToArray(), RpcSecGssConstants.DefaultQop),
+            handle: ContextHandle,
+            majorStatus: 0,
+            minorStatus: 0,
+            seqWindow: 16,
+            token: []));
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism,
+            GssService = RpcSecGssService.None,
+        };
+        await using var rpc = new RpcClient(stream, options);
+        var session = new RpcSecGssSession(options);
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => session.EstablishAsync("server.example", rpc, CancellationToken.None));
+
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain("secret-token-and-mic", exception.ToString());
         Assert.True(mechanism.Disposed);
         Assert.False(session.IsEstablished);
     }
@@ -908,6 +940,7 @@ public class RpcSecGssTests
     /// so a no-op or QOP-blind verifier cannot accidentally pass negative fixtures.
     /// </summary>
     private sealed class FakeGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMechanism,
+        IRpcSecGssMicResultMechanism,
         IRpcSecGssMechanismCapabilities, IRpcSecGssPrivacyMechanism
     {
         public byte[] MechanismOid => [0x2A];
@@ -924,6 +957,9 @@ public class RpcSecGssTests
         public bool CanComputeMic => true;
         public bool ReportConfidentiality { get; set; } = true;
         public uint ReportedQopOffset { get; set; }
+        public uint ReportedMicQopOffset { get; set; }
+        public Exception? VerificationException { get; set; }
+        public bool ReturnDefaultMicResult { get; set; }
 
         public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
             Task.FromResult(new byte[] { 0x01 });
@@ -946,6 +982,17 @@ public class RpcSecGssTests
             if (RequireEstablishedForVerification && !IsEstablished)
                 throw new InvalidOperationException("The GSS context is not established.");
             return Mac(data, qop).AsSpan().SequenceEqual(mic);
+        }
+        public RpcSecGssMicVerificationResult VerifyMicWithResult(byte[] data, byte[] mic, uint qop)
+        {
+            if (ReturnDefaultMicResult)
+                return default;
+            if (VerificationException is not null)
+                throw VerificationException;
+            var valid = VerifyMic(data, mic, qop);
+            return new RpcSecGssMicVerificationResult(
+                valid ? RpcSecGssMicVerificationStatus.Verified : RpcSecGssMicVerificationStatus.Invalid,
+                qop + ReportedMicQopOffset);
         }
         public byte[] Wrap(byte[] data, uint qop) => data;
         public byte[] Unwrap(byte[] wrappedData, uint qop) => wrappedData;

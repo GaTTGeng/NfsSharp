@@ -219,6 +219,9 @@ public sealed record NfsClientOptions
         // Re-check the AUTH_SYS gids cap here so misconfiguration fails before any RPC is sent.
         if (AuxiliaryGroups.Count > RpcAuthSys.MaxAuxiliaryGroups)
             throw new NfsException($"AUTH_SYS supports at most {RpcAuthSys.MaxAuxiliaryGroups} auxiliary groups.");
+        if (GssMechanism is NoOpGssMechanism)
+            throw new NfsException("NoOpGssMechanism is restricted to deterministic protocol tests and cannot be configured on a client.");
+
         // Every RPCSEC_GSS data call (including svc_none) needs a header MIC; reject mechanisms
         // that cannot produce one before any call is attempted.
         if (GssMechanism is not null && !RpcSecGssMechanism.CanComputeMic(GssMechanism))

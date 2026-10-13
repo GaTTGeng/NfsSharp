@@ -36,7 +36,7 @@ The following remain incomplete and **experimental**:
 
 - Real Kerberos mechanism support and end-to-end interoperability evidence remain incomplete. A custom mechanism must provide correct MIC and wrap/unwrap behavior; privacy mechanisms must also report the returned QOP and confidentiality state.
 - `NegotiateGssMechanism` performs Kerberos/NTLM token exchange only. .NET `NegotiateAuthentication` does not expose `GSS_GetMIC`/`GSS_VerifyMIC`, so it cannot seal the mandatory data-call header verifier and is rejected for every service, including `rpc_gss_svc_none`. `RpcSecGssMechanism.CanComputeMic` and `ProvidesCryptographicProtection` both report it as false. It is not an end-to-end security guarantee.
-- `NoOpGssMechanism` provides no cryptographic protection and is rejected for integrity/privacy service; it is for deterministic tests only (including `rpc_gss_svc_none` fixtures) and is never interoperability evidence.
+- `NoOpGssMechanism` provides no cryptographic protection and is rejected by client configuration for every service; it is only a deterministic protocol-fixture mechanism and is never interoperability evidence.
 
 Applications must not treat the current RPCSEC_GSS surface as an end-to-end Kerberos security guarantee.
 
