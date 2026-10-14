@@ -26,7 +26,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     private readonly RpcSecGssSession _gssSession;
     private readonly byte[] _authSysBody;
     private readonly ILogger? _logger;
-    private readonly SemaphoreSlim _gssCallLock = new(1, 1);
+    private readonly SemaphoreSlim _gssMechanismLock = new(1, 1);
     private readonly SemaphoreSlim _connectionStateLock = new(1, 1);
     private readonly CancellationTokenSource _stopSource = new();
 
@@ -54,11 +54,15 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
 
     /// <summary>Wrap an already-connected stream instead of opening a socket.</summary>
     internal RpcClient(Stream stream, NfsClientOptions options)
+        : this(stream, options, new RpcSecGssSession(options)) { }
+
+    /// <summary>Wrap a stream with an explicit security session for deterministic protocol fixtures.</summary>
+    internal RpcClient(Stream stream, NfsClientOptions options, RpcSecGssSession gssSession)
         : this(
             new RpcTransport(IPAddress.Loopback, options),
             options,
             new NfsRetryPolicy(options),
-            new RpcSecGssSession(options),
+            gssSession,
             RpcAuthSysCredentials.Encode(options))
     {
         _activeConnection = new RpcConnection(
@@ -351,17 +355,17 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         var queuedAt = Stopwatch.GetTimestamp();
         await connection.WaitForCallSlotAsync(token);
         var queueDelay = Stopwatch.GetElapsedTime(queuedAt);
-        // RPCSEC_GSS sequence numbers must be sent in order, so authenticated calls are serialized.
-        var ownsGssLock = _gssSession.IsEstablished;
-        var gssLockAcquired = false;
+        var usesGss = controlProcedure is null && _options.GssMechanism is not null;
+        var ownsGssSlot = false;
+        var gssMechanismLockAcquired = false;
         uint xid = 0;
         TaskCompletionSource<byte[]>? pending = null;
         try
         {
-            if (ownsGssLock)
+            if (usesGss)
             {
-                await _gssCallLock.WaitAsync(token);
-                gssLockAcquired = true;
+                await _gssSession.AcquireCallSlotAsync(token);
+                ownsGssSlot = true;
             }
 
             using var timeoutCts = CreateCallTimeout(ct, out var callToken);
@@ -372,57 +376,64 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 xid = unchecked((uint)Interlocked.Increment(ref _xid));
             } while (!connection.TryRegister(xid, out pending));
 
-            // CALL header (RFC 5531): xid, msg_type=CALL(0), rpcvers=2, then program, version, procedure.
-            var writer = new XdrWriter();
-            writer.UInt(xid);
-            writer.UInt(0);
-            writer.UInt(2);
-            writer.UInt(program);
-            writer.UInt(version);
-            writer.UInt(procedure);
-
-            // Credential then verifier: RPCSEC_GSS (RFC 2203) uses a per-attempt security
-            // record and seals the header with a MIC; otherwise AUTH_SYS (flavor 1) with an
-            // AUTH_NONE (flavor 0) verifier.
             RpcSecGssCallRecord? gssRecord = null;
-            if (controlProcedure is { } gssControl)
+            var bytes = await connection.SendAndReceiveAsync(xid, pending, () =>
             {
-                // Context-creation credentials carry the control procedure and returned handle;
-                // seq_num and service are undefined for INIT/CONTINUE_INIT (RFC 2203 §5.2.2).
-                var credential = new XdrWriter();
-                credential.UInt(RpcSecGssConstants.Version);
-                credential.UInt((uint)gssControl);
-                credential.UInt(0);
-                credential.UInt((uint)RpcSecGssService.None);
-                credential.Opaque(controlContextHandle ?? []);
-                writer.UInt((uint)RpcSecGssFlavor.Gss);
-                writer.Opaque(credential.ToArray());
-                writer.UInt((uint)RpcSecGssFlavor.None);
-                writer.Opaque([]);
-            }
-            else if (_gssSession.IsEstablished)
-            {
-                // Allocate the sequence number once per transmitted attempt, including retries.
-                gssRecord = _gssSession.BeginDataCall(xid, program, version, procedure);
-                writer.UInt((uint)RpcSecGssFlavor.Gss);
-                _gssSession.WriteCredential(writer, gssRecord);
-                // RFC 2203 §5.3.1: the header checksum covers the RPC header through the credential.
-                var headerVerifier = _gssSession.CreateHeaderVerifier(writer.ToArray(), gssRecord);
-                writer.UInt((uint)RpcSecGssFlavor.Gss);
-                writer.Opaque(headerVerifier);
-            }
-            else
-            {
-                writer.UInt(1);
-                writer.Opaque(_authSysBody);
+                // Build the header under the send lock so sequence numbers follow wire order.
+                var writer = new XdrWriter();
+                writer.UInt(xid);
                 writer.UInt(0);
-                writer.UInt(0);
-            }
+                writer.UInt(2);
+                writer.UInt(program);
+                writer.UInt(version);
+                writer.UInt(procedure);
 
-            var wireArguments = gssRecord is null
-                ? arguments
-                : _gssSession.ProtectArguments(arguments, gssRecord);
-            writer.Raw(wireArguments);
+                if (controlProcedure is { } gssControl)
+                {
+                    // seq_num and service are undefined for INIT/CONTINUE_INIT (RFC 2203 §5.2.2).
+                    var credential = new XdrWriter();
+                    credential.UInt(RpcSecGssConstants.Version);
+                    credential.UInt((uint)gssControl);
+                    credential.UInt(0);
+                    credential.UInt((uint)RpcSecGssService.None);
+                    credential.Opaque(controlContextHandle ?? []);
+                    writer.UInt((uint)RpcSecGssFlavor.Gss);
+                    writer.Opaque(credential.ToArray());
+                    writer.UInt((uint)RpcSecGssFlavor.None);
+                    writer.Opaque([]);
+                    writer.Raw(arguments);
+                }
+                else if (usesGss)
+                {
+                    // Allocate the sequence once per transmitted attempt, including retries.
+                    gssRecord = _gssSession.BeginDataCall(xid, program, version, procedure);
+                    _gssMechanismLock.Wait(token);
+                    try
+                    {
+                        writer.UInt((uint)RpcSecGssFlavor.Gss);
+                        _gssSession.WriteCredential(writer, gssRecord);
+                        // RFC 2203 §5.3.1: the header MIC covers the RPC header through the credential.
+                        var headerVerifier = _gssSession.CreateHeaderVerifier(writer.ToArray(), gssRecord);
+                        writer.UInt((uint)RpcSecGssFlavor.Gss);
+                        writer.Opaque(headerVerifier);
+                        writer.Raw(_gssSession.ProtectArguments(arguments, gssRecord));
+                    }
+                    finally
+                    {
+                        _gssMechanismLock.Release();
+                    }
+                }
+                else
+                {
+                    writer.UInt(1);
+                    writer.Opaque(_authSysBody);
+                    writer.UInt(0);
+                    writer.UInt(0);
+                    writer.Raw(arguments);
+                }
+
+                return writer.ToArray();
+            }, callToken);
             _logger?.LogDebug(
                 "Sending RPC call (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, queueMs={QueueMs}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
                 xid,
@@ -433,17 +444,53 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 queueDelay.TotalMilliseconds,
                 connection.PendingCallCount,
                 connection.PendingCallHighWaterMark);
-            var bytes = await connection.SendAndReceiveAsync(xid, pending, writer.ToArray(), callToken);
-            var reply = DecodeReplyWithContext(bytes, xid, program, version, procedure);
+            RpcReply reply;
+            try
+            {
+                reply = DecodeReplyWithContext(bytes, xid, program, version, procedure);
+            }
+            catch (NfsException ex) when (gssRecord is not null && ex.RpcAuthStatus is 13 or 14)
+            {
+                _gssSession.RejectContext(ex.RpcAuthStatus.Value);
+                var problem = ex.RpcAuthStatus == 13
+                    ? "RPCSEC_GSS_CREDPROBLEM"
+                    : "RPCSEC_GSS_CTXPROBLEM";
+                throw new NfsException(
+                    $"RPCSEC_GSS context rejected by server ({problem}, auth_stat={ex.RpcAuthStatus}); establish a new NFS client before retrying.",
+                    ex,
+                    ex.RpcAuthStatus.Value);
+            }
             // Fail closed on RPCSEC_GSS verifier problems before any procedure result is exposed,
             // including accepted RPC errors whose verifier RFC 2203 still requires.
             if (gssRecord is not null)
-                _gssSession.VerifyReply(reply, gssRecord);
+            {
+                await _gssMechanismLock.WaitAsync(callToken);
+                gssMechanismLockAcquired = true;
+                try
+                {
+                    _gssSession.VerifyReply(reply, gssRecord);
+                    EnsureAcceptSuccess(reply, program, version, procedure);
+                    // Decode protected result bodies only after both the RPC verifier and accept status pass.
+                    var protectedBody = _gssSession.UnprotectReplyBody(reply, gssRecord);
+                    _logger?.LogDebug(
+                        "Received RPC reply (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
+                        xid,
+                        program,
+                        version,
+                        procedure,
+                        connection.Generation,
+                        connection.PendingCallCount,
+                        connection.PendingCallHighWaterMark);
+                    return new RpcCallReply(reply, protectedBody);
+                }
+                finally
+                {
+                    _gssMechanismLock.Release();
+                    gssMechanismLockAcquired = false;
+                }
+            }
             EnsureAcceptSuccess(reply, program, version, procedure);
-            // Decode protected result bodies only after both the RPC verifier and accept status pass.
-            var procedureBody = gssRecord is null
-                ? reply.Body
-                : _gssSession.UnprotectReplyBody(reply, gssRecord);
+            var procedureBody = reply.Body;
             _logger?.LogDebug(
                 "Received RPC reply (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
                 xid,
@@ -460,8 +507,10 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             // Unregister the waiter first so the receive loop cannot complete a recycled XID late.
             if (pending is not null)
                 connection.RemovePending(xid, pending);
-            if (gssLockAcquired)
-                _gssCallLock.Release();
+            if (gssMechanismLockAcquired)
+                _gssMechanismLock.Release();
+            if (ownsGssSlot)
+                _gssSession.ReleaseCallSlot();
             connection.ReleaseCallSlot();
         }
     }

@@ -234,6 +234,7 @@ public class RpcReplyParserTests
 
         Assert.Contains(expectedMessage, exception.Message);
         Assert.Contains($"auth_stat={authStatus}", exception.Message);
+        Assert.Equal(authStatus, exception.RpcAuthStatus);
     }
 
     [Fact]

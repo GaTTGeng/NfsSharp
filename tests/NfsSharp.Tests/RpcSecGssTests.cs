@@ -457,6 +457,120 @@ public class RpcSecGssTests
         Assert.Equal(1u, session.BeginDataCall(Xid, 100003, 3, 1).SeqNum);
     }
 
+    [Theory]
+    [InlineData(2u, 8, 2)]
+    [InlineData(8u, 2, 2)]
+    public async Task CallSlots_RespectNegotiatedAndLocalOutstandingLimits(
+        uint sequenceWindow,
+        int localLimit,
+        int expectedLimit)
+    {
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism,
+            GssService = RpcSecGssService.Integrity,
+            MaxOutstandingRpcCallsPerConnection = localLimit,
+        };
+        var session = new RpcSecGssSession(options);
+        session.InstallContext(new RpcSecGssContext
+        {
+            ContextHandle = ContextHandle,
+            SeqWindowSize = sequenceWindow,
+            SeqWindow = new byte[8],
+            Service = RpcSecGssService.Integrity,
+            Mechanism = mechanism,
+        });
+
+        for (var i = 0; i < expectedLimit; i++)
+            await session.AcquireCallSlotAsync(CancellationToken.None);
+
+        var waiting = session.AcquireCallSlotAsync(CancellationToken.None);
+        Assert.False(waiting.IsCompleted);
+
+        session.ReleaseCallSlot();
+        await waiting;
+        for (var i = 0; i < expectedLimit; i++)
+            session.ReleaseCallSlot();
+    }
+
+    [Theory]
+    [InlineData(13u)]
+    [InlineData(14u)]
+    public async Task RejectedContext_FailsClosedAndRequiresANewClient(uint authStatus)
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = CreateEstablishedSession(mechanism);
+        var oldGeneration = session.ContextGeneration;
+
+        session.RejectContext(authStatus);
+
+        Assert.False(session.IsEstablished);
+        Assert.True(session.ContextGeneration > oldGeneration);
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => session.AcquireCallSlotAsync(CancellationToken.None));
+        Assert.Equal(authStatus, exception.RpcAuthStatus);
+        Assert.Contains("establish a new NFS client", exception.Message);
+        Assert.Throws<NfsException>(() => session.BeginDataCall(Xid, 100003, 3, 1));
+    }
+
+    [Fact]
+    public async Task RpcClient_InvalidatesRejectedGssContextWithoutReplaying()
+    {
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism,
+            GssService = RpcSecGssService.None,
+            MaxOutstandingRpcCallsPerConnection = 2,
+            MaxRetries = 0,
+        };
+        var session = new RpcSecGssSession(options);
+        var stream = new GssMultiplexingStream(sequenceWindow: 2) { RejectAuthStatus = 14 };
+        await using var rpc = new RpcClient(stream, options, session);
+        await session.EstablishAsync("server.example", rpc, CancellationToken.None);
+
+        var rejectedCall = rpc.CallAsync(100003, 3, 1, UIntBytes(303), CancellationToken.None);
+        await stream.WaitForFirstDataCallAsync();
+        var rejection = await Assert.ThrowsAsync<NfsException>(() => rejectedCall);
+
+        Assert.Equal(14u, rejection.RpcAuthStatus);
+        Assert.Contains("auth_stat=14", rejection.Message);
+        Assert.False(session.IsEstablished);
+        var sendsBeforeRetry = stream.DataCallCount;
+        var nextCall = await Assert.ThrowsAsync<NfsException>(
+            () => rpc.CallAsync(100003, 3, 1, UIntBytes(404), CancellationToken.None));
+        Assert.Equal(14u, nextCall.RpcAuthStatus);
+        Assert.Equal(sendsBeforeRetry, stream.DataCallCount);
+    }
+
+    [Fact]
+    public async Task RpcClient_MatchesOutOfOrderGssRepliesToTheirAttemptRecords()
+    {
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism,
+            GssService = RpcSecGssService.None,
+            MaxOutstandingRpcCallsPerConnection = 2,
+            MaxRetries = 0,
+        };
+        var session = new RpcSecGssSession(options);
+        var stream = new GssMultiplexingStream(sequenceWindow: 2);
+        await using var rpc = new RpcClient(stream, options, session);
+        await session.EstablishAsync("server.example", rpc, CancellationToken.None);
+
+        var first = rpc.CallAsync(100003, 3, 1, UIntBytes(101), CancellationToken.None);
+        var second = rpc.CallAsync(100003, 3, 1, UIntBytes(202), CancellationToken.None);
+        await stream.WaitForDataCallsAsync(2);
+        await stream.ReplyInReverseOrderAsync();
+
+        Assert.Equal(101u, (await first).UInt());
+        Assert.Equal(202u, (await second).UInt());
+        Assert.Equal(new uint[] { 1, 2 }, stream.SequenceNumbers);
+        Assert.Equal(2, rpc.PendingCallHighWaterMarkForTesting);
+    }
+
     [Fact]
     public void NoOpMechanism_HasDeterministicFixtureMicButNoSecurityCapability()
     {
@@ -918,6 +1032,163 @@ public class RpcSecGssTests
         {
             await _writes.WriteAsync(buffer, cancellationToken);
         }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _replies.Writer.TryComplete();
+                _writes.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => _writes.Write(buffer, offset, count);
+    }
+
+    private sealed class GssMultiplexingStream(uint sequenceWindow) : Stream
+    {
+        private readonly MemoryStream _writes = new();
+        private readonly System.Threading.Channels.Channel<byte[]> _replies =
+            System.Threading.Channels.Channel.CreateUnbounded<byte[]>();
+        private readonly List<(uint Xid, uint SeqNum, uint Value)> _dataCalls = [];
+        private readonly TaskCompletionSource _oneCall = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _twoCalls = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private byte[]? _currentReply;
+        private int _currentOffset;
+        private int _writtenOffset;
+
+        internal uint[] SequenceNumbers
+        {
+            get
+            {
+                lock (_dataCalls)
+                    return _dataCalls.Select(call => call.SeqNum).ToArray();
+            }
+        }
+
+        internal uint? RejectAuthStatus { get; init; }
+        internal int DataCallCount
+        {
+            get
+            {
+                lock (_dataCalls)
+                    return _dataCalls.Count;
+            }
+        }
+
+        internal Task WaitForFirstDataCallAsync() => _oneCall.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        internal Task WaitForDataCallsAsync(int count) =>
+            count <= 2 ? _twoCalls.Task.WaitAsync(TimeSpan.FromSeconds(5)) : Task.FromException(new ArgumentOutOfRangeException(nameof(count)));
+
+        internal async Task ReplyInReverseOrderAsync()
+        {
+            (uint Xid, uint SeqNum, uint Value)[] calls;
+            lock (_dataCalls)
+                calls = _dataCalls.AsEnumerable().Reverse().ToArray();
+            foreach (var call in calls)
+            {
+                var reply = new XdrWriter();
+                reply.UInt(call.Xid);
+                reply.UInt(1);
+                reply.UInt(0);
+                reply.UInt((uint)RpcSecGssFlavor.Gss);
+                reply.Opaque(FakeGssMechanism.Mac(UIntBytes(call.SeqNum), RpcSecGssConstants.DefaultQop));
+                reply.UInt(0);
+                reply.UInt(call.Value);
+                await _replies.Writer.WriteAsync(Frame(reply.ToArray()));
+            }
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+
+        public override async Task FlushAsync(CancellationToken cancellationToken)
+        {
+            var bytes = _writes.ToArray();
+            var marker = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(_writtenOffset, sizeof(uint)));
+            var length = (int)(marker & 0x7FFF_FFFF);
+            var message = bytes.AsSpan(_writtenOffset + sizeof(uint), length).ToArray();
+            _writtenOffset += sizeof(uint) + length;
+            var call = new XdrReader(message);
+            var xid = call.UInt();
+            call.UInt(); // CALL
+            call.UInt(); // RPC version
+            call.UInt(); // program
+            call.UInt(); // version
+            call.UInt(); // procedure
+            call.UInt(); // credential flavor
+            var credential = new XdrReader(call.Opaque());
+            credential.UInt();
+            var gssProc = credential.UInt();
+
+            if (gssProc == (uint)RpcSecGssProc.Init)
+            {
+                var response = new XdrWriter();
+                response.UInt(xid);
+                response.UInt(1);
+                response.UInt(0);
+                response.UInt((uint)RpcSecGssFlavor.Gss);
+                response.Opaque(FakeGssMechanism.Mac(UIntBytes(sequenceWindow), RpcSecGssConstants.DefaultQop));
+                response.UInt(0);
+                response.Opaque(ContextHandle);
+                response.UInt(0);
+                response.UInt(0);
+                response.UInt(sequenceWindow);
+                response.Opaque([]);
+                await _replies.Writer.WriteAsync(Frame(response.ToArray()), cancellationToken);
+                return;
+            }
+
+            var seqNum = credential.UInt();
+            credential.UInt(); // service
+            credential.Opaque(); // context handle
+            call.UInt(); // RPCSEC_GSS verifier flavor
+            call.Opaque(); // RPCSEC_GSS header MIC
+            var value = call.UInt();
+            lock (_dataCalls)
+            {
+                _dataCalls.Add((xid, seqNum, value));
+                _oneCall.TrySetResult();
+                if (_dataCalls.Count >= 2)
+                    _twoCalls.TrySetResult();
+            }
+            if (RejectAuthStatus is { } authStatus)
+            {
+                var denied = new XdrWriter();
+                denied.UInt(xid);
+                denied.UInt(1);
+                denied.UInt(1); // MSG_DENIED
+                denied.UInt(1); // AUTH_ERROR
+                denied.UInt(authStatus);
+                await _replies.Writer.WriteAsync(Frame(denied.ToArray()), cancellationToken);
+            }
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            while (_currentReply is null || _currentOffset == _currentReply.Length)
+            {
+                _currentReply = await _replies.Reader.ReadAsync(cancellationToken);
+                _currentOffset = 0;
+            }
+
+            var count = Math.Min(buffer.Length, _currentReply.Length - _currentOffset);
+            _currentReply.AsMemory(_currentOffset, count).CopyTo(buffer);
+            _currentOffset += count;
+            return count;
+        }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+            _writes.WriteAsync(buffer, cancellationToken);
 
         protected override void Dispose(bool disposing)
         {

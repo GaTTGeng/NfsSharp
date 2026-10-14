@@ -330,9 +330,24 @@ public sealed class NfsException : Exception
 {
     public uint? Status { get; }
 
+    /// <summary>ONC RPC <c>auth_stat</c> value, including RPCSEC_GSS_CREDPROBLEM (13) or CTXPROBLEM (14).</summary>
+    public uint? RpcAuthStatus { get; }
+
     public NfsException(string message) : base(message) { }
 
-    public NfsException(string message, Exception inner) : base(message, inner) { }
+    public NfsException(string message, Exception inner) : base(message, inner)
+    {
+        RpcAuthStatus = inner is NfsException rpcException ? rpcException.RpcAuthStatus : null;
+    }
+
+    /// <summary>Creates an RPC authentication failure with its RFC 5531 auth_stat value.</summary>
+    /// <param name="message">A redacted failure description.</param>
+    /// <param name="inner">The lower-level failure, if any.</param>
+    /// <param name="rpcAuthStatus">The RPC auth_stat value.</param>
+    public NfsException(string message, Exception? inner, uint rpcAuthStatus) : base(message, inner)
+    {
+        RpcAuthStatus = rpcAuthStatus;
+    }
 
     public NfsException(string message, uint status) : base(message)
     {
