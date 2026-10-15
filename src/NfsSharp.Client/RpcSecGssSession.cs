@@ -34,6 +34,16 @@ internal sealed class RpcSecGssSession
         }
     }
 
+    /// <summary>Whether RPC data calls must use GSS or fail closed instead of falling back to AUTH_SYS.</summary>
+    internal bool RequiresGss
+    {
+        get
+        {
+            lock (_stateLock)
+                return _context is not null || _rejectedAuthStatus is not null;
+        }
+    }
+
     /// <summary>Generation counter for the active GSS context; bumped whenever a context is published.</summary>
     // Used by session and record validation; keep the accessor for the state contract.
     // ReSharper disable once UnusedMember.Global

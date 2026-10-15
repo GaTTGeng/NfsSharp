@@ -545,6 +545,37 @@ public class RpcSecGssTests
     }
 
     [Fact]
+    public async Task RpcClient_UsesAuthSysBeforeGssContextEstablishment()
+    {
+        var options = new NfsClientOptions
+        {
+            GssMechanism = new FakeGssMechanism(),
+            GssService = RpcSecGssService.None,
+            MaxRetries = 0,
+        };
+        var session = new RpcSecGssSession(options);
+        var reply = new XdrWriter();
+        reply.UInt(1); // XID
+        reply.UInt(1); // REPLY
+        reply.UInt(0); // MSG_ACCEPTED
+        reply.UInt((uint)RpcSecGssFlavor.None);
+        reply.Opaque([]);
+        reply.UInt(0); // SUCCESS
+        reply.UInt(123); // procedure result
+        var stream = new ContextReplyStream(reply.ToArray());
+        await using var rpc = new RpcClient(stream, options, session);
+
+        var result = await rpc.CallAsync(100000, 2, 3, [], CancellationToken.None);
+
+        Assert.Equal(123u, result.UInt());
+        Assert.False(session.RequiresGss);
+        var call = ReadCallFrames(stream.Written).Single();
+        for (var i = 0; i < 6; i++)
+            call.UInt();
+        Assert.Equal((uint)RpcSecGssFlavor.Sys, call.UInt());
+    }
+
+    [Fact]
     public async Task RpcClient_MatchesOutOfOrderGssRepliesToTheirAttemptRecords()
     {
         var mechanism = new FakeGssMechanism();
