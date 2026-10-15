@@ -408,21 +408,16 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 {
                     // Allocate the sequence once per transmitted attempt, including retries.
                     gssRecord = _gssSession.BeginDataCall(xid, program, version, procedure);
+                    // Keep rejection handling out until this validated request has finished writing.
                     _gssMechanismLock.Wait(token);
-                    try
-                    {
-                        writer.UInt((uint)RpcSecGssFlavor.Gss);
-                        _gssSession.WriteCredential(writer, gssRecord);
-                        // RFC 2203 §5.3.1: the header MIC covers the RPC header through the credential.
-                        var headerVerifier = _gssSession.CreateHeaderVerifier(writer.ToArray(), gssRecord);
-                        writer.UInt((uint)RpcSecGssFlavor.Gss);
-                        writer.Opaque(headerVerifier);
-                        writer.Raw(_gssSession.ProtectArguments(arguments, gssRecord));
-                    }
-                    finally
-                    {
-                        _gssMechanismLock.Release();
-                    }
+                    gssMechanismLockAcquired = true;
+                    writer.UInt((uint)RpcSecGssFlavor.Gss);
+                    _gssSession.WriteCredential(writer, gssRecord);
+                    // RFC 2203 §5.3.1: the header MIC covers the RPC header through the credential.
+                    var headerVerifier = _gssSession.CreateHeaderVerifier(writer.ToArray(), gssRecord);
+                    writer.UInt((uint)RpcSecGssFlavor.Gss);
+                    writer.Opaque(headerVerifier);
+                    writer.Raw(_gssSession.ProtectArguments(arguments, gssRecord));
                 }
                 else
                 {
@@ -434,7 +429,14 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 }
 
                 return writer.ToArray();
-            }, callToken);
+            }, callToken, afterRequestWriteAttempt: () =>
+            {
+                if (!gssMechanismLockAcquired)
+                    return;
+
+                _gssMechanismLock.Release();
+                gssMechanismLockAcquired = false;
+            });
             _logger?.LogDebug(
                 "Sending RPC call (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, queueMs={QueueMs}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
                 xid,
@@ -452,7 +454,16 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             }
             catch (NfsException ex) when (gssRecord is not null && ex.RpcAuthStatus is 13 or 14)
             {
-                _gssSession.RejectContext(ex.RpcAuthStatus.Value);
+                // A received auth rejection must invalidate the context even if the caller canceled.
+                await _gssMechanismLock.WaitAsync();
+                try
+                {
+                    _gssSession.RejectContext(ex.RpcAuthStatus.Value);
+                }
+                finally
+                {
+                    _gssMechanismLock.Release();
+                }
                 var problem = ex.RpcAuthStatus == 13
                     ? "RPCSEC_GSS_CREDPROBLEM"
                     : "RPCSEC_GSS_CTXPROBLEM";

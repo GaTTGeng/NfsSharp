@@ -165,9 +165,9 @@ internal sealed class RpcSecGssSession
     {
         ArgumentNullException.ThrowIfNull(record);
 
-        var context = _context ?? throw new InvalidOperationException("RPCSEC_GSS context is unavailable.");
-        if (!ReferenceEquals(context.Mechanism, _options.GssMechanism) || context.Service != record.Service)
-            throw new NfsException("RPCSEC_GSS context changed while building a call.");
+        // Recheck after the caller acquires its mechanism lock: another reply may have
+        // invalidated this record while it waited to construct or send the request.
+        var context = RequireCallContext(record);
 
         var mic = RpcSecGssMechanism.GetMic(context.Mechanism, headerThroughCredential.ToArray(), record.Qop);
         if (mic.Length == 0)
@@ -375,7 +375,7 @@ internal sealed class RpcSecGssSession
             if (record.ContextGeneration != _contextGeneration ||
                 !ReferenceEquals(context.Mechanism, _options.GssMechanism) ||
                 context.Service != record.Service)
-                throw new NfsException($"RPCSEC_GSS context changed while processing a protected body ({record}).");
+                throw new NfsException($"RPCSEC_GSS context changed while processing a call ({record}).");
             return context;
         }
     }

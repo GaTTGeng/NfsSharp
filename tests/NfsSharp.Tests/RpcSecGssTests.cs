@@ -123,6 +123,21 @@ public class RpcSecGssTests
         Assert.NotEqual(verifier, FakeGssMechanism.Mac(tampered, record.Qop));
     }
 
+    [Theory]
+    [InlineData(13u)]
+    [InlineData(14u)]
+    public void CreateHeaderVerifier_RejectsRecordAfterContextInvalidation(uint authStatus)
+    {
+        var session = CreateEstablishedSession(new FakeGssMechanism());
+        var record = session.BeginDataCall(Xid, 100003, 3, 4);
+        session.RejectContext(authStatus);
+
+        var exception = Assert.Throws<NfsException>(
+            () => session.CreateHeaderVerifier([], record));
+
+        Assert.Equal(authStatus, exception.RpcAuthStatus);
+    }
+
     [Fact]
     public void VerifyReply_AcceptsValidSequenceMic()
     {

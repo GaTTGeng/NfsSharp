@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Bounded concurrent RPCSEC_GSS calls by both the configured per-connection limit and the negotiated sequence window, while correlating out-of-order replies by XID and attempt record. Server `CREDPROBLEM` and `CTXPROBLEM` replies invalidate the session and surface their auth status without replaying operations; a new client connection is required to establish a replacement context.
 - Marked the NFSv3 overloads that default null options as nullable in their public signatures.
 
+### Fixed
+
+- Prevented stale concurrent RPCSEC_GSS `svc_none` requests from being transmitted after the session is rejected.
+
 ## [1.3.0] - 2026-10-13
 
 ### Added

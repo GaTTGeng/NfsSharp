@@ -264,7 +264,8 @@ internal sealed class RpcConnection : IAsyncDisposable
         uint xid,
         TaskCompletionSource<byte[]> pending,
         Func<byte[]> requestFactory,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action? afterRequestWriteAttempt = null)
     {
         try
         {
@@ -282,7 +283,14 @@ internal sealed class RpcConnection : IAsyncDisposable
                 using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetime.Token);
                 try
                 {
-                    await RpcTransport.SendRecordAsync(Stream, request, sendCts.Token);
+                    try
+                    {
+                        await RpcTransport.SendRecordAsync(Stream, request, sendCts.Token);
+                    }
+                    finally
+                    {
+                        afterRequestWriteAttempt?.Invoke();
+                    }
                     EnsureReceiveLoopStarted();
                 }
                 catch (OperationCanceledException) when (Volatile.Read(ref _failure) is { } storedFailure)
