@@ -256,7 +256,16 @@ internal sealed class RpcConnection : IAsyncDisposable
         uint xid,
         TaskCompletionSource<byte[]> pending,
         byte[] request,
-        CancellationToken ct)
+        CancellationToken ct) =>
+        await SendAndReceiveAsync(xid, pending, () => request, ct);
+
+    /// <summary>Build and send a CALL under the connection send lock, then await its matching REPLY.</summary>
+    internal async Task<byte[]> SendAndReceiveAsync(
+        uint xid,
+        TaskCompletionSource<byte[]> pending,
+        Func<byte[]> requestFactory,
+        CancellationToken ct,
+        Action? afterRequestWriteAttempt = null)
     {
         try
         {
@@ -270,10 +279,18 @@ internal sealed class RpcConnection : IAsyncDisposable
                 // Once a record write begins, call cancellation must interrupt it. A
                 // partial record makes the shared byte stream unusable, so fail the
                 // connection before returning the caller's cancellation.
+                var request = requestFactory();
                 using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetime.Token);
                 try
                 {
-                    await RpcTransport.SendRecordAsync(Stream, request, sendCts.Token);
+                    try
+                    {
+                        await RpcTransport.SendRecordAsync(Stream, request, sendCts.Token);
+                    }
+                    finally
+                    {
+                        afterRequestWriteAttempt?.Invoke();
+                    }
                     EnsureReceiveLoopStarted();
                 }
                 catch (OperationCanceledException) when (Volatile.Read(ref _failure) is { } storedFailure)

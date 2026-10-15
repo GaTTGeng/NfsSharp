@@ -166,7 +166,10 @@ public static class RpcReplyParser
                 // auth_stat is a closed 1..14 range in RFC 5531; anything else is not mappable.
                 if (authStatus is < 1 or > 14)
                     throw new NfsException($"Invalid RPC auth_stat discriminator: {authStatus}.");
-                throw new NfsException($"RPC message denied: authentication error ({DescribeAuthStatus(authStatus)}; auth_stat={authStatus}).");
+                throw new NfsException(
+                    $"RPC message denied: authentication error ({DescribeAuthStatus(authStatus)}; auth_stat={authStatus}).",
+                    inner: null,
+                    rpcAuthStatus: authStatus);
             default:
                 throw new NfsException("Invalid RPC reject_stat discriminator.");
         }

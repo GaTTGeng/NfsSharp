@@ -9,7 +9,12 @@ internal sealed class RpcSecGssSession
 {
     private readonly NfsClientOptions _options;
     private readonly ILogger? _logger;
+    // System.Threading.Lock is unavailable on net8.0.
+    // ReSharper disable once ChangeFieldTypeToSystemThreadingLock
+    private readonly object _stateLock = new();
     private RpcSecGssContext? _context;
+    private SemaphoreSlim _callSlots;
+    private uint? _rejectedAuthStatus;
     private uint _contextGeneration;
     private uint _nextSeqNum = 1;
 
@@ -17,9 +22,27 @@ internal sealed class RpcSecGssSession
     {
         _options = options;
         _logger = options.Logger;
+        _callSlots = new SemaphoreSlim(options.MaxOutstandingRpcCallsPerConnection);
     }
 
-    internal bool IsEstablished => _context?.Mechanism.IsEstablished == true;
+    internal bool IsEstablished
+    {
+        get
+        {
+            lock (_stateLock)
+                return _rejectedAuthStatus is null && _context?.Mechanism.IsEstablished == true;
+        }
+    }
+
+    /// <summary>Whether RPC data calls must use GSS or fail closed instead of falling back to AUTH_SYS.</summary>
+    internal bool RequiresGss
+    {
+        get
+        {
+            lock (_stateLock)
+                return _context is not null || _rejectedAuthStatus is not null;
+        }
+    }
 
     /// <summary>Generation counter for the active GSS context; bumped whenever a context is published.</summary>
     // Used by session and record validation; keep the accessor for the state contract.
@@ -36,10 +59,56 @@ internal sealed class RpcSecGssSession
         if (context.SeqWindowSize == 0)
             throw new ArgumentException("Sequence window must be greater than zero.", nameof(context));
 
-        _context = context;
-        _contextGeneration++;
-        _nextSeqNum = 1;
-        context.Mechanism.NegotiatedService = context.Service;
+        lock (_stateLock)
+        {
+            _context = context;
+            _rejectedAuthStatus = null;
+            _contextGeneration++;
+            _nextSeqNum = 1;
+            var maxOutstanding = (int)Math.Min(
+                context.SeqWindowSize,
+                (uint)_options.MaxOutstandingRpcCallsPerConnection);
+            _callSlots = new SemaphoreSlim(maxOutstanding);
+            context.Mechanism.NegotiatedService = context.Service;
+        }
+    }
+
+    /// <summary>Wait for an authenticated request slot bounded by both the peer window and local RPC limit.</summary>
+    internal async Task AcquireCallSlotAsync(CancellationToken ct)
+    {
+        SemaphoreSlim slots;
+        lock (_stateLock)
+        {
+            EnsureContextAvailable();
+            slots = _callSlots;
+        }
+
+        await slots.WaitAsync(ct);
+        lock (_stateLock)
+        {
+            if (!ReferenceEquals(slots, _callSlots) || _rejectedAuthStatus is not null)
+            {
+                slots.Release();
+                EnsureContextAvailable();
+                throw new NfsException("RPCSEC_GSS context changed while waiting for a request slot.");
+            }
+        }
+    }
+
+    /// <summary>Release one authenticated request slot after its reply or failure is handled.</summary>
+    internal void ReleaseCallSlot() => _callSlots.Release();
+
+    /// <summary>Mark the session unusable after the server rejects its credential or context.</summary>
+    internal void RejectContext(uint authStatus)
+    {
+        if (authStatus is not (13 or 14))
+            throw new ArgumentOutOfRangeException(nameof(authStatus));
+
+        lock (_stateLock)
+        {
+            _rejectedAuthStatus = authStatus;
+            _contextGeneration++;
+        }
     }
 
     /// <summary>
@@ -48,23 +117,27 @@ internal sealed class RpcSecGssSession
     /// </summary>
     internal RpcSecGssCallRecord BeginDataCall(uint xid, uint program, uint version, uint procedure)
     {
-        var context = _context ?? throw new InvalidOperationException("RPCSEC_GSS context is unavailable.");
-        var seqNum = _nextSeqNum;
-        if (seqNum == 0 || seqNum >= RpcSecGssConstants.MaxSeq)
-            throw new NfsException($"RPCSEC_GSS sequence space exhausted (seq={seqNum}).");
-        _nextSeqNum = seqNum + 1;
+        lock (_stateLock)
+        {
+            EnsureContextAvailable();
+            var context = _context!;
+            var seqNum = _nextSeqNum;
+            if (seqNum == 0 || seqNum >= RpcSecGssConstants.MaxSeq)
+                throw new NfsException($"RPCSEC_GSS sequence space exhausted (seq={seqNum}).");
+            _nextSeqNum = seqNum + 1;
 
-        return new RpcSecGssCallRecord(
-            xid,
-            seqNum,
-            context.Service,
-            RpcSecGssConstants.DefaultQop,
-            _contextGeneration,
-            program,
-            version,
-            procedure,
-            RpcSecGssProc.Data,
-            context.ContextHandle);
+            return new RpcSecGssCallRecord(
+                xid,
+                seqNum,
+                context.Service,
+                RpcSecGssConstants.DefaultQop,
+                _contextGeneration,
+                program,
+                version,
+                procedure,
+                RpcSecGssProc.Data,
+                context.ContextHandle);
+        }
     }
 
     /// <summary>Write the RFC 2203 rpc_gss_cred_t credential body for <paramref name="record"/>.</summary>
@@ -92,9 +165,9 @@ internal sealed class RpcSecGssSession
     {
         ArgumentNullException.ThrowIfNull(record);
 
-        var context = _context ?? throw new InvalidOperationException("RPCSEC_GSS context is unavailable.");
-        if (!ReferenceEquals(context.Mechanism, _options.GssMechanism) || context.Service != record.Service)
-            throw new NfsException("RPCSEC_GSS context changed while building a call.");
+        // Recheck after the caller acquires its mechanism lock: another reply may have
+        // invalidated this record while it waited to construct or send the request.
+        var context = RequireCallContext(record);
 
         var mic = RpcSecGssMechanism.GetMic(context.Mechanism, headerThroughCredential.ToArray(), record.Qop);
         if (mic.Length == 0)
@@ -295,12 +368,27 @@ internal sealed class RpcSecGssSession
 
     private RpcSecGssContext RequireCallContext(RpcSecGssCallRecord record)
     {
-        var context = _context ?? throw new NfsException("RPCSEC_GSS context is unavailable.");
-        if (record.ContextGeneration != _contextGeneration ||
-            !ReferenceEquals(context.Mechanism, _options.GssMechanism) ||
-            context.Service != record.Service)
-            throw new NfsException($"RPCSEC_GSS context changed while processing a protected body ({record}).");
-        return context;
+        lock (_stateLock)
+        {
+            EnsureContextAvailable();
+            var context = _context!;
+            if (record.ContextGeneration != _contextGeneration ||
+                !ReferenceEquals(context.Mechanism, _options.GssMechanism) ||
+                context.Service != record.Service)
+                throw new NfsException($"RPCSEC_GSS context changed while processing a call ({record}).");
+            return context;
+        }
+    }
+
+    private void EnsureContextAvailable()
+    {
+        if (_rejectedAuthStatus is { } authStatus)
+            throw new NfsException(
+                $"RPCSEC_GSS context was rejected by the server (auth_stat={authStatus}); establish a new NFS client.",
+                inner: null,
+                rpcAuthStatus: authStatus);
+        if (_context is null || !_context.Mechanism.IsEstablished)
+            throw new NfsException("RPCSEC_GSS context is unavailable; establish a new NFS client.");
     }
 
     /// <summary>Run RPCSEC_GSS context establishment and store the resulting server context handle.</summary>
