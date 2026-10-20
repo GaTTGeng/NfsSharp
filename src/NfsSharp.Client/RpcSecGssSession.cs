@@ -416,6 +416,7 @@ internal sealed class RpcSecGssSession
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
         try
         {
+            mechanism.NegotiatedService = _options.GssService;
             var token = await InitiateMechanismAsync(mechanism, targetName, _options.GssCredentials, ct);
             var controlProcedure = RpcSecGssProc.Init;
             byte[] contextHandle = [];

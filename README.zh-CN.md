@@ -84,7 +84,7 @@ await client.UnMountDeviceAsync();
 - 权限、所有者、时间戳、文件大小和 guarded 属性更新。
 - ACCESS、READLINK、COMMIT、FSSTAT、FSINFO 和 PATHCONF。
 - 重试、超时、Socket 参数、目录缓存、日志和 AUTH_SYS 身份配置。
-- RPCSEC_GSS 协商/扩展钩子、上下文与数据回复 verifier 的 fail-closed 校验，以及完整性/隐私服务的受保护正文校验。机制实现和 Kerberos 互操作性仍属实验性——请勿将该接口视为端到端 Kerberos 安全保证。
+- RPCSEC_GSS 协商/扩展钩子、上下文与数据回复 verifier 的 fail-closed 校验，以及完整性/隐私服务的受保护正文校验。`WithKerberos` 当前使用实验性的 Linux MIT GSSAPI 机制和进程凭据缓存；暂不支持显式凭据及其他平台。`NoOpGssMechanism` 仅用于协议测试夹具，且客户端配置会拒绝它。真实服务端 Kerberos 互操作性尚未验证——请勿将该接口视为端到端 Kerberos 安全保证。
 - 通过 `NfsV4Client` 提供实验性的 NFSv4.0、NFSv4.1 和 NFSv4.2 COMPOUND 操作。
 
 ## 当前范围

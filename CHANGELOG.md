@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Added an experimental Linux MIT GSSAPI Kerberos mechanism for `WithKerberos`, backed by the process credential cache and supporting MIC and privacy operations; explicit `GssCredentials` and cross-platform support remain unavailable, and real-server interoperability evidence is still pending.
 - Added an optional RPCSEC_GSS MIC result contract that reports the QOP used and distinguishes invalid MICs from unsupported-QOP and mechanism failures; legacy mechanism interfaces remain supported.
 - Restricted `NoOpGssMechanism` to deterministic protocol fixtures by rejecting it in client configuration for every RPCSEC_GSS service. RPCSEC_GSS context and reply verification failures preserve cancellation behavior while redacting mechanism exception details.
 - Bounded concurrent RPCSEC_GSS calls by both the configured per-connection limit and the negotiated sequence window, while correlating out-of-order replies by XID and attempt record. Server `CREDPROBLEM` and `CTXPROBLEM` replies invalidate the session and surface their auth status without replaying operations; a new client connection is required to establish a replacement context.

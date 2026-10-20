@@ -7,6 +7,8 @@ The integration suite runs the same server-independent assertions against two ma
 
 Both fixtures expose only NFSv3 over TCP and use explicit AUTH_SYS identities. The Ganesha container does not mount an NFS file system on the host. The kernel fixture exports a dedicated local directory and requires root privileges to install and configure the server.
 
+These NFSv3 fixtures do not configure Kerberos or RPCSEC_GSS. The Linux MIT GSSAPI mechanism is experimental; realm setup and real NFS Kerberos interoperability evidence remain separate M4 work.
+
 ## CI evidence
 
 The `CI` workflow publishes NFSv3 evidence separately from the normal build, unit-test, and pack job:

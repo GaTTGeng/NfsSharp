@@ -694,6 +694,7 @@ public class RpcSecGssTests
         await session.EstablishAsync("server.example", rpc, CancellationToken.None);
 
         Assert.True(session.IsEstablished);
+        Assert.Equal(RpcSecGssService.None, mechanism.ServiceAtInitiation);
         Assert.Equal(1u, session.BeginDataCall(2, 100003, 3, 0).SeqNum);
         var call = ReadCallFrames(stream.Written).Single();
         Assert.Equal(1u, call.UInt()); // XID
@@ -1270,6 +1271,7 @@ public class RpcSecGssTests
         public uint MaxMessageSize => 64 * 1024;
         public uint NextSeqNum { get; set; } = 1;
         public RpcSecGssService NegotiatedService { get; set; }
+        public RpcSecGssService ServiceAtInitiation { get; private set; }
         public bool ProvidesCryptographicProtection => true;
         public bool CanComputeMic => true;
         public bool ReportConfidentiality { get; set; } = true;
@@ -1278,8 +1280,11 @@ public class RpcSecGssTests
         public Exception? VerificationException { get; set; }
         public bool ReturnDefaultMicResult { get; init; }
 
-        public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
-            Task.FromResult(new byte[] { 0x01 });
+        public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct)
+        {
+            ServiceAtInitiation = NegotiatedService;
+            return Task.FromResult(new byte[] { 0x01 });
+        }
 
         public Task<byte[]> ContinueContextAsync(byte[] serverToken, CancellationToken ct)
         {
