@@ -68,6 +68,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         {
             _exportPath = exportPath
         };
+        var mounted = false;
         try
         {
             // Phase 1: ask portmap for mountd and nfsd TCP ports before any NFS traffic.
@@ -80,6 +81,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
             client._mountPort = mountPort;
             // Phase 2: MNT returns the export-root handle every path walk starts from.
             client._rootFh = await client._mountClient.MountAsync(mountPort, exportPath, ct);
+            mounted = true;
             // Phase 3: open the long-lived NFS connection used for file operations.
             await client._rpcClient.ConnectAsync(nfsPort, ct);
             // Phase 4: optional RPCSEC_GSS context must exist before authenticated calls.
@@ -92,6 +94,13 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         catch
         {
+            // Roll back the mountd record if later setup (such as GSS negotiation) fails.
+            if (mounted)
+            {
+                try { await client._mountClient.UnmountAsync(client._mountPort, exportPath, CancellationToken.None); }
+                catch { /* Preserve the setup failure when best-effort UMNT cannot complete. */ }
+            }
+
             // Partial setup must not leak sockets or a half-open RPC client.
             try { await client._rpcClient.DisposeAsync(); }
             finally { client._gssSession.Dispose(); }

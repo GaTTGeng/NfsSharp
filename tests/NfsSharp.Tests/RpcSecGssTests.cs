@@ -571,6 +571,34 @@ public class RpcSecGssTests
     }
 
     [Fact]
+    public async Task RpcClient_UsesAuthSysForMountdEvenWhenNfsGssContextIsEstablished()
+    {
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism,
+            GssService = RpcSecGssService.None,
+            MaxRetries = 0,
+        };
+        var session = CreateEstablishedSession(mechanism, RpcSecGssService.None);
+        await using var stream = new MemoryStream();
+        await using var rpc = new RpcClient(stream, options, session);
+        await using var mountd = new RpcFixtureServer(1, call =>
+            RpcFixtureServer.AcceptedReply(call.Xid, RpcFixtureServer.Success, writer => writer.UInt(1)));
+
+        var result = await rpc.CallWithOwnedConnectionAsync(
+            mountd.Port,
+            NfsRpcConstants.ProgMount,
+            NfsRpcConstants.VerMount,
+            NfsRpcConstants.MountUmnt,
+            [],
+            CancellationToken.None);
+
+        Assert.Equal(1u, result.UInt());
+        await mountd.WaitForRequestsAsync();
+    }
+
+    [Fact]
     public async Task RpcClient_UsesAuthSysBeforeGssContextEstablishment()
     {
         var options = new NfsClientOptions
