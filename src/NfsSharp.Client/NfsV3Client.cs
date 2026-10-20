@@ -94,6 +94,10 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         catch
         {
+            // Release a completed GSS context before any setup rollback closes its NFS connection.
+            try { await client._gssSession.DestroyAsync(client._rpcClient, CancellationToken.None); }
+            catch { /* Preserve the original setup failure when best-effort DESTROY cannot complete. */ }
+
             // Roll back the mountd record if later setup (such as GSS negotiation) fails.
             if (mounted)
             {
@@ -135,6 +139,10 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         _logger?.LogInformation("Unmounting NFS export {Export}", _exportPath);
         try
         {
+            // RFC 2203 DESTROY uses the established context and must precede connection teardown.
+            try { await _gssSession.DestroyAsync(_rpcClient, ct); }
+            catch { /* DESTROY is best-effort; keep unmounting and release local state. */ }
+
             if (_mountPort > 0 && !string.IsNullOrWhiteSpace(_exportPath))
                 await _mountClient.UnmountAsync(_mountPort, _exportPath, ct);
         }

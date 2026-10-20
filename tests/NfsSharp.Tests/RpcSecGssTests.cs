@@ -25,6 +25,46 @@ public class RpcSecGssTests
     }
 
     [Fact]
+    public async Task DestroyAsync_SendsAuthenticatedDestroyBeforeDisposingMechanism()
+    {
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism,
+            GssService = RpcSecGssService.None,
+            MaxRetries = 0,
+        };
+        var session = CreateEstablishedSession(mechanism, RpcSecGssService.None);
+        var reply = new XdrWriter();
+        reply.UInt(1); // XID
+        reply.UInt(1); // REPLY
+        reply.UInt(0); // MSG_ACCEPTED
+        reply.UInt((uint)RpcSecGssFlavor.Gss);
+        reply.Opaque(FakeGssMechanism.Mac(UIntBytes(1), RpcSecGssConstants.DefaultQop));
+        reply.UInt(0); // SUCCESS
+        var stream = new ContextReplyStream(reply.ToArray());
+        await using var rpc = new RpcClient(stream, options, session);
+
+        await session.DestroyAsync(rpc, CancellationToken.None);
+
+        var frame = ReadCallFrames(stream.Written).Single();
+        for (var i = 0; i < 6; i++)
+            frame.UInt();
+        Assert.Equal((uint)RpcSecGssFlavor.Gss, frame.UInt());
+        var credential = new XdrReader(frame.Opaque());
+        Assert.Equal(RpcSecGssConstants.Version, credential.UInt());
+        Assert.Equal((uint)RpcSecGssProc.Destroy, credential.UInt());
+        Assert.Equal(1u, credential.UInt());
+        Assert.Equal((uint)RpcSecGssService.None, credential.UInt());
+        Assert.Equal(ContextHandle, credential.Opaque());
+        Assert.Equal(0, credential.Remaining);
+        Assert.Equal((uint)RpcSecGssFlavor.Gss, frame.UInt());
+        Assert.NotEmpty(frame.Opaque());
+        Assert.Empty(frame.ReadRemainingBytes());
+        Assert.True(mechanism.Disposed);
+    }
+
+    [Fact]
     public void CallRecord_SeqNumNetworkOrder_IsBigEndian()
     {
         var record = NewRecord(seqNum: 0x0102_0304);

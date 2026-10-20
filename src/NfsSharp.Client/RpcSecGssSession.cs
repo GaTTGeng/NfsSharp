@@ -89,6 +89,24 @@ internal sealed class RpcSecGssSession
         mechanism?.Dispose();
     }
 
+    /// <summary>Send RPCSEC_GSS_DESTROY while the established context and NFS connection are usable.</summary>
+    internal async Task DestroyAsync(RpcClient rpcClient, CancellationToken ct)
+    {
+        RpcSecGssContext? context;
+        lock (_stateLock)
+            context = _context;
+
+        try
+        {
+            if (context is not null)
+                await rpcClient.CallRpcSecGssContextAsync(RpcSecGssProc.Destroy, context.ContextHandle, [], ct);
+        }
+        finally
+        {
+            Dispose();
+        }
+    }
+
     /// <summary>Wait for an authenticated request slot bounded by both the peer window and local RPC limit.</summary>
     internal async Task AcquireCallSlotAsync(CancellationToken ct)
     {
@@ -131,7 +149,12 @@ internal sealed class RpcSecGssSession
     /// Allocate the immutable security record for one transmitted attempt.
     /// Each attempt gets a fresh sequence number even when an RPC XID is reused on retry.
     /// </summary>
-    internal RpcSecGssCallRecord BeginDataCall(uint xid, uint program, uint version, uint procedure)
+    internal RpcSecGssCallRecord BeginDataCall(
+        uint xid,
+        uint program,
+        uint version,
+        uint procedure,
+        RpcSecGssProc gssProc = RpcSecGssProc.Data)
     {
         lock (_stateLock)
         {
@@ -151,7 +174,7 @@ internal sealed class RpcSecGssSession
                 program,
                 version,
                 procedure,
-                RpcSecGssProc.Data,
+                gssProc,
                 context.ContextHandle);
         }
     }

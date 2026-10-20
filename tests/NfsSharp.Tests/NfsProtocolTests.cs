@@ -2589,6 +2589,20 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV4Client_RejectsGssOptionsBeforeResolvingServer()
+    {
+        var options = NfsClientOptions.Default with
+        {
+            GssMechanismFactory = static () => new NoOpGssMechanism(),
+        };
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV4Client.ConnectAsync("server-that-must-not-be-resolved.invalid", 0, options, CancellationToken.None));
+
+        Assert.Contains("RPCSEC_GSS is not supported", exception.Message);
+    }
+
+    [Fact]
     // OPEN4_NOCREATE claims encode the claim type immediately after the opentype, before the claim name.
     public void NfsV4Client_OpenNoCreate_EncodesClaimImmediatelyAfterOpenType()
     {

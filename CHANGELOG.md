@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Prevented stale concurrent RPCSEC_GSS `svc_none` requests from being transmitted after the session is rejected.
+- Send an authenticated RPCSEC_GSS_DESTROY before closing an established NFSv3 session, and reject RPCSEC_GSS options in the experimental NFSv4 client, which currently sends AUTH_SYS.
 
 ## [1.3.0] - 2026-10-13
 
