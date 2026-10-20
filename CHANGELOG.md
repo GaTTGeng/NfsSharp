@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Created an independently owned Kerberos GSS mechanism for each mounted NFS session and dispose it with that session; valid out-of-order GSS MIC and privacy tokens are accepted while replay and expired-token statuses remain rejected.
 - Added an experimental Linux MIT GSSAPI Kerberos mechanism for `WithKerberos`, backed by the process credential cache and supporting MIC and privacy operations; explicit `GssCredentials` and cross-platform support remain unavailable, and real-server interoperability evidence is still pending.
 - Added an optional RPCSEC_GSS MIC result contract that reports the QOP used and distinguishes invalid MICs from unsupported-QOP and mechanism failures; legacy mechanism interfaces remain supported.
 - Restricted `NoOpGssMechanism` to deterministic protocol fixtures by rejecting it in client configuration for every RPCSEC_GSS service. RPCSEC_GSS context and reply verification failures preserve cancellation behavior while redacting mechanism exception details.

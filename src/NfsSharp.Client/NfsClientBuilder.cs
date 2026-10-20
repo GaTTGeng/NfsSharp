@@ -35,6 +35,7 @@ public sealed class NfsClientBuilder
     private bool _tcpNoDelay = true;
     private ILogger? _logger;
     private IRpcSecGssMechanism? _gssMechanism;
+    private Func<IRpcSecGssMechanism>? _gssMechanismFactory;
     private RpcSecGssService _gssService = RpcSecGssService.Integrity;
     private GssCredentials? _gssCredentials;
     private string? _gssTargetName;
@@ -172,16 +173,18 @@ public sealed class NfsClientBuilder
     /// </summary>
     public NfsClientBuilder WithKerberos(string targetSpn, RpcSecGssService service = RpcSecGssService.Integrity)
     {
-        _gssMechanism = new KerberosGssMechanism();
+        _gssMechanism = null;
+        _gssMechanismFactory = static () => new KerberosGssMechanism();
         _gssService = service;
         _gssTargetName = targetSpn;
         return this;
     }
 
-    /// <summary>Use a custom RPCSEC_GSS mechanism instead of AUTH_SYS.</summary>
+    /// <summary>Use a custom RPCSEC_GSS mechanism instead of AUTH_SYS; the client disposes it with its session.</summary>
     public NfsClientBuilder WithGssMechanism(IRpcSecGssMechanism mechanism, RpcSecGssService service = RpcSecGssService.Integrity)
     {
         _gssMechanism = mechanism;
+        _gssMechanismFactory = null;
         _gssService = service;
         return this;
     }
@@ -217,6 +220,7 @@ public sealed class NfsClientBuilder
         TcpNoDelay = _tcpNoDelay,
         Logger = _logger,
         GssMechanism = _gssMechanism,
+        GssMechanismFactory = _gssMechanismFactory,
         GssService = _gssService,
         GssCredentials = _gssCredentials,
         GssTargetName = _gssTargetName

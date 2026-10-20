@@ -83,7 +83,7 @@ public sealed partial class NfsV3Client : IAsyncDisposable
             // Phase 3: open the long-lived NFS connection used for file operations.
             await client._rpcClient.ConnectAsync(nfsPort, ct);
             // Phase 4: optional RPCSEC_GSS context must exist before authenticated calls.
-            if (options.GssMechanism is not null)
+            if (options.GssMechanism is not null || options.GssMechanismFactory is not null)
                 await client._gssSession.EstablishAsync(server, client._rpcClient, ct);
             client._logger?.LogInformation(
                 "NFS mounted {Export} on {Server} (mountd={MountPort}, nfsd={NfsPort})",
@@ -93,7 +93,8 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         catch
         {
             // Partial setup must not leak sockets or a half-open RPC client.
-            await client._rpcClient.DisposeAsync();
+            try { await client._rpcClient.DisposeAsync(); }
+            finally { client._gssSession.Dispose(); }
             throw;
         }
     }
@@ -216,7 +217,11 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         // Unmount failed or timed out: still drop the live connection before full dispose.
         catch { await _rpcClient.CloseActiveConnectionAsync(); }
-        finally { await _rpcClient.DisposeAsync(); }
+        finally
+        {
+            try { await _rpcClient.DisposeAsync(); }
+            finally { _gssSession.Dispose(); }
+        }
     }
 
     /// <summary>Drops the live connection while keeping the instance usable; exposed for tests.</summary>

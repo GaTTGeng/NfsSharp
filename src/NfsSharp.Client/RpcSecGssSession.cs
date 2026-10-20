@@ -17,6 +17,7 @@ internal sealed class RpcSecGssSession
     private uint? _rejectedAuthStatus;
     private uint _contextGeneration;
     private uint _nextSeqNum = 1;
+    private bool _disposed;
 
     internal RpcSecGssSession(NfsClientOptions options)
     {
@@ -71,6 +72,21 @@ internal sealed class RpcSecGssSession
             _callSlots = new SemaphoreSlim(maxOutstanding);
             context.Mechanism.NegotiatedService = context.Service;
         }
+    }
+
+    internal void Dispose()
+    {
+        IRpcSecGssMechanism? mechanism;
+        lock (_stateLock)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            mechanism = _context?.Mechanism;
+            _context = null;
+        }
+
+        mechanism?.Dispose();
     }
 
     /// <summary>Wait for an authenticated request slot bounded by both the peer window and local RPC limit.</summary>
@@ -185,7 +201,7 @@ internal sealed class RpcSecGssSession
         ArgumentNullException.ThrowIfNull(record);
 
         var context = _context ?? throw new NfsException("RPCSEC_GSS context is unavailable.");
-        if (record.ContextGeneration != _contextGeneration || !ReferenceEquals(context.Mechanism, _options.GssMechanism))
+        if (record.ContextGeneration != _contextGeneration)
             throw new NfsException(
                 $"RPCSEC_GSS reply verifier rejected: context generation mismatch ({record}).");
 
@@ -373,7 +389,6 @@ internal sealed class RpcSecGssSession
             EnsureContextAvailable();
             var context = _context!;
             if (record.ContextGeneration != _contextGeneration ||
-                !ReferenceEquals(context.Mechanism, _options.GssMechanism) ||
                 context.Service != record.Service)
                 throw new NfsException($"RPCSEC_GSS context changed while processing a call ({record}).");
             return context;
@@ -394,28 +409,35 @@ internal sealed class RpcSecGssSession
     /// <summary>Run RPCSEC_GSS context establishment and store the resulting server context handle.</summary>
     internal async Task EstablishAsync(string server, RpcClient rpcClient, CancellationToken ct)
     {
-        var mechanism = _options.GssMechanism
+        var mechanism = _options.GssMechanismFactory?.Invoke() ?? _options.GssMechanism
                         ?? throw new InvalidOperationException("A GSS mechanism was not configured.");
-        // Header MICs are mandatory for every data call, including rpc_gss_svc_none.
-        if (!RpcSecGssMechanism.CanComputeMic(mechanism))
-        {
-            throw new NfsException(
-                "The configured GSS mechanism cannot compute the RPCSEC_GSS data-call header verifier " +
-                "(NegotiateGssMechanism does not expose GSS_GetMIC) and cannot be used for any service, including none.");
-        }
-
-        if (_options.GssService != RpcSecGssService.None &&
-            !RpcSecGssMechanism.ProvidesCryptographicProtection(mechanism))
-        {
-            throw new NfsException(
-                "The configured GSS mechanism does not provide cryptographic integrity/privacy " +
-                "(NoOpGssMechanism and NegotiateGssMechanism are excluded) and cannot be used with integrity or privacy service.");
-        }
-
         // Default target principal follows the conventional nfs/<host> service name.
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
         try
         {
+            // Header MICs are mandatory for every data call, including rpc_gss_svc_none.
+            if (mechanism is NoOpGssMechanism || !RpcSecGssMechanism.CanComputeMic(mechanism))
+            {
+                throw new NfsException(
+                    "The configured GSS mechanism cannot compute the RPCSEC_GSS data-call header verifier " +
+                    "(NegotiateGssMechanism does not expose GSS_GetMIC) and cannot be used for any service, including none.");
+            }
+
+            if (_options.GssService != RpcSecGssService.None &&
+                !RpcSecGssMechanism.ProvidesCryptographicProtection(mechanism))
+            {
+                throw new NfsException(
+                    "The configured GSS mechanism does not provide cryptographic integrity/privacy " +
+                    "(NoOpGssMechanism and NegotiateGssMechanism are excluded) and cannot be used with integrity or privacy service.");
+            }
+
+            if (_options.GssService == RpcSecGssService.Privacy &&
+                mechanism is not IRpcSecGssPrivacyMechanism)
+            {
+                throw new NfsException(
+                    "RPCSEC_GSS privacy requires a mechanism that reports the negotiated QOP and confidentiality state.");
+            }
+
             mechanism.NegotiatedService = _options.GssService;
             var token = await InitiateMechanismAsync(mechanism, targetName, _options.GssCredentials, ct);
             var controlProcedure = RpcSecGssProc.Init;

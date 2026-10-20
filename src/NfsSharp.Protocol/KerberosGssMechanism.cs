@@ -161,7 +161,7 @@ public sealed class KerberosGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMec
                 var major = NativeMethods.VerifyMic(out var minor, _context, ref message, ref token, out var actualQop);
                 if (major == NativeMethods.GssBadSignature)
                     return new RpcSecGssMicVerificationResult(RpcSecGssMicVerificationStatus.Invalid, qop);
-                EnsureSuccess(major, minor, "verify MIC");
+                EnsureTokenVerificationSuccess(major, minor, "verify MIC");
                 return new RpcSecGssMicVerificationResult(
                     actualQop == qop ? RpcSecGssMicVerificationStatus.Verified : RpcSecGssMicVerificationStatus.UnsupportedQop,
                     actualQop);
@@ -221,7 +221,7 @@ public sealed class KerberosGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMec
             try
             {
                 var major = NativeMethods.Unwrap(out var minor, _context, ref token, out message, out var confidential, out var actualQop);
-                EnsureSuccess(major, minor, "unwrap privacy payload");
+                EnsureTokenVerificationSuccess(major, minor, "unwrap privacy payload");
                 return new RpcSecGssPrivacyResult(CopyBuffer(message), actualQop, confidential != 0);
             }
             finally
@@ -335,6 +335,16 @@ public sealed class KerberosGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMec
             throw CreateGssException(major, minor, operation);
     }
 
+    internal static bool IsSuccessfulTokenVerification(uint major) =>
+        (major & NativeMethods.GssCallingOrRoutineErrorMask) == 0 &&
+        (major & ~(NativeMethods.GssUnsequencedToken | NativeMethods.GssGapToken)) == NativeMethods.GssComplete;
+
+    private static void EnsureTokenVerificationSuccess(uint major, uint minor, string operation)
+    {
+        if (!IsSuccessfulTokenVerification(major))
+            throw CreateGssException(major, minor, operation);
+    }
+
     private static NfsException CreateGssException(uint major, uint minor, string operation) =>
         new($"Kerberos GSSAPI failed to {operation} (gss_major={major}, gss_minor={minor}).");
 
@@ -445,6 +455,8 @@ public sealed class KerberosGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMec
         public const uint GssContinueNeeded = 1;
         public const uint GssBadSignature = 0x0006_0000;
         public const uint GssCallingOrRoutineErrorMask = 0xffff_0000;
+        public const uint GssUnsequencedToken = 1 << 3;
+        public const uint GssGapToken = 1 << 4;
         public const uint GssMutualFlag = 2;
         public const uint GssReplayFlag = 4;
         public const uint GssSequenceFlag = 8;

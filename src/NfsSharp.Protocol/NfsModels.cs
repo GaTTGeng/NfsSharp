@@ -186,6 +186,8 @@ public sealed record NfsClientOptions
     public ILogger? Logger { get; init; }
     /// <summary>Optional GSS mechanism enabling RPCSEC_GSS instead of AUTH_SYS.</summary>
     public IRpcSecGssMechanism? GssMechanism { get; init; }
+    /// <summary>Creates an independently owned GSS mechanism for each RPCSEC_GSS session.</summary>
+    public Func<IRpcSecGssMechanism>? GssMechanismFactory { get; init; }
     /// <summary>RPCSEC_GSS service level requested when a GSS mechanism is configured.</summary>
     public RpcSecGssService GssService { get; init; } = RpcSecGssService.Integrity;
     public GssCredentials? GssCredentials { get; init; }
@@ -225,6 +227,8 @@ public sealed record NfsClientOptions
         // Re-check the AUTH_SYS gids cap here so misconfiguration fails before any RPC is sent.
         if (AuxiliaryGroups.Count > RpcAuthSys.MaxAuxiliaryGroups)
             throw new NfsException($"AUTH_SYS supports at most {RpcAuthSys.MaxAuxiliaryGroups} auxiliary groups.");
+        if (GssMechanism is not null && GssMechanismFactory is not null)
+            throw new NfsException("Configure either a GSS mechanism or a GSS mechanism factory, not both.");
         if (GssMechanism is NoOpGssMechanism)
             throw new NfsException("NoOpGssMechanism is restricted to deterministic protocol tests and cannot be configured on a client.");
 

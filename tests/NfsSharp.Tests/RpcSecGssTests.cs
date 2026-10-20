@@ -14,6 +14,17 @@ public class RpcSecGssTests
     private static readonly byte[] ContextHandle = [0x10, 0x20, 0x30, 0x40];
 
     [Fact]
+    public void Dispose_ReleasesEstablishedSessionMechanism()
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = CreateEstablishedSession(mechanism);
+
+        session.Dispose();
+
+        Assert.True(mechanism.Disposed);
+    }
+
+    [Fact]
     public void CallRecord_SeqNumNetworkOrder_IsBigEndian()
     {
         var record = NewRecord(seqNum: 0x0102_0304);

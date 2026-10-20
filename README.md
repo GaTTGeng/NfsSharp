@@ -111,7 +111,7 @@ Console.WriteLine($"{attributes.Size} bytes");
 - Permission, ownership, timestamp, file-size, and guarded attribute updates.
 - ACCESS, READLINK, COMMIT, FSSTAT, FSINFO, and PATHCONF.
 - Configurable retries, timeouts, socket options, directory caching, logging, and AUTH_SYS identity.
-- RPCSEC_GSS negotiation/extension hooks, fail-closed context/data reply-verifier checks, and protected-body validation for integrity/privacy services. `WithKerberos` currently uses an experimental Linux MIT GSSAPI mechanism and the process credential cache; explicit credentials and other platforms are not supported. `NoOpGssMechanism` is restricted to protocol fixtures and rejected in client configuration. Real-server Kerberos interoperability remains unverified — do not treat this surface as an end-to-end Kerberos security guarantee.
+- RPCSEC_GSS negotiation/extension hooks, fail-closed context/data reply-verifier checks, and protected-body validation for integrity/privacy services. `WithKerberos` creates and disposes an independent mechanism for each mounted session and currently uses an experimental Linux MIT GSSAPI mechanism with the process credential cache; explicit credentials and other platforms are not supported. `NoOpGssMechanism` is restricted to protocol fixtures and rejected in client configuration. Real-server Kerberos interoperability remains unverified — do not treat this surface as an end-to-end Kerberos security guarantee.
 - Experimental NFSv4.0, NFSv4.1, and NFSv4.2 COMPOUND operations through `NfsV4Client`.
 
 ## Current Scope

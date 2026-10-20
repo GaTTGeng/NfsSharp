@@ -356,7 +356,9 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         await connection.WaitForCallSlotAsync(token);
         var queueDelay = Stopwatch.GetElapsedTime(queuedAt);
         // Setup RPCs run before a context exists; after installation or rejection, never fall back to AUTH_SYS.
-        var usesGss = controlProcedure is null && _options.GssMechanism is not null && _gssSession.RequiresGss;
+        var usesGss = controlProcedure is null &&
+                      (_options.GssMechanism is not null || _options.GssMechanismFactory is not null) &&
+                      _gssSession.RequiresGss;
         var ownsGssSlot = false;
         var gssMechanismLockAcquired = false;
         uint xid = 0;
