@@ -25,12 +25,25 @@ public sealed class KerberosGssMechanismTests
 
         Assert.Null(options.GssMechanism);
         Assert.NotNull(options.GssMechanismFactory);
+        Assert.True(options.RequiresLinuxGssMechanism);
         if (!OperatingSystem.IsLinux())
             return;
 
         using var first = options.GssMechanismFactory();
         using var second = options.GssMechanismFactory();
         Assert.NotSame(first, second);
+    }
+
+    [Fact]
+    public async Task NfsV3Client_RejectsKerberosPlatformBeforeResolvingServer()
+    {
+        if (OperatingSystem.IsLinux())
+            return;
+
+        var options = new NfsClientBuilder().WithKerberos("nfs/server.example").BuildOptions();
+        await Assert.ThrowsAsync<PlatformNotSupportedException>(
+            () => NfsV3Client.ConnectAsync(
+                "server-that-must-not-be-resolved.invalid", "/export", options, CancellationToken.None));
     }
 
     [Fact]

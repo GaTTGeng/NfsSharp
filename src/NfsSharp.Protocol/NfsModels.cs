@@ -188,6 +188,7 @@ public sealed record NfsClientOptions
     public IRpcSecGssMechanism? GssMechanism { get; init; }
     /// <summary>Creates an independently owned GSS mechanism for each RPCSEC_GSS session.</summary>
     public Func<IRpcSecGssMechanism>? GssMechanismFactory { get; init; }
+    internal bool RequiresLinuxGssMechanism { get; init; }
     /// <summary>RPCSEC_GSS service level requested when a GSS mechanism is configured.</summary>
     public RpcSecGssService GssService { get; init; } = RpcSecGssService.Integrity;
     public GssCredentials? GssCredentials { get; init; }

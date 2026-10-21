@@ -13,6 +13,7 @@ internal sealed class RpcSecGssSession
     // ReSharper disable once ChangeFieldTypeToSystemThreadingLock
     private readonly object _stateLock = new();
     private RpcSecGssContext? _context;
+    private IRpcSecGssMechanism? _ownedMechanism;
     private SemaphoreSlim _callSlots;
     private uint? _rejectedAuthStatus;
     private uint _contextGeneration;
@@ -23,6 +24,7 @@ internal sealed class RpcSecGssSession
     {
         _options = options;
         _logger = options.Logger;
+        _ownedMechanism = options.GssMechanism;
         _callSlots = new SemaphoreSlim(options.MaxOutstandingRpcCallsPerConnection);
     }
 
@@ -82,8 +84,9 @@ internal sealed class RpcSecGssSession
             if (_disposed)
                 return;
             _disposed = true;
-            mechanism = _context?.Mechanism;
+            mechanism = _context?.Mechanism ?? _ownedMechanism;
             _context = null;
+            _ownedMechanism = null;
         }
 
         mechanism?.Dispose();
@@ -434,6 +437,8 @@ internal sealed class RpcSecGssSession
     {
         var mechanism = _options.GssMechanismFactory?.Invoke() ?? _options.GssMechanism
                         ?? throw new InvalidOperationException("A GSS mechanism was not configured.");
+        lock (_stateLock)
+            _ownedMechanism = mechanism;
         // Default target principal follows the conventional nfs/<host> service name.
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
         try
@@ -548,8 +553,9 @@ internal sealed class RpcSecGssSession
         catch
         {
             // A failed or cancelled handshake must not leave a partial mechanism usable.
-            _context = null;
-            mechanism.Dispose();
+            lock (_stateLock)
+                _context = null;
+            Dispose();
             throw;
         }
 

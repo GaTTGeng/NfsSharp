@@ -64,6 +64,8 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(exportPath)) throw new NfsException("NFS export path is empty.");
         options ??= NfsClientOptions.Default;
         options.Validate();
+        if (options.RequiresLinuxGssMechanism && !OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("KerberosGssMechanism currently requires MIT GSSAPI on Linux.");
         var client = new NfsV3Client(await RpcTransport.CreateAsync(server, options, ct), options)
         {
             _exportPath = exportPath
@@ -101,7 +103,12 @@ public sealed partial class NfsV3Client : IAsyncDisposable
             // Roll back the mountd record if later setup (such as GSS negotiation) fails.
             if (mounted)
             {
-                try { await client._mountClient.UnmountAsync(client._mountPort, exportPath, CancellationToken.None); }
+                var cleanupTimeout = options.CommandTimeout > TimeSpan.Zero
+                    ? options.CommandTimeout
+                    : TimeSpan.FromSeconds(30);
+                using var cleanupCts = new CancellationTokenSource();
+                cleanupCts.CancelAfter(cleanupTimeout);
+                try { await client._mountClient.UnmountAsync(client._mountPort, exportPath, cleanupCts.Token); }
                 catch { /* Preserve the setup failure when best-effort UMNT cannot complete. */ }
             }
 

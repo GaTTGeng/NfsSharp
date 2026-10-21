@@ -36,6 +36,7 @@ public sealed class NfsClientBuilder
     private ILogger? _logger;
     private IRpcSecGssMechanism? _gssMechanism;
     private Func<IRpcSecGssMechanism>? _gssMechanismFactory;
+    private bool _requiresLinuxGssMechanism;
     private RpcSecGssService _gssService = RpcSecGssService.Integrity;
     private GssCredentials? _gssCredentials;
     private string? _gssTargetName;
@@ -175,6 +176,7 @@ public sealed class NfsClientBuilder
     {
         _gssMechanism = null;
         _gssMechanismFactory = static () => new KerberosGssMechanism();
+        _requiresLinuxGssMechanism = true;
         _gssService = service;
         _gssTargetName = targetSpn;
         return this;
@@ -185,6 +187,7 @@ public sealed class NfsClientBuilder
     {
         _gssMechanism = mechanism;
         _gssMechanismFactory = null;
+        _requiresLinuxGssMechanism = false;
         _gssService = service;
         return this;
     }
@@ -221,6 +224,7 @@ public sealed class NfsClientBuilder
         Logger = _logger,
         GssMechanism = _gssMechanism,
         GssMechanismFactory = _gssMechanismFactory,
+        RequiresLinuxGssMechanism = _requiresLinuxGssMechanism,
         GssService = _gssService,
         GssCredentials = _gssCredentials,
         GssTargetName = _gssTargetName

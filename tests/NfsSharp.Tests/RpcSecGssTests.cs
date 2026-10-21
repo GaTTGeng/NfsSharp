@@ -10,6 +10,18 @@ namespace NfsSharp.Tests;
 /// </summary>
 public class RpcSecGssTests
 {
+    [Fact]
+    public void Session_DisposesConfiguredMechanismBeforeContextEstablishment()
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = new RpcSecGssSession(new NfsClientOptions { GssMechanism = mechanism });
+
+        session.Dispose();
+        session.Dispose();
+
+        Assert.Equal(1, mechanism.DisposeCount);
+    }
+
     private const uint Xid = 0x1111_2222;
     private static readonly byte[] ContextHandle = [0x10, 0x20, 0x30, 0x40];
 
@@ -1345,6 +1357,7 @@ public class RpcSecGssTests
         public int EstablishOnContinueCall { get; init; } = 1;
         public bool RequireEstablishedForVerification { get; init; }
         public bool Disposed { get; private set; }
+        public int DisposeCount { get; private set; }
         public List<byte[]> ServerTokens { get; } = [];
         private int _continueCalls;
         public uint MaxMessageSize => 64 * 1024;
@@ -1416,7 +1429,11 @@ public class RpcSecGssTests
                 throw new NfsException("Invalid fake privacy MIC.");
             return new RpcSecGssPrivacyResult(data, qop + ReportedQopOffset, ReportConfidentiality);
         }
-        public void Dispose() => Disposed = true;
+        public void Dispose()
+        {
+            Disposed = true;
+            DisposeCount++;
+        }
 
         internal static byte[] Mac(byte[] data, uint qop)
         {
