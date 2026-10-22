@@ -11,15 +11,33 @@ namespace NfsSharp.Tests;
 public class RpcSecGssTests
 {
     [Fact]
-    public void Session_DisposesConfiguredMechanismBeforeContextEstablishment()
+    public void Session_DisposesConfiguredMechanismAfterOwnershipIsAcquired()
     {
         var mechanism = new FakeGssMechanism();
         var session = new RpcSecGssSession(new NfsClientOptions { GssMechanism = mechanism });
 
         session.Dispose();
-        session.Dispose();
+        Assert.Equal(0, mechanism.DisposeCount);
+
+        var ownedSession = new RpcSecGssSession(new NfsClientOptions { GssMechanism = mechanism });
+        ownedSession.OwnConfiguredMechanism();
+        ownedSession.Dispose();
+        ownedSession.Dispose();
 
         Assert.Equal(1, mechanism.DisposeCount);
+    }
+
+    [Fact]
+    public void Session_DoesNotAcquireConfiguredMechanismOwnershipAfterDisposal()
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = new RpcSecGssSession(new NfsClientOptions { GssMechanism = mechanism });
+
+        session.Dispose();
+        session.OwnConfiguredMechanism();
+        session.Dispose();
+
+        Assert.Equal(0, mechanism.DisposeCount);
     }
 
     private const uint Xid = 0x1111_2222;

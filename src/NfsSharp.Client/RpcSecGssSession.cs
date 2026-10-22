@@ -24,8 +24,16 @@ internal sealed class RpcSecGssSession
     {
         _options = options;
         _logger = options.Logger;
-        _ownedMechanism = options.GssMechanism;
         _callSlots = new SemaphoreSlim(options.MaxOutstandingRpcCallsPerConnection);
+    }
+
+    internal void OwnConfiguredMechanism()
+    {
+        lock (_stateLock)
+        {
+            if (!_disposed)
+                _ownedMechanism ??= _options.GssMechanism;
+        }
     }
 
     internal bool IsEstablished

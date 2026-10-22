@@ -64,15 +64,19 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(exportPath)) throw new NfsException("NFS export path is empty.");
         options ??= NfsClientOptions.Default;
         options.Validate();
+        if (options is { RequiresLinuxGssMechanism: true, GssCredentials: not null })
+            throw new NfsException("WithKerberos does not support explicit GssCredentials.");
         if (options.RequiresLinuxGssMechanism && !OperatingSystem.IsLinux())
             throw new PlatformNotSupportedException("KerberosGssMechanism currently requires MIT GSSAPI on Linux.");
-        var client = new NfsV3Client(await RpcTransport.CreateAsync(server, options, ct), options)
-        {
-            _exportPath = exportPath
-        };
+        NfsV3Client? client = null;
         var mounted = false;
         try
         {
+            client = new NfsV3Client(await RpcTransport.CreateAsync(server, options, ct), options)
+            {
+                _exportPath = exportPath
+            };
+            client._gssSession.OwnConfiguredMechanism();
             // Phase 1: ask portmap for mountd and nfsd TCP ports before any NFS traffic.
             var mountPort = await client._portmapClient.GetTcpPortAsync(
                 NfsRpcConstants.ProgMount, NfsRpcConstants.VerMount, ct);
@@ -96,6 +100,12 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         }
         catch
         {
+            if (client is null)
+            {
+                options.GssMechanism?.Dispose();
+                throw;
+            }
+
             // Release a completed GSS context before any setup rollback closes its NFS connection.
             try { await client._gssSession.DestroyAsync(client._rpcClient, CancellationToken.None); }
             catch { /* Preserve the original setup failure when best-effort DESTROY cannot complete. */ }
@@ -147,17 +157,33 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         try
         {
             // RFC 2203 DESTROY uses the established context and must precede connection teardown.
-            try { await _gssSession.DestroyAsync(_rpcClient, ct); }
+            try
+            {
+                using var destroyCts = CreateCleanupTimeoutSource();
+                await _gssSession.DestroyAsync(_rpcClient, destroyCts.Token);
+            }
             catch { /* DESTROY is best-effort; keep unmounting and release local state. */ }
 
             if (_mountPort > 0 && !string.IsNullOrWhiteSpace(_exportPath))
-                await _mountClient.UnmountAsync(_mountPort, _exportPath, ct);
+            {
+                using var unmountCts = CreateCleanupTimeoutSource();
+                await _mountClient.UnmountAsync(_mountPort, _exportPath, unmountCts.Token);
+            }
         }
         finally
         {
             // Always tear down the RPC connection, even when UMNT itself failed.
             await _rpcClient.StopAndCloseActiveConnectionAsync();
         }
+        ct.ThrowIfCancellationRequested();
+    }
+
+    private CancellationTokenSource CreateCleanupTimeoutSource()
+    {
+        var timeout = _options.CommandTimeout > TimeSpan.Zero
+            ? _options.CommandTimeout
+            : TimeSpan.FromSeconds(30);
+        return new CancellationTokenSource(timeout);
     }
 
     /// <summary>LOOKUP in a directory handle.</summary>

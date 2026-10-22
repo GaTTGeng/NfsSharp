@@ -47,6 +47,21 @@ public sealed class KerberosGssMechanismTests
     }
 
     [Fact]
+    public async Task NfsV3Client_RejectsExplicitKerberosCredentialsBeforeResolvingServer()
+    {
+        var options = new NfsClientBuilder()
+            .WithKerberos("nfs/server.example")
+            .WithGssCredentials(new GssCredentials { UserName = "user", Password = "password" })
+            .BuildOptions();
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ConnectAsync(
+                "server-that-must-not-be-resolved.invalid", "/export", options, CancellationToken.None));
+
+        Assert.Contains("WithKerberos does not support explicit GssCredentials", exception.Message);
+    }
+
+    [Fact]
     public void Constructor_RequiresLinux()
     {
         if (OperatingSystem.IsLinux())

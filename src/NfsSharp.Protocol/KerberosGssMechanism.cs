@@ -264,8 +264,8 @@ public sealed class KerberosGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMec
         {
             if (inputMemory != IntPtr.Zero)
                 Marshal.Copy(inputBytes, 0, inputMemory, inputBytes.Length);
-            var requestedFlags = NativeMethods.GssMutualFlag | NativeMethods.GssReplayFlag |
-                                 NativeMethods.GssSequenceFlag | NativeMethods.GssIntegrityFlag;
+            // RPCSEC_GSS provides replay protection and accepts reordered calls (RFC 2203 §5.2.2).
+            var requestedFlags = NativeMethods.GssMutualFlag | NativeMethods.GssIntegrityFlag;
             if (NegotiatedService == RpcSecGssService.Privacy)
                 requestedFlags |= NativeMethods.GssConfidentialityFlag;
 
@@ -458,8 +458,6 @@ public sealed class KerberosGssMechanism : IRpcSecGssMechanism, IRpcSecGssQopMec
         public const uint GssUnsequencedToken = 1 << 3;
         public const uint GssGapToken = 1 << 4;
         public const uint GssMutualFlag = 2;
-        public const uint GssReplayFlag = 4;
-        public const uint GssSequenceFlag = 8;
         public const uint GssConfidentialityFlag = 16;
         public const uint GssIntegrityFlag = 32;
 
