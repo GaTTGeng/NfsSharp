@@ -21,6 +21,7 @@ The recommended entry point for applications is `NfsSharp.Client.NfsClient`, con
 | `NfsV4Client` | Experimental direct COMPOUND-oriented NFSv4.0, NFSv4.1, and NFSv4.2 surface. |
 
 NFSv3 over TCP is the primary supported protocol. The NFSv4 surface is experimental and does not yet carry the same compatibility and integration guarantees.
+The experimental `NfsV4Client` currently sends AUTH_SYS only; connecting it with RPCSEC_GSS options is rejected before network access.
 
 NFSv3 transient transport retries are conservative: automatic reconnect/retry is limited to retry-safe discovery, mount negotiation, read-only NFS procedures, and `COMMIT`. Mutating procedures such as `SETATTR`, `WRITE`, `CREATE`, `REMOVE`, `RENAME`, and link creation surface the transport failure to the caller instead of being replayed automatically.
 
@@ -30,13 +31,13 @@ AUTH_SYS and RPCSEC_GSS NFSv3 calls can be outstanding concurrently on one TCP c
 
 ### RPCSEC_GSS security limits
 
-RPCSEC_GSS negotiation and mechanism extension points are available (`WithKerberos`, `WithGssMechanism`, `IRpcSecGssMechanism`, `IRpcSecGssQopMechanism`, `IRpcSecGssPrivacyMechanism`). Context establishment validates the final `seq_window` verifier. Data replies fail closed on invalid or missing RPCSEC_GSS verifiers, and integrity/privacy bodies are verified or unwrapped with the exact per-attempt sequence number and QOP before any procedure result is exposed.
+RPCSEC_GSS negotiation and mechanism extension points are available (`WithKerberos`, `WithGssMechanism`, `IRpcSecGssMechanism`, `IRpcSecGssQopMechanism`, `IRpcSecGssPrivacyMechanism`). Context establishment validates the final `seq_window` verifier. Data replies fail closed on invalid or missing RPCSEC_GSS verifiers, and integrity/privacy bodies are verified or unwrapped with the exact per-attempt sequence number and QOP before any procedure result is exposed. Unmount sends a best-effort authenticated `RPCSEC_GSS_DESTROY` before closing the NFSv3 connection; Kerberos mechanisms are created per mounted session and disposed with that session.
 
-If the server rejects a request with `RPCSEC_GSS_CREDPROBLEM` or `RPCSEC_GSS_CTXPROBLEM`, the current session is invalidated and the failure is surfaced with its distinct `auth_stat`. The client does not transparently replay the operation or recreate the context because the configured mechanism is a caller-owned instance without a reset/factory contract; create a new NFS client to establish a fresh context before retrying.
+If the server rejects a request with `RPCSEC_GSS_CREDPROBLEM` or `RPCSEC_GSS_CTXPROBLEM`, the current session is invalidated and the failure is surfaced with its distinct `auth_stat`. The client does not transparently replay the operation or recreate the context. `WithGssMechanism` transfers ownership of the configured mechanism to the client session when `ConnectAsync` starts; the client disposes it during teardown or failed setup. Supply a fresh custom mechanism for each client session, and create a new NFS client with a newly created mechanism before retrying.
 
 The following remain incomplete and **experimental**:
 
-- Real Kerberos mechanism support and end-to-end interoperability evidence remain incomplete. A custom mechanism must provide correct MIC and wrap/unwrap behavior; privacy mechanisms must also report the returned QOP and confidentiality state.
+- `WithKerberos` uses the experimental Linux MIT GSSAPI mechanism and the process credential cache. Explicit `GssCredentials`, other platforms, and real-server interoperability evidence are not supported yet. A custom mechanism must provide correct MIC and wrap/unwrap behavior; privacy mechanisms must also report the returned QOP and confidentiality state.
 - `NegotiateGssMechanism` performs Kerberos/NTLM token exchange only. .NET `NegotiateAuthentication` does not expose `GSS_GetMIC`/`GSS_VerifyMIC`, so it cannot seal the mandatory data-call header verifier and is rejected for every service, including `rpc_gss_svc_none`. `RpcSecGssMechanism.CanComputeMic` and `ProvidesCryptographicProtection` both report it as false. It is not an end-to-end security guarantee.
 - `NoOpGssMechanism` provides no cryptographic protection and is rejected by client configuration for every service; it is only a deterministic protocol-fixture mechanism and is never interoperability evidence.
 
