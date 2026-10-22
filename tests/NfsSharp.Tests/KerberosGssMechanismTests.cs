@@ -34,6 +34,15 @@ public sealed class KerberosGssMechanismTests
         Assert.NotSame(first, second);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void WithKerberos_RejectsEmptyTarget(string? targetSpn)
+    {
+        Assert.ThrowsAny<ArgumentException>(() => new NfsClientBuilder().WithKerberos(targetSpn!));
+    }
+
     [Fact]
     public async Task NfsV3Client_RejectsKerberosPlatformBeforeResolvingServer()
     {

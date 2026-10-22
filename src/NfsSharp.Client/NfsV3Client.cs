@@ -159,14 +159,14 @@ public sealed partial class NfsV3Client : IAsyncDisposable
             // RFC 2203 DESTROY uses the established context and must precede connection teardown.
             try
             {
-                using var destroyCts = CreateCleanupTimeoutSource();
+                using var destroyCts = CreateCleanupTimeoutSource(ct);
                 await _gssSession.DestroyAsync(_rpcClient, destroyCts.Token);
             }
             catch { /* DESTROY is best-effort; keep unmounting and release local state. */ }
 
             if (_mountPort > 0 && !string.IsNullOrWhiteSpace(_exportPath))
             {
-                using var unmountCts = CreateCleanupTimeoutSource();
+                using var unmountCts = CreateCleanupTimeoutSource(ct);
                 await _mountClient.UnmountAsync(_mountPort, _exportPath, unmountCts.Token);
             }
         }
@@ -178,12 +178,14 @@ public sealed partial class NfsV3Client : IAsyncDisposable
         ct.ThrowIfCancellationRequested();
     }
 
-    private CancellationTokenSource CreateCleanupTimeoutSource()
+    private CancellationTokenSource CreateCleanupTimeoutSource(CancellationToken ct)
     {
         var timeout = _options.CommandTimeout > TimeSpan.Zero
             ? _options.CommandTimeout
             : TimeSpan.FromSeconds(30);
-        return new CancellationTokenSource(timeout);
+        var source = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        source.CancelAfter(timeout);
+        return source;
     }
 
     /// <summary>LOOKUP in a directory handle.</summary>

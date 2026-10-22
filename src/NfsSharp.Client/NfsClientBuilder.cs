@@ -172,8 +172,12 @@ public sealed class NfsClientBuilder
     /// against the given target principal. This experimental mechanism does not accept
     /// explicit <see cref="GssCredentials"/>.
     /// </summary>
+    /// <param name="targetSpn">The target NFS service principal, such as <c>nfs/server.example</c>.</param>
+    /// <param name="service">The RPCSEC_GSS service level.</param>
+    /// <exception cref="ArgumentException">The target principal is null, empty, or whitespace.</exception>
     public NfsClientBuilder WithKerberos(string targetSpn, RpcSecGssService service = RpcSecGssService.Integrity)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetSpn);
         _gssMechanism = null;
         _gssMechanismFactory = static () => new KerberosGssMechanism();
         _requiresLinuxGssMechanism = true;
