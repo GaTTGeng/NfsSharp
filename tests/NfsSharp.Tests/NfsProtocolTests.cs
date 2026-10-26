@@ -413,6 +413,25 @@ public class NfsModelsTests
     }
 
     [Fact]
+    public async Task NfsV3Client_UnmountsExportWhenGssSetupFails()
+    {
+        await using var mount = CreateMountedExportServer();
+        await using var nfs = new RpcFixtureServer(1, _ => throw new InvalidOperationException(), readRequests: false);
+        await using var portmap = CreateNfsPortmap(mount.Port, nfs.Port);
+        var options = CreateFixtureOptions(portmap.Port) with
+        {
+            GssMechanismFactory = static () => new NoOpGssMechanism(),
+        };
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV3Client.ConnectAsync("127.0.0.1", "/export", options, CancellationToken.None));
+
+        Assert.Contains("cannot compute the RPCSEC_GSS data-call header verifier", exception.Message);
+        await WaitForRequestsAsync(portmap, mount, nfs);
+        Assert.Equal(2, mount.RequestCount); // MNT is rolled back with UMNT after GSS setup fails.
+    }
+
+    [Fact]
     public async Task NfsV3Client_PortmapRejectsOutOfRangePort()
     {
         await using var portmap = new RpcFixtureServer(1, call =>
@@ -2567,6 +2586,20 @@ public class NfsModelsTests
         Assert.Equal(0, openReader.Remaining);
 
         Assert.Equal(fileHandle, response.Results[1].Data!.Opaque());
+    }
+
+    [Fact]
+    public async Task NfsV4Client_RejectsGssOptionsBeforeResolvingServer()
+    {
+        var options = NfsClientOptions.Default with
+        {
+            GssMechanismFactory = static () => new NoOpGssMechanism(),
+        };
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => NfsV4Client.ConnectAsync("server-that-must-not-be-resolved.invalid", 0, options, CancellationToken.None));
+
+        Assert.Contains("RPCSEC_GSS is not supported", exception.Message);
     }
 
     [Fact]
