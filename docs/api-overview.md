@@ -35,6 +35,10 @@ RPCSEC_GSS negotiation and mechanism extension points are available (`WithKerber
 
 If the server rejects a request with `RPCSEC_GSS_CREDPROBLEM` or `RPCSEC_GSS_CTXPROBLEM`, the current session is invalidated and the failure is surfaced with its distinct `auth_stat`. The client does not transparently replay the operation or recreate the context. `WithGssMechanism` transfers ownership of the configured mechanism to the client session when `ConnectAsync` starts; the client disposes it during teardown or failed setup. Supply a fresh custom mechanism for each client session, and create a new NFS client with a newly created mechanism before retrying.
 
+Header MIC, reply-verifier, and protected-body failures retire and dispose the context. A disposed or rejected session keeps requiring GSS and cannot fall back to AUTH_SYS. If reopening a failed transport fails or is canceled, its context is also retired. Ordinary per-call cancellation and successful transport reconnection preserve a valid context. Mechanism exception details, including cleanup and cancellation details, are redacted; caller cancellation still carries the caller's token. An authenticated RPC procedure error alone does not retire the context.
+
+Legacy mechanisms without `IRpcSecGssQopMechanism` support only QOP 0 through the MIC helpers; requesting a nonzero QOP fails explicitly. Implement `IRpcSecGssMicResultMechanism` to report the QOP actually verified and distinguish invalid MICs from unsupported QOP and mechanism failure.
+
 The following remain incomplete and **experimental**:
 
 - `WithKerberos` uses the experimental Linux MIT GSSAPI mechanism and the process credential cache. Explicit `GssCredentials`, other platforms, and real-server interoperability evidence are not supported yet. A custom mechanism must provide correct MIC and wrap/unwrap behavior; privacy mechanisms must also report the returned QOP and confidentiality state.

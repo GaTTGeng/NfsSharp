@@ -508,8 +508,15 @@ public static class RpcSecGssMechanism
     public static bool ProvidesCryptographicProtection(IRpcSecGssMechanism mechanism)
     {
         ArgumentNullException.ThrowIfNull(mechanism);
-        return mechanism is not IRpcSecGssMechanismCapabilities capabilities
-            || capabilities.ProvidesCryptographicProtection;
+        try
+        {
+            return mechanism is not IRpcSecGssMechanismCapabilities capabilities
+                || capabilities.ProvidesCryptographicProtection;
+        }
+        catch
+        {
+            throw new NfsException("RPCSEC_GSS mechanism failed to report protection capability; mechanism details were redacted.");
+        }
     }
 
     /// <summary>
@@ -519,8 +526,15 @@ public static class RpcSecGssMechanism
     public static bool CanComputeMic(IRpcSecGssMechanism mechanism)
     {
         ArgumentNullException.ThrowIfNull(mechanism);
-        return mechanism is not IRpcSecGssMechanismCapabilities capabilities
-            || capabilities.CanComputeMic;
+        try
+        {
+            return mechanism is not IRpcSecGssMechanismCapabilities capabilities
+                || capabilities.CanComputeMic;
+        }
+        catch
+        {
+            throw new NfsException("RPCSEC_GSS mechanism failed to report MIC capability; mechanism details were redacted.");
+        }
     }
 
     /// <summary>Compute a MIC, preferring the QOP-aware contract when available.</summary>
@@ -528,9 +542,11 @@ public static class RpcSecGssMechanism
     {
         ArgumentNullException.ThrowIfNull(mechanism);
         ArgumentNullException.ThrowIfNull(data);
-        return mechanism is IRpcSecGssQopMechanism qopMechanism
-            ? qopMechanism.GetMic(data, qop)
-            : mechanism.GetMic(data);
+        if (mechanism is IRpcSecGssQopMechanism qopMechanism)
+            return qopMechanism.GetMic(data, qop);
+        if (qop != RpcSecGssConstants.DefaultQop)
+            throw new NfsException("RPCSEC_GSS legacy mechanisms support only default QOP 0.");
+        return mechanism.GetMic(data);
     }
 
     /// <summary>Verify a MIC, preferring the QOP-aware contract when available.</summary>
@@ -555,8 +571,10 @@ public static class RpcSecGssMechanism
             };
         }
 
-        return mechanism is IRpcSecGssQopMechanism qopMechanism
-            ? qopMechanism.VerifyMic(data, mic, qop)
-            : mechanism.VerifyMic(data, mic);
+        if (mechanism is IRpcSecGssQopMechanism qopMechanism)
+            return qopMechanism.VerifyMic(data, mic, qop);
+        if (qop != RpcSecGssConstants.DefaultQop)
+            throw new NfsException("RPCSEC_GSS legacy mechanisms support only default QOP 0.");
+        return mechanism.VerifyMic(data, mic);
     }
 }
