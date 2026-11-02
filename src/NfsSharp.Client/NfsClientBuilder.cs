@@ -35,6 +35,8 @@ public sealed class NfsClientBuilder
     private bool _tcpNoDelay = true;
     private ILogger? _logger;
     private IRpcSecGssMechanism? _gssMechanism;
+    private Func<IRpcSecGssMechanism>? _gssMechanismFactory;
+    private bool _requiresLinuxGssMechanism;
     private RpcSecGssService _gssService = RpcSecGssService.Integrity;
     private GssCredentials? _gssCredentials;
     private string? _gssTargetName;
@@ -166,23 +168,30 @@ public sealed class NfsClientBuilder
     }
 
     /// <summary>
-    /// Use Kerberos via RPCSEC_GSS against the given target SPN.
-    /// Experimental and currently rejected at configuration time: <see cref="NegotiateGssMechanism"/>
-    /// performs token exchange only and cannot compute the mandatory data-call header MIC
-    /// (including for <see cref="RpcSecGssService.None"/>).
+    /// Use Kerberos via the Linux MIT GSSAPI library and the process credential cache
+    /// against the given target principal. This experimental mechanism does not accept
+    /// explicit <see cref="GssCredentials"/>.
     /// </summary>
+    /// <param name="targetSpn">The target NFS service principal, such as <c>nfs/server.example</c>.</param>
+    /// <param name="service">The RPCSEC_GSS service level.</param>
+    /// <exception cref="ArgumentException">The target principal is null, empty, or whitespace.</exception>
     public NfsClientBuilder WithKerberos(string targetSpn, RpcSecGssService service = RpcSecGssService.Integrity)
     {
-        _gssMechanism = new NegotiateGssMechanism();
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetSpn);
+        _gssMechanism = null;
+        _gssMechanismFactory = static () => new KerberosGssMechanism();
+        _requiresLinuxGssMechanism = true;
         _gssService = service;
         _gssTargetName = targetSpn;
         return this;
     }
 
-    /// <summary>Use a custom RPCSEC_GSS mechanism instead of AUTH_SYS.</summary>
+    /// <summary>Use a custom RPCSEC_GSS mechanism instead of AUTH_SYS; the client disposes it with its session.</summary>
     public NfsClientBuilder WithGssMechanism(IRpcSecGssMechanism mechanism, RpcSecGssService service = RpcSecGssService.Integrity)
     {
         _gssMechanism = mechanism;
+        _gssMechanismFactory = null;
+        _requiresLinuxGssMechanism = false;
         _gssService = service;
         return this;
     }
@@ -218,6 +227,8 @@ public sealed class NfsClientBuilder
         TcpNoDelay = _tcpNoDelay,
         Logger = _logger,
         GssMechanism = _gssMechanism,
+        GssMechanismFactory = _gssMechanismFactory,
+        RequiresLinuxGssMechanism = _requiresLinuxGssMechanism,
         GssService = _gssService,
         GssCredentials = _gssCredentials,
         GssTargetName = _gssTargetName
