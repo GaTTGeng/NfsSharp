@@ -9,6 +9,7 @@ internal sealed class RpcSecGssSession
 {
     private readonly NfsClientOptions _options;
     private readonly ILogger? _logger;
+    internal SemaphoreSlim MechanismLock { get; } = new(1, 1);
     // System.Threading.Lock is unavailable on net8.0.
     // ReSharper disable once ChangeFieldTypeToSystemThreadingLock
     private readonly object _stateLock = new();
@@ -41,7 +42,8 @@ internal sealed class RpcSecGssSession
         get
         {
             lock (_stateLock)
-                return _rejectedAuthStatus is null && _context?.Mechanism.IsEstablished == true;
+                // Publication already verified establishment; per-message failures retire this state.
+                return !_disposed && _rejectedAuthStatus is null && _context is not null;
         }
     }
 
@@ -51,7 +53,8 @@ internal sealed class RpcSecGssSession
         get
         {
             lock (_stateLock)
-                return _context is not null || _rejectedAuthStatus is not null;
+                // Releasing keys must never turn an authenticated session into AUTH_SYS.
+                return _disposed || _context is not null || _rejectedAuthStatus is not null;
         }
     }
 
@@ -72,6 +75,8 @@ internal sealed class RpcSecGssSession
 
         lock (_stateLock)
         {
+            if (_disposed)
+                throw new NfsException("RPCSEC_GSS session is closed; establish a new NFS client.");
             _context = context;
             _rejectedAuthStatus = null;
             _contextGeneration++;
@@ -80,11 +85,25 @@ internal sealed class RpcSecGssSession
                 context.SeqWindowSize,
                 (uint)_options.MaxOutstandingRpcCallsPerConnection);
             _callSlots = new SemaphoreSlim(maxOutstanding);
-            context.Mechanism.NegotiatedService = context.Service;
+            SetMechanismService(context.Mechanism, context.Service);
         }
     }
 
     internal void Dispose()
+    {
+        // Teardown must serialize with every protection operation, including custom mechanisms.
+        MechanismLock.Wait(CancellationToken.None);
+        try
+        {
+            DisposeUnderMechanismLock();
+        }
+        finally
+        {
+            MechanismLock.Release();
+        }
+    }
+
+    internal void DisposeUnderMechanismLock()
     {
         IRpcSecGssMechanism? mechanism;
         lock (_stateLock)
@@ -92,12 +111,35 @@ internal sealed class RpcSecGssSession
             if (_disposed)
                 return;
             _disposed = true;
+            _contextGeneration++;
             mechanism = _context?.Mechanism ?? _ownedMechanism;
             _context = null;
             _ownedMechanism = null;
         }
 
-        mechanism?.Dispose();
+        try
+        {
+            mechanism?.Dispose();
+        }
+        catch
+        {
+            // Cleanup must preserve the original failure and cannot expose mechanism details.
+            _logger?.LogWarning("RPCSEC_GSS mechanism cleanup failed; mechanism details were redacted.");
+        }
+    }
+
+    /// <summary>Retire the context on a protection failure while the caller holds the mechanism lock.</summary>
+    internal T ExecuteSecurityOperation<T>(Func<T> operation)
+    {
+        try
+        {
+            return operation();
+        }
+        catch
+        {
+            DisposeUnderMechanismLock();
+            throw;
+        }
     }
 
     /// <summary>Send RPCSEC_GSS_DESTROY while the established context and NFS connection are usable.</summary>
@@ -154,6 +196,7 @@ internal sealed class RpcSecGssSession
             _rejectedAuthStatus = authStatus;
             _contextGeneration++;
         }
+        DisposeUnderMechanismLock();
     }
 
     /// <summary>
@@ -219,7 +262,16 @@ internal sealed class RpcSecGssSession
         // invalidated this record while it waited to construct or send the request.
         var context = RequireCallContext(record);
 
-        var mic = RpcSecGssMechanism.GetMic(context.Mechanism, headerThroughCredential.ToArray(), record.Qop);
+        byte[] mic;
+        try
+        {
+            mic = RpcSecGssMechanism.GetMic(context.Mechanism, headerThroughCredential.ToArray(), record.Qop);
+        }
+        catch
+        {
+            // A mechanism IOException is a security failure, not a retryable transport error.
+            throw new NfsException($"RPCSEC_GSS mechanism failed to compute the header MIC ({record}); mechanism details were redacted.");
+        }
         if (mic.Length == 0)
             throw new NfsException("RPCSEC_GSS mechanism produced an empty header checksum.");
         return mic;
@@ -436,23 +488,29 @@ internal sealed class RpcSecGssSession
                 $"RPCSEC_GSS context was rejected by the server (auth_stat={authStatus}); establish a new NFS client.",
                 inner: null,
                 rpcAuthStatus: authStatus);
-        if (_context is null || !_context.Mechanism.IsEstablished)
+        if (_disposed || _context is null)
             throw new NfsException("RPCSEC_GSS context is unavailable; establish a new NFS client.");
     }
 
     /// <summary>Run RPCSEC_GSS context establishment and store the resulting server context handle.</summary>
     internal async Task EstablishAsync(string server, RpcClient rpcClient, CancellationToken ct)
     {
-        var mechanism = _options.GssMechanismFactory?.Invoke() ?? _options.GssMechanism
-                        ?? throw new InvalidOperationException("A GSS mechanism was not configured.");
         lock (_stateLock)
-            _ownedMechanism = mechanism;
+        {
+            if (_disposed)
+                throw new NfsException("RPCSEC_GSS session is closed; establish a new NFS client.");
+        }
         // Default target principal follows the conventional nfs/<host> service name.
         var targetName = _options.GssTargetName ?? $"nfs/{server}";
         try
         {
+            var mechanism = InvokeMechanism(() => _options.GssMechanismFactory?.Invoke() ?? _options.GssMechanism,
+                "create mechanism") ?? throw new InvalidOperationException("A GSS mechanism was not configured.");
+            lock (_stateLock)
+                _ownedMechanism = mechanism;
             // Header MICs are mandatory for every data call, including rpc_gss_svc_none.
-            if (mechanism is NoOpGssMechanism || !RpcSecGssMechanism.CanComputeMic(mechanism))
+            if (mechanism is NoOpGssMechanism ||
+                !InvokeMechanism(() => RpcSecGssMechanism.CanComputeMic(mechanism), "read MIC capability"))
             {
                 throw new NfsException(
                     "The configured GSS mechanism cannot compute the RPCSEC_GSS data-call header verifier " +
@@ -460,7 +518,7 @@ internal sealed class RpcSecGssSession
             }
 
             if (_options.GssService != RpcSecGssService.None &&
-                !RpcSecGssMechanism.ProvidesCryptographicProtection(mechanism))
+                !InvokeMechanism(() => RpcSecGssMechanism.ProvidesCryptographicProtection(mechanism), "read protection capability"))
             {
                 throw new NfsException(
                     "The configured GSS mechanism does not provide cryptographic integrity/privacy " +
@@ -474,11 +532,11 @@ internal sealed class RpcSecGssSession
                     "RPCSEC_GSS privacy requires a mechanism that reports the negotiated QOP and confidentiality state.");
             }
 
-            mechanism.NegotiatedService = _options.GssService;
+            SetMechanismService(mechanism, _options.GssService);
             var token = await InitiateMechanismAsync(mechanism, targetName, _options.GssCredentials, ct);
             var controlProcedure = RpcSecGssProc.Init;
             byte[] contextHandle = [];
-            var clientNeedsFinalToken = !mechanism.IsEstablished;
+            var clientNeedsFinalToken = !IsMechanismEstablished(mechanism);
             var contextCompleted = false;
 
             // Each continuation is a non-idempotent context-creation call, so it is sent once.
@@ -527,7 +585,7 @@ internal sealed class RpcSecGssSession
                     token = await ContinueMechanismAsync(mechanism, serverToken, ct);
                     if (token.Length == 0)
                         throw new NfsException("RPCSEC_GSS mechanism returned no token while the server requested continuation.");
-                    clientNeedsFinalToken = !mechanism.IsEstablished;
+                    clientNeedsFinalToken = !IsMechanismEstablished(mechanism);
                     controlProcedure = RpcSecGssProc.ContinueInit;
                     continue;
                 }
@@ -536,12 +594,13 @@ internal sealed class RpcSecGssSession
                 {
                     await ContinueMechanismAsync(mechanism, serverToken, ct);
                 }
-                if (!mechanism.IsEstablished)
+                if (!IsMechanismEstablished(mechanism))
                     throw new NfsException("RPCSEC_GSS server completed context establishment before the client mechanism.");
 
                 // The mechanism must consume its final server token before it can verify this MIC.
                 // GSS_S_COMPLETE authenticates the four-byte network-order seq_window with QOP 0.
                 VerifyContextCompletionVerifier(mechanism, reply, returnedSeqWindow);
+                ct.ThrowIfCancellationRequested();
 
                 InstallContext(new RpcSecGssContext
                 {
@@ -574,6 +633,28 @@ internal sealed class RpcSecGssSession
             _contextGeneration);
     }
 
+    private static T InvokeMechanism<T>(Func<T> operation, string description)
+    {
+        try
+        {
+            return operation();
+        }
+        catch
+        {
+            throw new NfsException($"RPCSEC_GSS mechanism failed to {description}; mechanism details were redacted.");
+        }
+    }
+
+    private static bool IsMechanismEstablished(IRpcSecGssMechanism mechanism) =>
+        InvokeMechanism(() => mechanism.IsEstablished, "read context state");
+
+    private static void SetMechanismService(IRpcSecGssMechanism mechanism, RpcSecGssService service) =>
+        InvokeMechanism(() =>
+        {
+            mechanism.NegotiatedService = service;
+            return true;
+        }, "set service");
+
     private const uint GssComplete = 0;
     private const uint GssContinueNeeded = 1;
     private const int MaxContextCreationRounds = 16;
@@ -588,9 +669,9 @@ internal sealed class RpcSecGssSession
         {
             return await mechanism.InitiateContextAsync(targetName, credentials, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(ct);
         }
         catch
         {
@@ -607,9 +688,9 @@ internal sealed class RpcSecGssSession
         {
             return await mechanism.ContinueContextAsync(serverToken, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            throw;
+            throw new OperationCanceledException(ct);
         }
         catch
         {

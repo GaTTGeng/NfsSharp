@@ -1,4 +1,7 @@
 using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
 
@@ -38,6 +41,314 @@ public class RpcSecGssTests
         session.Dispose();
 
         Assert.Equal(0, mechanism.DisposeCount);
+    }
+
+    [Fact]
+    public async Task DisposedSession_PreventsAuthenticationDowngradeAndContextReuse()
+    {
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions { GssMechanism = mechanism };
+        var session = CreateEstablishedSession(mechanism);
+        var stream = new ContextReplyStream();
+        await using var rpc = new RpcClient(stream, options, session);
+
+        session.Dispose();
+        await Assert.ThrowsAsync<NfsException>(() => rpc.CallAsync(100003, 3, 1, [], CancellationToken.None));
+
+        Assert.True(session.RequiresGss);
+        Assert.False(session.IsEstablished);
+        Assert.Empty(stream.Written);
+        Assert.Throws<NfsException>(() => session.InstallContext(NewContext(mechanism, RpcSecGssService.Integrity)));
+        session.Dispose();
+        Assert.Equal(1, mechanism.DisposeCount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task HeaderMicFailure_IsRedactedAndRetiresContextWithoutRetry(int error)
+    {
+        const string secret = "sensitive-token-credential-payload";
+        var mechanism = new FakeGssMechanism
+        {
+            MicException = error switch
+            {
+                0 => new IOException(secret),
+                1 => new ObjectDisposedException(secret),
+                2 => new OperationCanceledException(secret),
+                _ => new NfsException(secret),
+            },
+            DisposeException = new InvalidOperationException(secret),
+        };
+        var logger = new SecurityTestLogger();
+        var options = new NfsClientOptions { GssMechanism = mechanism, Logger = logger, MaxRetries = 3 };
+        var session = new RpcSecGssSession(options);
+        session.InstallContext(NewContext(mechanism, RpcSecGssService.Integrity));
+        var stream = new ContextReplyStream();
+        await using var rpc = new RpcClient(stream, options, session);
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => rpc.CallAsync(100003, 3, 1, [], CancellationToken.None));
+
+        Assert.Contains("header MIC", exception.Message);
+        Assert.DoesNotContain(secret, exception.ToString());
+        Assert.All(logger.Messages, message => Assert.DoesNotContain(secret, message));
+        Assert.Empty(stream.Written);
+        Assert.False(session.IsEstablished);
+        Assert.Equal(1, mechanism.DisposeCount);
+        await Assert.ThrowsAsync<NfsException>(() => rpc.CallAsync(100003, 3, 1, [], CancellationToken.None));
+        Assert.Empty(stream.Written);
+    }
+
+    [Theory]
+    [InlineData("verifier")]
+    [InlineData("envelope")]
+    [InlineData("qop")]
+    [InlineData("integrity")]
+    [InlineData("confidentiality")]
+    [InlineData("unwrap")]
+    public async Task ReplyProtectionFailure_DisposesContextAndPreventsFurtherSends(string failure)
+    {
+        var mechanism = new FakeGssMechanism();
+        var service = failure is "confidentiality" or "unwrap"
+            ? RpcSecGssService.Privacy : RpcSecGssService.Integrity;
+        var options = new NfsClientOptions { GssMechanism = mechanism, GssService = service, MaxRetries = 0 };
+        var session = CreateEstablishedSession(mechanism, service);
+        var reply = new XdrWriter();
+        reply.UInt(1);
+        reply.UInt(1);
+        reply.UInt(0);
+        reply.UInt((uint)RpcSecGssFlavor.Gss);
+        reply.Opaque(failure == "verifier" ? [0] : FakeGssMechanism.Mac(UIntBytes(1), 0));
+        reply.UInt(0);
+        var data = new XdrWriter();
+        data.UInt(1);
+        data.UInt(42);
+        if (service == RpcSecGssService.Privacy)
+            reply.Opaque(failure == "unwrap" ? [0] : mechanism.WrapPrivacy(data.ToArray(), 0).Data);
+        else
+        {
+            reply.Opaque(data.ToArray());
+            reply.Opaque(failure == "integrity" ? [0] : FakeGssMechanism.Mac(data.ToArray(), 0));
+        }
+        // Alter the returned protection state after producing a well-formed protected fixture.
+        mechanism.ReportedMicQopOffset = failure == "qop" ? 1u : 0u;
+        mechanism.ReportUnwrapConfidentiality = failure != "confidentiality";
+        var stream = new ContextReplyStream(failure == "envelope" ? UIntBytes(1) : reply.ToArray());
+        await using var rpc = new RpcClient(stream, options, session);
+
+        await Assert.ThrowsAsync<NfsException>(() => rpc.CallAsync(100003, 3, 1, [], CancellationToken.None));
+        var sent = stream.Written.Length;
+        await Assert.ThrowsAsync<NfsException>(() => rpc.CallAsync(100003, 3, 1, [], CancellationToken.None));
+
+        Assert.False(session.IsEstablished);
+        Assert.True(session.RequiresGss);
+        Assert.Equal(1, mechanism.DisposeCount);
+        Assert.Equal(sent, stream.Written.Length);
+        Assert.Equal(0, rpc.PendingCallCountForTesting);
+    }
+
+    [Fact]
+    public async Task MechanismFactoryFailure_IsRedactedAndLeavesSessionClosed()
+    {
+        var options = new NfsClientOptions
+        {
+            GssMechanismFactory = () => throw new IOException("secret-factory-token"),
+        };
+        var session = new RpcSecGssSession(options);
+        await using var rpc = new RpcClient(new ContextReplyStream(), options, session);
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => session.EstablishAsync("server.example", rpc, CancellationToken.None));
+
+        Assert.DoesNotContain("secret-factory-token", exception.ToString());
+        Assert.True(session.RequiresGss);
+        Assert.False(session.IsEstablished);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InitiationCancellation_RedactsMechanismDetailsAndDisposes(bool callerCanceled)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var mechanism = new FakeGssMechanism
+        {
+            InitiationAction = () =>
+            {
+                if (callerCanceled)
+                    // The callback runs synchronously before the awaited establishment call completes.
+                    // ReSharper disable once AccessToDisposedClosure
+                    cancellation.Cancel();
+                throw new OperationCanceledException("secret-cancellation-token");
+            },
+            DisposeException = new IOException("secret-cleanup-token"),
+        };
+        var options = new NfsClientOptions { GssMechanism = mechanism };
+        var session = new RpcSecGssSession(options);
+        await using var rpc = new RpcClient(new ContextReplyStream(), options, session);
+
+        var exception = await Record.ExceptionAsync(
+            () => session.EstablishAsync("server.example", rpc, cancellation.Token));
+
+        Assert.NotNull(exception);
+        if (callerCanceled)
+            Assert.Equal(cancellation.Token, Assert.IsType<OperationCanceledException>(exception).CancellationToken);
+        else
+            Assert.IsType<NfsException>(exception);
+        Assert.DoesNotContain("secret-", exception.ToString());
+        Assert.Equal(1, mechanism.DisposeCount);
+        Assert.False(session.IsEstablished);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TerminalReconnectFailure_DisposesAuthenticatedContext(bool cancelReconnect)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var logger = new SecurityTestLogger
+        {
+            OnMessage = message =>
+            {
+                if (cancelReconnect && message.StartsWith("Reconnecting", StringComparison.Ordinal))
+                    // Logging runs synchronously inside the awaited reconnect before this token is disposed.
+                    // ReSharper disable once AccessToDisposedClosure
+                    cancellation.Cancel();
+            },
+        };
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism, Logger = logger, UsePrivilegedSourcePort = false, MaxRetries = 0,
+        };
+        var session = CreateEstablishedSession(mechanism);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        await using var rpc = new RpcClient(new RpcTransport(IPAddress.Loopback, options), options,
+            new NfsRetryPolicy(options), session, []);
+        await rpc.ConnectAsync(port, cancellation.Token);
+        using var server = await listener.AcceptTcpClientAsync(cancellation.Token);
+        listener.Stop();
+        await rpc.DisposeActiveConnectionForTestingAsync();
+
+        var exception = await Record.ExceptionAsync(
+            () => rpc.CallAsync(100003, 3, 1, [], cancellation.Token));
+
+        Assert.NotNull(exception);
+        if (cancelReconnect)
+            Assert.IsAssignableFrom<OperationCanceledException>(exception);
+        else
+            Assert.IsType<SocketException>(exception);
+        Assert.Equal(1, mechanism.DisposeCount);
+        Assert.False(session.IsEstablished);
+        Assert.True(session.RequiresGss);
+    }
+
+    [Fact]
+    public async Task CancellationDuringFinalVerification_DoesNotPublishContext()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var mechanism = new FakeGssMechanism { VerificationAction = cancellation.Cancel };
+        var options = new NfsClientOptions { GssMechanism = mechanism };
+        var session = new RpcSecGssSession(options);
+        var reply = ContextReply(1, (uint)RpcSecGssFlavor.Gss, FakeGssMechanism.Mac(UIntBytes(16), 0),
+            ContextHandle, 0, 0, 16, []);
+        await using var rpc = new RpcClient(new ContextReplyStream(reply), options, session);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => session.EstablishAsync("server.example", rpc, cancellation.Token));
+
+        Assert.False(session.IsEstablished);
+        Assert.True(session.RequiresGss);
+        Assert.Equal(1, mechanism.DisposeCount);
+    }
+
+    [Fact]
+    public async Task AuthenticatedRpcError_DoesNotRetireValidContext()
+    {
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions { GssMechanism = mechanism, MaxRetries = 0 };
+        var session = CreateEstablishedSession(mechanism);
+        var reply = new XdrWriter();
+        reply.UInt(1);
+        reply.UInt(1);
+        reply.UInt(0);
+        reply.UInt((uint)RpcSecGssFlavor.Gss);
+        reply.Opaque(FakeGssMechanism.Mac(UIntBytes(1), 0));
+        reply.UInt(3); // PROC_UNAVAIL is authenticated but has no protected result body.
+        await using var rpc = new RpcClient(new ContextReplyStream(reply.ToArray()), options, session);
+
+        var exception = await Assert.ThrowsAsync<NfsException>(
+            () => rpc.CallAsync(100003, 3, 1, [], CancellationToken.None));
+
+        Assert.Contains("procedure unavailable", exception.Message);
+        Assert.True(session.IsEstablished);
+        Assert.Equal(0, mechanism.DisposeCount);
+        session.Dispose();
+    }
+
+    [Fact]
+    public async Task SessionDisposal_WaitsForInFlightMechanismOperation()
+    {
+        var mechanism = new FakeGssMechanism();
+        var session = CreateEstablishedSession(mechanism);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await session.MechanismLock.WaitAsync();
+        Task cleanup;
+        try
+        {
+            cleanup = Task.Run(() =>
+            {
+                started.SetResult();
+                session.Dispose();
+            });
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.False(cleanup.IsCompleted);
+            Assert.Equal(0, mechanism.DisposeCount);
+        }
+        finally
+        {
+            session.MechanismLock.Release();
+        }
+        await cleanup.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(1, mechanism.DisposeCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConnectAsync_RedactsCapabilityGetterFailuresBeforeNetworkAccess(bool protectionCapability)
+    {
+        var failure = new IOException("secret-capability-token");
+        var mechanism = new FakeGssMechanism
+        {
+            MicCapabilityException = protectionCapability ? null : failure,
+            ProtectionCapabilityException = protectionCapability ? failure : null,
+        };
+        var options = new NfsClientOptions { GssMechanism = mechanism, GssService = RpcSecGssService.Integrity };
+
+        var exception = await Assert.ThrowsAsync<NfsException>(() => NfsV3Client.ConnectAsync(
+            "must-not-resolve.invalid", "/export", options, CancellationToken.None));
+
+        Assert.Contains("capability", exception.Message);
+        Assert.DoesNotContain("secret-capability-token", exception.ToString());
+        Assert.Equal(0, mechanism.DisposeCount);
+        mechanism.Dispose();
+    }
+
+    [Fact]
+    public void LegacyMechanism_RejectsNonDefaultQopBeforeCallingLegacyOperations()
+    {
+        using var mechanism = new LegacyGssMechanism();
+        Assert.NotEmpty(RpcSecGssMechanism.GetMic(mechanism, [1], 0));
+        Assert.True(RpcSecGssMechanism.VerifyMic(mechanism, [1], [2], 0));
+        Assert.Throws<NfsException>(() => RpcSecGssMechanism.GetMic(mechanism, [1], 7));
+        Assert.Throws<NfsException>(() => RpcSecGssMechanism.VerifyMic(mechanism, [1], [2], 7));
+        Assert.Equal(2, mechanism.OperationCount);
     }
 
     private const uint Xid = 0x1111_2222;
@@ -602,6 +913,7 @@ public class RpcSecGssTests
         session.RejectContext(authStatus);
 
         Assert.False(session.IsEstablished);
+        Assert.Equal(1, mechanism.DisposeCount);
         Assert.True(session.ContextGeneration > oldGeneration);
         var exception = await Assert.ThrowsAsync<NfsException>(
             () => session.AcquireCallSlotAsync(CancellationToken.None));
@@ -1147,6 +1459,42 @@ public class RpcSecGssTests
         return calls;
     }
 
+    /// <summary>Captures formatted logs and exception chains for security redaction assertions.</summary>
+    private sealed class SecurityTestLogger : ILogger
+    {
+        public List<string> Messages { get; } = [];
+        public Action<string>? OnMessage { get; init; }
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception) + exception;
+            Messages.Add(message);
+            OnMessage?.Invoke(message);
+        }
+    }
+
+    /// <summary>Legacy extension fixture that counts MIC dispatch without a QOP-aware contract.</summary>
+    private sealed class LegacyGssMechanism : IRpcSecGssMechanism
+    {
+        public int OperationCount { get; private set; }
+        public byte[] MechanismOid => [];
+        public bool IsEstablished => true;
+        public uint MaxMessageSize => 1024;
+        public uint NextSeqNum { get; set; }
+        public RpcSecGssService NegotiatedService { get; set; }
+        public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct) =>
+            Task.FromResult(Array.Empty<byte>());
+        public Task<byte[]> ContinueContextAsync(byte[] serverToken, CancellationToken ct) =>
+            Task.FromResult(Array.Empty<byte>());
+        public byte[] GetMic(byte[] data) { OperationCount++; return [2]; }
+        public bool VerifyMic(byte[] data, byte[] mic) { OperationCount++; return true; }
+        public byte[] Wrap(byte[] data) => data;
+        public byte[] Unwrap(byte[] wrappedData) => wrappedData;
+        public void Dispose() { }
+    }
+
     private sealed class ContextReplyStream(params byte[][] replies) : Stream
     {
         private readonly MemoryStream _writes = new();
@@ -1382,9 +1730,16 @@ public class RpcSecGssTests
         public uint NextSeqNum { get; set; } = 1;
         public RpcSecGssService NegotiatedService { get; set; }
         public RpcSecGssService ServiceAtInitiation { get; private set; }
-        public bool ProvidesCryptographicProtection => true;
-        public bool CanComputeMic => true;
+        public Exception? MicCapabilityException { get; init; }
+        public Exception? ProtectionCapabilityException { get; init; }
+        public bool ProvidesCryptographicProtection => ProtectionCapabilityException is { } failure ? throw failure : true;
+        public bool CanComputeMic => MicCapabilityException is { } failure ? throw failure : true;
         public bool ReportConfidentiality { get; set; } = true;
+        public bool ReportUnwrapConfidentiality { get; set; } = true;
+        public Exception? MicException { get; init; }
+        public Exception? DisposeException { get; init; }
+        public Action? InitiationAction { get; init; }
+        public Action? VerificationAction { get; init; }
         public uint ReportedQopOffset { get; set; }
         public uint ReportedMicQopOffset { get; set; }
         public Exception? VerificationException { get; set; }
@@ -1392,6 +1747,7 @@ public class RpcSecGssTests
 
         public Task<byte[]> InitiateContextAsync(string targetName, GssCredentials? credentials, CancellationToken ct)
         {
+            InitiationAction?.Invoke();
             ServiceAtInitiation = NegotiatedService;
             return Task.FromResult(new byte[] { 0x01 });
         }
@@ -1408,7 +1764,12 @@ public class RpcSecGssTests
         public bool VerifyMic(byte[] data, byte[] mic) => VerifyMic(data, mic, 0);
         public byte[] Wrap(byte[] data) => data;
         public byte[] Unwrap(byte[] wrappedData) => wrappedData;
-        public byte[] GetMic(byte[] data, uint qop) => Mac(data, qop);
+        public byte[] GetMic(byte[] data, uint qop)
+        {
+            if (MicException is not null)
+                throw MicException;
+            return Mac(data, qop);
+        }
         public bool VerifyMic(byte[] data, byte[] mic, uint qop)
         {
             if (RequireEstablishedForVerification && !IsEstablished)
@@ -1417,6 +1778,7 @@ public class RpcSecGssTests
         }
         public RpcSecGssMicVerificationResult VerifyMicWithResult(byte[] data, byte[] mic, uint qop)
         {
+            VerificationAction?.Invoke();
             if (ReturnDefaultMicResult)
                 return default;
             if (VerificationException is not null)
@@ -1445,12 +1807,15 @@ public class RpcSecGssTests
             var checksum = wrappedData.AsSpan(wrappedData.Length - 8).ToArray();
             if (!VerifyMic(data, checksum, qop))
                 throw new NfsException("Invalid fake privacy MIC.");
-            return new RpcSecGssPrivacyResult(data, qop + ReportedQopOffset, ReportConfidentiality);
+            return new RpcSecGssPrivacyResult(data, qop + ReportedQopOffset,
+                ReportConfidentiality && ReportUnwrapConfidentiality);
         }
         public void Dispose()
         {
             Disposed = true;
             DisposeCount++;
+            if (DisposeException is not null)
+                throw DisposeException;
         }
 
         internal static byte[] Mac(byte[] data, uint qop)

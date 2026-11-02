@@ -26,7 +26,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
     private readonly RpcSecGssSession _gssSession;
     private readonly byte[] _authSysBody;
     private readonly ILogger? _logger;
-    private readonly SemaphoreSlim _gssMechanismLock = new(1, 1);
+    private readonly SemaphoreSlim _gssMechanismLock;
     private readonly SemaphoreSlim _connectionStateLock = new(1, 1);
     private readonly CancellationTokenSource _stopSource = new();
 
@@ -48,6 +48,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         _options = options;
         _retryPolicy = retryPolicy;
         _gssSession = gssSession;
+        _gssMechanismLock = gssSession.MechanismLock;
         _authSysBody = authSysBody;
         _logger = options.Logger;
     }
@@ -441,10 +442,14 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                     writer.UInt((uint)RpcSecGssFlavor.Gss);
                     _gssSession.WriteCredential(writer, gssRecord);
                     // RFC 2203 §5.3.1: the header MIC covers the RPC header through the credential.
-                    var headerVerifier = _gssSession.CreateHeaderVerifier(writer.ToArray(), gssRecord);
-                    writer.UInt((uint)RpcSecGssFlavor.Gss);
-                    writer.Opaque(headerVerifier);
-                    writer.Raw(_gssSession.ProtectArguments(arguments, gssRecord));
+                    _gssSession.ExecuteSecurityOperation(() =>
+                    {
+                        var headerVerifier = _gssSession.CreateHeaderVerifier(writer.ToArray(), gssRecord);
+                        writer.UInt((uint)RpcSecGssFlavor.Gss);
+                        writer.Opaque(headerVerifier);
+                        writer.Raw(_gssSession.ProtectArguments(arguments, gssRecord));
+                        return true;
+                    });
                 }
                 else
                 {
@@ -482,7 +487,7 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             catch (NfsException ex) when (gssRecord is not null && ex.RpcAuthStatus is 13 or 14)
             {
                 // A received auth rejection must invalidate the context even if the caller canceled.
-                await _gssMechanismLock.WaitAsync();
+                await _gssMechanismLock.WaitAsync(CancellationToken.None);
                 try
                 {
                     _gssSession.RejectContext(ex.RpcAuthStatus.Value);
@@ -499,6 +504,20 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                     ex,
                     ex.RpcAuthStatus.Value);
             }
+            catch (NfsException) when (gssRecord is not null)
+            {
+                // An undecodable envelope cannot authenticate its result or preserve a usable context.
+                await _gssMechanismLock.WaitAsync(CancellationToken.None);
+                try
+                {
+                    _gssSession.DisposeUnderMechanismLock();
+                }
+                finally
+                {
+                    _gssMechanismLock.Release();
+                }
+                throw;
+            }
             // Fail closed on RPCSEC_GSS verifier problems before any procedure result is exposed,
             // including accepted RPC errors whose verifier RFC 2203 still requires.
             if (gssRecord is not null)
@@ -507,10 +526,15 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 gssMechanismLockAcquired = true;
                 try
                 {
-                    _gssSession.VerifyReply(reply, gssRecord);
+                    _gssSession.ExecuteSecurityOperation(() =>
+                    {
+                        _gssSession.VerifyReply(reply, gssRecord);
+                        return true;
+                    });
+                    // An authenticated RPC error is not a mechanism failure and keeps its context usable.
                     EnsureAcceptSuccess(reply, program, version, procedure);
-                    // Decode protected result bodies only after both the RPC verifier and accept status pass.
-                    var protectedBody = _gssSession.UnprotectReplyBody(reply, gssRecord);
+                    var protectedBody = _gssSession.ExecuteSecurityOperation(
+                        () => _gssSession.UnprotectReplyBody(reply, gssRecord));
                     _logger?.LogDebug(
                         "Received RPC reply (xid={Xid}, prog={Program}, vers={Version}, proc={Procedure}, generation={Generation}, pending={PendingCount}, pendingHighWater={PendingHighWater})",
                         xid,
@@ -601,7 +625,26 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             }
 
             using var timeoutCts = CreateCallTimeout(ct, out var token);
-            var connection = await _transport.OpenAsync(_activePort, token);
+            RpcConnection connection;
+            try
+            {
+                connection = await _transport.OpenAsync(_activePort, token);
+            }
+            catch
+            {
+                // No usable transport remains. Retire its security state without racing a verifier.
+                await _gssMechanismLock.WaitAsync(CancellationToken.None);
+                try
+                {
+                    if (_gssSession.RequiresGss)
+                        _gssSession.DisposeUnderMechanismLock();
+                }
+                finally
+                {
+                    _gssMechanismLock.Release();
+                }
+                throw;
+            }
             // Install the new generation only after the open succeeds so callers never observe a half-built connection.
             _activeConnection = connection;
             _logger?.LogInformation(
