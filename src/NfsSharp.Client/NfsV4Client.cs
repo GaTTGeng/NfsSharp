@@ -47,7 +47,7 @@ public sealed class NfsV4Client : IAsyncDisposable
         new Random().NextBytes(_clientVerifier);
     }
 
-    /// <summary>Connect to an NFSv4 server.</summary>
+    /// <summary>Connect to an NFSv4 server using AUTH_SYS credentials.</summary>
     // ReSharper disable once MemberCanBePrivate.Global
     public static async Task<NfsV4Client> ConnectAsync(
         string server,
@@ -62,6 +62,8 @@ public sealed class NfsV4Client : IAsyncDisposable
 
         options ??= NfsClientOptions.Default;
         options.Validate();
+        if (options.GssMechanism is not null || options.GssMechanismFactory is not null)
+            throw new NfsException("RPCSEC_GSS is not supported by the experimental NFSv4 client.");
 
         // Resolve first; every later socket open reuses this address.
         var ip = await ResolveAddressAsync(server, ct);

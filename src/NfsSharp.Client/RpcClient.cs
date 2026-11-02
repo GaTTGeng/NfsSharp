@@ -233,6 +233,23 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         byte[] arguments,
         CancellationToken ct)
     {
+        if (controlProcedure == RpcSecGssProc.Destroy)
+        {
+            if (arguments.Length != 0)
+                throw new ArgumentException("RPCSEC_GSS_DESTROY has no procedure arguments.", nameof(arguments));
+
+            return (await CallOnceReplyAsync(
+                await RequireHealthyConnectionAsync(ct),
+                NfsRpcConstants.ProgNfs,
+                NfsRpcConstants.VerNfs,
+                procedure: 0,
+                arguments,
+                ct,
+                controlProcedure: null,
+                controlContextHandle: null,
+                dataGssProcedure: RpcSecGssProc.Destroy)).Reply;
+        }
+
         if (controlProcedure is not (RpcSecGssProc.Init or RpcSecGssProc.ContinueInit))
             throw new ArgumentOutOfRangeException(nameof(controlProcedure));
 
@@ -244,7 +261,8 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
             arguments,
             ct,
             controlProcedure,
-            contextHandle)).Reply;
+            contextHandle,
+            dataGssProcedure: null)).Reply;
     }
 
     internal async ValueTask DisposeActiveConnectionForTestingAsync() =>
@@ -348,7 +366,8 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         byte[] arguments,
         CancellationToken ct,
         RpcSecGssProc? controlProcedure,
-        byte[]? controlContextHandle)
+        byte[]? controlContextHandle,
+        RpcSecGssProc? dataGssProcedure = null)
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _stopSource.Token);
         var token = linkedCts.Token;
@@ -356,7 +375,10 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
         await connection.WaitForCallSlotAsync(token);
         var queueDelay = Stopwatch.GetElapsedTime(queuedAt);
         // Setup RPCs run before a context exists; after installation or rejection, never fall back to AUTH_SYS.
-        var usesGss = controlProcedure is null && _options.GssMechanism is not null && _gssSession.RequiresGss;
+        var usesGss = controlProcedure is null &&
+                      (_options.GssMechanism is not null || _options.GssMechanismFactory is not null) &&
+                      program == NfsRpcConstants.ProgNfs &&
+                      _gssSession.RequiresGss;
         var ownsGssSlot = false;
         var gssMechanismLockAcquired = false;
         uint xid = 0;
@@ -407,7 +429,12 @@ internal sealed class RpcClient : IRpcCallClient, IAsyncDisposable
                 else if (usesGss)
                 {
                     // Allocate the sequence once per transmitted attempt, including retries.
-                    gssRecord = _gssSession.BeginDataCall(xid, program, version, procedure);
+                    gssRecord = _gssSession.BeginDataCall(
+                        xid,
+                        program,
+                        version,
+                        procedure,
+                        dataGssProcedure ?? RpcSecGssProc.Data);
                     // Keep rejection handling out until this validated request has finished writing.
                     _gssMechanismLock.Wait(token);
                     gssMechanismLockAcquired = true;
