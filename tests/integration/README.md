@@ -7,7 +7,18 @@ The integration suite runs the same server-independent assertions against two ma
 
 Both fixtures expose only NFSv3 over TCP and use explicit AUTH_SYS identities. The Ganesha container does not mount an NFS file system on the host. The kernel fixture exports a dedicated local directory and requires root privileges to install and configure the server.
 
-These NFSv3 fixtures do not configure Kerberos or RPCSEC_GSS. The Linux MIT GSSAPI mechanism is experimental; realm setup and real NFS Kerberos interoperability evidence remain separate M4 work.
+The AUTH_SYS fixtures do not configure Kerberos. A separate disposable MIT Kerberos and NFS-Ganesha fixture exercises the experimental Linux MIT GSSAPI mechanism as described below.
+
+## Kerberos integration fixture
+
+On a Linux host with Docker and the repository's .NET SDKs, build the tests and run:
+
+```bash
+dotnet build tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release
+bash tests/integration/kerberos/run.sh
+```
+
+The isolated container creates a fresh KDC database and random client and server keys, starts NFS-Ganesha 4.3 with NFSv3 over TCP, and runs the built tests using MIT Kerberos and QOP 0. It exposes no ports to the host and discards the realm and keys when it exits. The tests cover context establishment, GETATTR, WRITE, READ, cleanup, and an unknown service principal for `none`, `integrity`, and `privacy`. The `Kerberos integration (NFS-Ganesha)` CI job runs the same fixture. Context expiry, rekey, authorization and tampering against a real server remain unverified; this fixture does not establish a production support guarantee.
 
 ## CI evidence
 
