@@ -27,6 +27,7 @@ rpcbind -w -f &
 cat >/etc/ganesha/ganesha.conf <<'EOF'
 NFS_CORE_PARAM { Protocols = 3; NFS_Port = 2049; MNT_Port = 20048; Enable_NLM = false; Enable_UDP = false; }
 EXPORT { Export_Id = 1; Path = "/export"; Pseudo = "/export"; Access_Type = RW; Protocols = 3; Transports = TCP; SecType = krb5, krb5i, krb5p; Squash = No_Root_Squash; PrivilegedPort = false; FSAL { Name = MEM; } }
+EXPORT { Export_Id = 2; Path = "/readonly"; Pseudo = "/readonly"; Access_Type = RO; Protocols = 3; Transports = TCP; SecType = krb5, krb5i, krb5p; Squash = No_Root_Squash; PrivilegedPort = false; FSAL { Name = MEM; } }
 MEM { Inode_Size = 1114112; }
 NFS_KRB5 { Active_krb5 = true; PrincipalName = "nfs"; KeytabPath = "/etc/krb5.keytab"; }
 EOF

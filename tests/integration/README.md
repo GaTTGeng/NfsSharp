@@ -18,7 +18,7 @@ dotnet build tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release
 bash tests/integration/kerberos/run.sh
 ```
 
-The isolated container creates a fresh KDC database and random client and server keys, starts NFS-Ganesha 4.3 with NFSv3 over TCP, and runs the built tests using MIT Kerberos and QOP 0. It exposes no ports to the host and discards the realm and keys when it exits. The tests cover context establishment, GETATTR, WRITE, READ, cleanup, and an unknown service principal for `none`, `integrity`, and `privacy`. The `Kerberos integration (NFS-Ganesha)` CI job runs the same fixture. Context expiry, rekey, authorization and tampering against a real server remain unverified; this fixture does not establish a production support guarantee.
+The isolated container creates a fresh KDC database and random client and server keys, starts NFS-Ganesha 4.3 with NFSv3 over TCP, and runs the built tests using MIT Kerberos and QOP 0. It exposes no ports to the host and discards the realm and keys when it exits. The tests cover context establishment, GETATTR, WRITE, READ, cleanup, an unknown service principal, and rejection of CREATE on a read-only export for `none`, `integrity`, and `privacy`. The `Kerberos integration (NFS-Ganesha)` CI job runs the same fixture. Context expiry, rekey, principal-specific authorization and tampering against a real server remain unverified; this fixture does not establish a production support guarantee.
 
 ## CI evidence
 
