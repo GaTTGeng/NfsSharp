@@ -36,6 +36,27 @@ public sealed class KerberosIntegrationTests
     [InlineData(RpcSecGssService.None)]
     [InlineData(RpcSecGssService.Integrity)]
     [InlineData(RpcSecGssService.Privacy)]
+    public async Task ReadOnlyExportRejectsCreate(RpcSecGssService service)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var options = new NfsClientBuilder()
+            .WithKerberos("nfs/nfs.test.local@TEST.LOCAL", service)
+            .WithPrivilegedSourcePort(false)
+            .BuildOptions();
+        await using var client = await NfsV3Client.ConnectAsync("127.0.0.1", "/readonly", options, timeout.Token);
+        Assert.Equal(NfsType.Dir, (await client.GetAttributesAsync(client.RootHandle, timeout.Token)).Type);
+
+        await using var input = new MemoryStream([1, 2, 3]);
+        var error = await Assert.ThrowsAsync<NfsException>(() =>
+            client.WriteFileAsync($"denied-{Guid.NewGuid():N}", input, timeout.Token));
+        Assert.Equal(NfsV3Status.RoFs, error.Status);
+    }
+
+    [KerberosIntegrationTheory]
+    [Trait("Category", "KerberosIntegration")]
+    [InlineData(RpcSecGssService.None)]
+    [InlineData(RpcSecGssService.Integrity)]
+    [InlineData(RpcSecGssService.Privacy)]
     public async Task RejectsUnknownServicePrincipal(RpcSecGssService service)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));

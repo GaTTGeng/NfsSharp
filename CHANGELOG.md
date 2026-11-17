@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Extended the experimental Kerberos/NFS-Ganesha fixture to verify that a read-only export rejects file creation in all three RPCSEC_GSS service modes.
 - Created an independently owned Kerberos GSS mechanism for each mounted NFS session and dispose it with that session; custom GSS mechanisms transfer to the client session and must be supplied fresh for each session. Valid out-of-order GSS MIC and privacy tokens are accepted while replay and expired-token statuses remain rejected.
 - Added an experimental Linux MIT GSSAPI Kerberos mechanism for `WithKerberos`, backed by the process credential cache and supporting MIC and privacy operations; explicit `GssCredentials` and cross-platform support remain unavailable. A disposable MIT Kerberos/NFS-Ganesha fixture now covers basic NFSv3 operations; full interoperability evidence remains pending.
 - Added an optional RPCSEC_GSS MIC result contract that reports the QOP used and distinguishes invalid MICs from unsupported-QOP and mechanism failures; legacy mechanism interfaces remain supported.
