@@ -79,6 +79,22 @@ jobs:
             artifacts/packages/*.snupkg
           if-no-files-found: error
 
+  kerberos-integration:
+    name: Kerberos integration (NFS-Ganesha)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - name: Build integration tests
+        run: dotnet build tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release
+      - name: Run Kerberos integration tests
+        run: bash tests/integration/kerberos/run.sh
+
   nfs-v3-ganesha-integration:
     name: NFSv3 integration (NFS-Ganesha)
     runs-on: ubuntu-latest
