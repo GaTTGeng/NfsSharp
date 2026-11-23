@@ -93,7 +93,16 @@ jobs:
       - name: Build integration tests
         run: dotnet build tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release
       - name: Run Kerberos integration tests
+        env:
+          NFSSHARP_KERBEROS_RESULTS_DIR: ${{ github.workspace }}/TestResults/KerberosIntegration
         run: bash tests/integration/kerberos/run.sh
+      - name: Upload Kerberos integration results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kerberos-integration-results
+          path: TestResults/KerberosIntegration
+          if-no-files-found: error
 
   nfs-v3-ganesha-integration:
     name: NFSv3 integration (NFS-Ganesha)

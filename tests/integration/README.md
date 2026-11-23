@@ -18,7 +18,7 @@ dotnet build tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release
 bash tests/integration/kerberos/run.sh
 ```
 
-The isolated container creates a fresh KDC database and random client and server keys, starts NFS-Ganesha 4.3 with NFSv3 over TCP, and runs the built tests using MIT Kerberos and QOP 0. It exposes no ports to the host and discards the realm and keys when it exits. The tests cover context establishment, GETATTR, WRITE, READ, cleanup, an unknown service principal, and rejection of CREATE on a read-only export for `none`, `integrity`, and `privacy`. The `Kerberos integration (NFS-Ganesha)` CI job runs the same fixture. Context expiry, rekey, principal-specific authorization and tampering against a real server remain unverified; this fixture does not establish a production support guarantee.
+The isolated container creates a fresh KDC database and random client and server keys, starts NFS-Ganesha 4.3 with NFSv3 over TCP, and runs the built tests using MIT Kerberos (`KerberosGssMechanism` / `libgssapi_krb5.so.2`) and QOP 0. It exposes no ports to the host and discards the realm and keys when it exits. The tests cover context establishment, GETATTR, WRITE, READ, DELETE, concurrent calls, authenticated `RPCSEC_GSS_DESTROY` cleanup, an unknown service principal, CREATE rejection on a read-only export (`NFS3ERR_ROFS`), principal-specific mode-`0600` file isolation (`NFS3ERR_ACCES`), privacy-only export enforcement (`AUTH_TOOWEAK`), bit-flipped context-completion/data-reply verifier and integrity/privacy protected-body tampering through a local TCP proxy, short-lived ticket/context expiry (`RPCSEC_GSS_CREDPROBLEM`/`RPCSEC_GSS_CTXPROBLEM`) with renewed-ticket rollover, and live service keytab KVNO rekey across `none`, `integrity`, and `privacy`. Set `NFSSHARP_KERBEROS_RESULTS_DIR` to capture `.trx` test results, package versions, export state, and Ganesha logs. The `Kerberos integration (NFS-Ganesha)` CI job runs the same fixture and uploads `kerberos-integration-results`. Linux kernel NFS with Kerberos, non-Linux platforms, explicit credentials, and transparent context refresh remain unverified; this fixture does not establish a broad production support guarantee.
 
 ## CI evidence
 
@@ -27,6 +27,7 @@ The `CI` workflow publishes NFSv3 evidence separately from the normal build, uni
 | CI job | Purpose | Artifacts |
 | --- | --- | --- |
 | `Build, test, and pack` | Restores, builds, runs non-Docker test coverage, packs NuGet artifacts, and uploads `.trx` test results. | `test-results`, `nuget-packages` |
+| `Kerberos integration (NFS-Ganesha)` | Starts the disposable MIT Kerberos and NFS-Ganesha 4.3 container and runs tests marked `Category=KerberosIntegration`. | `kerberos-integration-results` |
 | `NFSv3 integration (NFS-Ganesha)` | Starts the repository NFS-Ganesha server and runs tests marked `Category=Integration`. | `nfs-v3-integration-results` |
 | `NFSv3 integration (Linux kernel)` | Installs and configures Ubuntu's kernel NFS server, then runs the same integration tests. | `nfs-v3-kernel-integration-results` |
 
