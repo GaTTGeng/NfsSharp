@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Extended the experimental Kerberos/NFS-Ganesha fixture to verify that an existing client fails after a server restart and a new client can establish a context in all three RPCSEC_GSS service modes.
 - Expanded the experimental Kerberos/NFS-Ganesha fixture and CI evidence capture to verify principal-specific mode-`0600` authorization, privacy-only export enforcement (`AUTH_TOOWEAK`), concurrent RPCSEC_GSS calls and authenticated `RPCSEC_GSS_DESTROY` cleanup, real-server verifier and protected-body tampering through a local TCP proxy, short-lived ticket/context expiry with renewed-ticket rollover, and live service keytab KVNO rekey.
 - Extended the experimental Kerberos/NFS-Ganesha fixture to verify that a read-only export rejects file creation in all three RPCSEC_GSS service modes.
 - Created an independently owned Kerberos GSS mechanism for each mounted NFS session and dispose it with that session; custom GSS mechanisms transfer to the client session and must be supplied fresh for each session. Valid out-of-order GSS MIC and privacy tokens are accepted while replay and expired-token statuses remain rejected.
