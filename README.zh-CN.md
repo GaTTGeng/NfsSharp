@@ -84,7 +84,7 @@ await client.UnMountDeviceAsync();
 - 权限、所有者、时间戳、文件大小和 guarded 属性更新。
 - ACCESS、READLINK、COMMIT、FSSTAT、FSINFO 和 PATHCONF。
 - 重试、超时、Socket 参数、目录缓存、日志和 AUTH_SYS 身份配置。
-- RPCSEC_GSS 协商/扩展钩子、上下文与数据回复 verifier 的 fail-closed 校验，以及完整性/隐私服务的受保护正文校验。`WithKerberos` 为每个已挂载会话创建并释放独立机制；当前使用实验性的 Linux MIT GSSAPI 机制和进程凭据缓存，暂不支持显式凭据及其他平台。`NoOpGssMechanism` 仅用于协议测试夹具，且客户端配置会拒绝它。[Kerberos 测试夹具](tests/integration/README.md#kerberos-integration-fixture)覆盖了 NFS-Ganesha 的基本操作；过期、重新密钥协商、授权和篡改场景仍未验证。请勿将该接口视为端到端 Kerberos 安全保证。
+- RPCSEC_GSS 协商/扩展钩子、上下文与数据回复 verifier 的 fail-closed 校验，以及完整性/隐私服务的受保护正文校验。`WithKerberos` 为每个已挂载会话创建并释放独立机制；当前使用实验性的 Linux MIT GSSAPI 机制和进程凭据缓存，暂不支持显式凭据及其他平台。`NoOpGssMechanism` 仅用于协议测试夹具，且客户端配置会拒绝它。[Kerberos 测试夹具](tests/integration/README.md#kerberos-integration-fixture)已在 Linux 上针对 NFS-Ganesha 4.3 验证了上下文生命周期、并发调用、数据读写、权限隔离与导出策略、verifier/正文篡改检测、票据过期切换及服务 keytab 重新密钥协商；Linux 内核 NFS Kerberos、非 Linux 平台、显式凭据及透明上下文刷新仍未验证。请勿将该接口视为跨平台或多服务端的 Kerberos 生产级保证。
 - 通过 `NfsV4Client` 提供实验性的 NFSv4.0、NFSv4.1 和 NFSv4.2 COMPOUND 操作。
 
 ## 当前范围
