@@ -327,6 +327,35 @@ public sealed class KerberosIntegrationTests
     [InlineData(RpcSecGssService.None)]
     [InlineData(RpcSecGssService.Integrity)]
     [InlineData(RpcSecGssService.Privacy)]
+    public async Task DestroyedCredentialCachePreventsNewSessionButExistingSessionRemainsUsable(RpcSecGssService service)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var cache = $"/tmp/krb5cc_destroy_{Guid.NewGuid():N}";
+        try
+        {
+            await RunCommandAsync("kinit", ["-k", "-t", "/tmp/client.keytab", "-c", cache, "client@TEST.LOCAL"], timeout.Token);
+            using var ccacheScope = CredentialCacheScope.Use(cache);
+            await using var existing = await NfsV3Client.ConnectAsync(
+                ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+            Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
+
+            await RunCommandAsync("kdestroy", ["-c", CredentialCacheScope.ActivePath], timeout.Token);
+            Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
+            await Assert.ThrowsAsync<NfsException>(() =>
+                NfsV3Client.ConnectAsync(ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token));
+        }
+        finally
+        {
+            try { File.Delete(cache); }
+            catch (IOException) { }
+        }
+    }
+
+    [KerberosIntegrationTheory]
+    [Trait("Category", "KerberosIntegration")]
+    [InlineData(RpcSecGssService.None)]
+    [InlineData(RpcSecGssService.Integrity)]
+    [InlineData(RpcSecGssService.Privacy)]
     public async Task ServiceKeytabRekeyPreservesExistingSessionAndAuthenticatesNewSession(RpcSecGssService service)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
