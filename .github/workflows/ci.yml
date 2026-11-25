@@ -104,6 +104,83 @@ jobs:
           path: TestResults/KerberosIntegration
           if-no-files-found: error
 
+  kerberos-kernel-integration:
+    name: Kerberos integration (Linux kernel)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Start Linux kernel NFSv3 Kerberos server
+        run: sudo bash tests/integration/kernel-nfs-kerberos/setup.sh
+
+      - name: Run Kerberos integration tests
+        env:
+          KRB5_CONFIG: /run/nfssharp-kernel-kerberos/krb5.conf
+          KRB5CCNAME: FILE:/run/nfssharp-kernel-kerberos/client/krb5cc_active
+          NFSSHARP_RUN_KERBEROS_INTEGRATION: "1"
+          NFSSHARP_KERBEROS_SERVER: 127.0.0.1
+          NFSSHARP_KERBEROS_SPN: nfs/nfs.test.local@TEST.LOCAL
+          NFSSHARP_KERBEROS_REALM: TEST.LOCAL
+          NFSSHARP_KERBEROS_EXPORT: /srv/nfssharp-kernel-kerberos/export
+          NFSSHARP_KERBEROS_READONLY_EXPORT: /srv/nfssharp-kernel-kerberos/readonly
+          NFSSHARP_KERBEROS_PRIVATE_EXPORT: /srv/nfssharp-kernel-kerberos/private
+          NFSSHARP_KERBEROS_ALICE_UID: "2001"
+          NFSSHARP_KERBEROS_CLIENT_KEYTAB: /run/nfssharp-kernel-kerberos/client/client.keytab
+          NFSSHARP_KERBEROS_ALICE_CCACHE: /run/nfssharp-kernel-kerberos/client/krb5cc_alice
+          NFSSHARP_KERBEROS_BOB_CCACHE: /run/nfssharp-kernel-kerberos/client/krb5cc_bob
+          NFSSHARP_KERBEROS_ACTIVE_CCACHE: /run/nfssharp-kernel-kerberos/client/krb5cc_active
+          NFSSHARP_KERBEROS_SERVER_KEYTAB: /run/nfssharp-kernel-kerberos/krb5.keytab
+          NFSSHARP_KERBEROS_REKEY_CMD: ${{ github.workspace }}/tests/integration/kernel-nfs-kerberos/rekey.sh
+          NFSSHARP_KERBEROS_RESTART_CMD: ${{ github.workspace }}/tests/integration/kernel-nfs-kerberos/restart.sh
+          NFSSHARP_KERBEROS_EXPECTED_WEAK_SERVICE_OUTCOME: nfs-access
+        run: >
+          dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj
+          --configuration ${{ env.CONFIGURATION }}
+          --filter "Category=KerberosIntegration"
+          --logger trx
+          --results-directory TestResults/KerberosKernelIntegration
+
+      - name: Capture Linux kernel Kerberos evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p TestResults/KerberosKernelIntegration
+          {
+            uname -a
+            cat /etc/os-release
+            dpkg-query --show --showformat='${Package} ${Version}\n' nfs-kernel-server nfs-common rpcbind gssproxy krb5-kdc krb5-admin-server krb5-user libgssapi-krb5-2
+          } > TestResults/KerberosKernelIntegration/server-version.txt 2>&1
+          sudo rpcinfo -p 127.0.0.1 > TestResults/KerberosKernelIntegration/rpcinfo.txt 2>&1
+          sudo showmount -e 127.0.0.1 > TestResults/KerberosKernelIntegration/exports.txt 2>&1
+          sudo exportfs -v > TestResults/KerberosKernelIntegration/exportfs.txt 2>&1
+          sudo cat /proc/fs/nfsd/versions > TestResults/KerberosKernelIntegration/nfs-versions.txt 2>&1
+          sudo cat /proc/net/rpc/gss_krb5_enctypes > TestResults/KerberosKernelIntegration/gss-enctypes.txt 2>&1
+          sudo cat /proc/net/rpc/use-gss-proxy > TestResults/KerberosKernelIntegration/use-gss-proxy.txt 2>&1
+          sudo journalctl --no-pager -u gssproxy.service -u rpcbind.service -u nfs-server.service > TestResults/KerberosKernelIntegration/nfs-server.log 2>&1
+
+      - name: Upload Linux kernel Kerberos results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kerberos-kernel-integration-results
+          path: TestResults/KerberosKernelIntegration
+          if-no-files-found: error
+
+      - name: Stop Linux kernel NFSv3 Kerberos server
+        if: always()
+        run: sudo bash tests/integration/kernel-nfs-kerberos/teardown.sh
+
   nfs-v3-ganesha-integration:
     name: NFSv3 integration (NFS-Ganesha)
     runs-on: ubuntu-latest
