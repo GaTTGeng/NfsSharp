@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Added an isolated Ubuntu 24.04 Linux kernel NFS (`nfs-kernel-server` + `gssproxy`) Kerberos integration fixture and CI job running the full 37-case RPCSEC_GSS suite across `krb5`, `krb5i`, and `krb5p`, documenting server-specific `sec=krb5p` weak-service rejection (`AUTH_TOOWEAK` on NFS-Ganesha vs `NFS3ERR_ACCES` on Linux kernel NFS) and promoting Linux MIT Kerberos RPCSEC_GSS in the compatibility matrix from `Experimental` to `Partial`.
 - Extended the experimental Kerberos/NFS-Ganesha fixture to verify that an existing client fails after a server restart and a new client can establish a context in all three RPCSEC_GSS service modes.
 - Expanded the experimental Kerberos/NFS-Ganesha fixture and CI evidence capture to verify principal-specific mode-`0600` authorization, privacy-only export enforcement (`AUTH_TOOWEAK`), concurrent RPCSEC_GSS calls and authenticated `RPCSEC_GSS_DESTROY` cleanup, real-server verifier and protected-body tampering through a local TCP proxy, short-lived ticket/context expiry with renewed-ticket rollover, and live service keytab KVNO rekey.
 - Extended the experimental Kerberos/NFS-Ganesha fixture to verify that a read-only export rejects file creation in all three RPCSEC_GSS service modes.

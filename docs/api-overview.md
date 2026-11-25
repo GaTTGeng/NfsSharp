@@ -39,13 +39,13 @@ Header MIC, reply-verifier, and protected-body failures retire and dispose the c
 
 Legacy mechanisms without `IRpcSecGssQopMechanism` support only QOP 0 through the MIC helpers; requesting a nonzero QOP fails explicitly. Implement `IRpcSecGssMicResultMechanism` to report the QOP actually verified and distinguish invalid MICs from unsupported QOP and mechanism failure.
 
-The following remain incomplete and **experimental**:
+Current scope and limitations:
 
-- `WithKerberos` uses the experimental Linux MIT GSSAPI mechanism and the process credential cache. Explicit `GssCredentials` and other platforms are not supported. The [Kerberos fixture](../tests/integration/README.md#kerberos-integration-fixture) covers NFS-Ganesha 4.3 context creation, concurrent calls, GETATTR/WRITE/READ/DELETE, authenticated `RPCSEC_GSS_DESTROY`, read-only and privacy-only export enforcement, principal-specific mode-`0600` isolation, verifier/body tampering, ticket/context expiry with rollover, and service keytab KVNO rekey; Linux kernel NFS with Kerberos, non-Linux platforms, explicit credentials, and transparent context refresh remain unverified. A custom mechanism must provide correct MIC and wrap/unwrap behavior; privacy mechanisms must also report the returned QOP and confidentiality state.
+- `WithKerberos` uses the Linux MIT GSSAPI mechanism (`KerberosGssMechanism` / `libgssapi_krb5.so.2`) and the process credential cache. Explicit `GssCredentials` and non-Linux platforms are not supported. The [Kerberos fixtures](../tests/integration/README.md#kerberos-integration-fixture) verify both NFS-Ganesha 4.3 and Ubuntu 24.04 Linux kernel NFS (`nfs-kernel-server` + `gssproxy`) across `krb5`, `krb5i`, and `krb5p` for context creation, concurrent calls, GETATTR/WRITE/READ/DELETE, authenticated `RPCSEC_GSS_DESTROY`, read-only and privacy-only export enforcement, principal-specific mode-`0600` isolation, verifier/body tampering, ticket/context expiry with rollover, live service keytab KVNO rekey, credential-cache destruction, and server restart/context-table reset. Non-Linux platforms, explicit credentials, transparent context refresh, and additional server implementations remain unsupported/unverified. A custom mechanism must provide correct MIC and wrap/unwrap behavior; privacy mechanisms must also report the returned QOP and confidentiality state.
 - `NegotiateGssMechanism` performs Kerberos/NTLM token exchange only. .NET `NegotiateAuthentication` does not expose `GSS_GetMIC`/`GSS_VerifyMIC`, so it cannot seal the mandatory data-call header verifier and is rejected for every service, including `rpc_gss_svc_none`. `RpcSecGssMechanism.CanComputeMic` and `ProvidesCryptographicProtection` both report it as false. It is not an end-to-end security guarantee.
 - `NoOpGssMechanism` provides no cryptographic protection and is rejected by client configuration for every service; it is only a deterministic protocol-fixture mechanism and is never interoperability evidence.
 
-Applications must not treat the current RPCSEC_GSS surface as an end-to-end Kerberos security guarantee.
+Do not treat the current RPCSEC_GSS surface as a cross-platform or multi-server production guarantee beyond the verified Linux MIT Kerberos baseline.
 
 ## NFSv3 operation groups
 
@@ -75,6 +75,6 @@ Stream reads require a writable output stream, and stream writes require a reada
 - NFSv3 and NFSv4 model types.
 - NFS status codes and exception mapping.
 - AUTH_SYS options shared by client APIs.
-- RPCSEC_GSS extension contracts for authentication, integrity, and privacy work. Context and data-reply verifiers fail closed, and protected bodies are checked before result decoding; real Kerberos interoperability remains experimental (see Client layer notes above).
+- RPCSEC_GSS extension contracts for authentication, integrity, and privacy work. Context and data-reply verifiers fail closed, and protected bodies are checked before result decoding; verified Kerberos interoperability currently covers Linux MIT GSSAPI against NFS-Ganesha 4.3 and Ubuntu 24.04 Linux kernel NFS (see Client layer notes above).
 
 Use the protocol package directly for protocol tooling, tests, or integrations that do not need the high-level client package.

@@ -7,9 +7,11 @@ The integration suite runs the same server-independent assertions against two ma
 
 Both fixtures expose only NFSv3 over TCP and use explicit AUTH_SYS identities. The Ganesha container does not mount an NFS file system on the host. The kernel fixture exports a dedicated local directory and requires root privileges to install and configure the server.
 
-The AUTH_SYS fixtures do not configure Kerberos. A separate disposable MIT Kerberos and NFS-Ganesha fixture exercises the experimental Linux MIT GSSAPI mechanism as described below.
+The AUTH_SYS fixtures do not configure Kerberos. Two separate disposable MIT Kerberos fixtures — an isolated NFS-Ganesha container and an Ubuntu 24.04 Linux kernel NFS fixture (`nfs-kernel-server` + `gssproxy`) — exercise the Linux MIT GSSAPI mechanism as described below.
 
 ## Kerberos integration fixture
+
+### NFS-Ganesha Kerberos fixture
 
 On a Linux host with Docker and the repository's .NET SDKs, build the tests and run:
 
@@ -18,7 +20,37 @@ dotnet build tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release
 bash tests/integration/kerberos/run.sh
 ```
 
-The isolated container creates a fresh KDC database and random client and server keys, starts NFS-Ganesha 4.3 with NFSv3 over TCP, and runs the built tests using MIT Kerberos (`KerberosGssMechanism` / `libgssapi_krb5.so.2`) and QOP 0. It exposes no ports to the host and discards the realm and keys when it exits. The tests cover context establishment, GETATTR, WRITE, READ, DELETE, concurrent calls, authenticated `RPCSEC_GSS_DESTROY` cleanup, an unknown service principal, CREATE rejection on a read-only export (`NFS3ERR_ROFS`), principal-specific mode-`0600` file isolation (`NFS3ERR_ACCES`), privacy-only export enforcement (`AUTH_TOOWEAK`), bit-flipped context-completion/data-reply verifier and integrity/privacy protected-body tampering through a local TCP proxy, short-lived ticket/context expiry (`RPCSEC_GSS_CREDPROBLEM`/`RPCSEC_GSS_CTXPROBLEM`) with renewed-ticket rollover, live service keytab KVNO rekey, credential-cache destruction (an existing context remains usable while a new session fails), and failure of an existing client followed by a new connection after server restart across `none`, `integrity`, and `privacy`. Set `NFSSHARP_KERBEROS_RESULTS_DIR` to capture `.trx` test results, package versions, export state, and Ganesha logs. The `Kerberos integration (NFS-Ganesha)` CI job runs the same fixture and uploads `kerberos-integration-results`. Linux kernel NFS with Kerberos, non-Linux platforms, explicit credentials, and transparent context refresh remain unverified; this fixture does not establish a broad production support guarantee.
+The isolated container creates a fresh KDC database and random client and server keys, starts NFS-Ganesha 4.3 with NFSv3 over TCP, and runs the built tests using MIT Kerberos (`KerberosGssMechanism` / `libgssapi_krb5.so.2`) and QOP 0. It exposes no ports to the host and discards the realm and keys when it exits. The tests cover context establishment, GETATTR, WRITE, READ, DELETE, concurrent calls, authenticated `RPCSEC_GSS_DESTROY` cleanup, an unknown service principal, CREATE rejection on a read-only export (`NFS3ERR_ROFS`), principal-specific mode-`0600` file isolation (`NFS3ERR_ACCES`), privacy-only export enforcement (`AUTH_TOOWEAK` on NFS-Ganesha; `NFS3ERR_ACCES` on Linux kernel NFS), bit-flipped context-completion/data-reply verifier and integrity/privacy protected-body tampering through a local TCP proxy, short-lived ticket/context expiry (`RPCSEC_GSS_CREDPROBLEM`/`RPCSEC_GSS_CTXPROBLEM`) with renewed-ticket rollover, live service keytab KVNO rekey, credential-cache destruction (an existing context remains usable while a new session fails), and failure of an existing client followed by a new connection after server restart/context-table reset across `none`, `integrity`, and `privacy`. Set `NFSSHARP_KERBEROS_RESULTS_DIR` to capture `.trx` test results, package versions, export state, and Ganesha logs. The `Kerberos integration (NFS-Ganesha)` CI job runs this fixture and uploads `kerberos-integration-results`.
+
+### Linux kernel NFS Kerberos fixture
+
+On an ephemeral Ubuntu 24.04 CI runner or a dedicated local Ubuntu 24.04 host (including WSL2 with `auth_rpcgss` and `rpcsec_gss_krb5` support), set up the isolated fixture, run the shared `Category=KerberosIntegration` suite, and tear it down:
+
+```bash
+sudo bash tests/integration/kernel-nfs-kerberos/setup.sh
+trap 'sudo bash tests/integration/kernel-nfs-kerberos/teardown.sh' EXIT
+KRB5_CONFIG=/run/nfssharp-kernel-kerberos/krb5.conf \
+KRB5CCNAME=FILE:/run/nfssharp-kernel-kerberos/client/krb5cc_active \
+NFSSHARP_RUN_KERBEROS_INTEGRATION=1 \
+NFSSHARP_KERBEROS_SERVER=127.0.0.1 \
+NFSSHARP_KERBEROS_SPN=nfs/nfs.test.local@TEST.LOCAL \
+NFSSHARP_KERBEROS_REALM=TEST.LOCAL \
+NFSSHARP_KERBEROS_EXPORT=/srv/nfssharp-kernel-kerberos/export \
+NFSSHARP_KERBEROS_READONLY_EXPORT=/srv/nfssharp-kernel-kerberos/readonly \
+NFSSHARP_KERBEROS_PRIVATE_EXPORT=/srv/nfssharp-kernel-kerberos/private \
+NFSSHARP_KERBEROS_ALICE_UID=2001 \
+NFSSHARP_KERBEROS_CLIENT_KEYTAB=/run/nfssharp-kernel-kerberos/client/client.keytab \
+NFSSHARP_KERBEROS_ALICE_CCACHE=/run/nfssharp-kernel-kerberos/client/krb5cc_alice \
+NFSSHARP_KERBEROS_BOB_CCACHE=/run/nfssharp-kernel-kerberos/client/krb5cc_bob \
+NFSSHARP_KERBEROS_ACTIVE_CCACHE=/run/nfssharp-kernel-kerberos/client/krb5cc_active \
+NFSSHARP_KERBEROS_SERVER_KEYTAB=/run/nfssharp-kernel-kerberos/krb5.keytab \
+NFSSHARP_KERBEROS_REKEY_CMD="$PWD/tests/integration/kernel-nfs-kerberos/rekey.sh" \
+NFSSHARP_KERBEROS_RESTART_CMD="$PWD/tests/integration/kernel-nfs-kerberos/restart.sh" \
+NFSSHARP_KERBEROS_EXPECTED_WEAK_SERVICE_OUTCOME=nfs-access \
+dotnet test tests/NfsSharp.Tests/NfsSharp.Tests.csproj --configuration Release --filter 'Category=KerberosIntegration'
+```
+
+The setup script keeps all Kerberos realm state, KDC configuration, keytabs, and `gssproxy` configuration under `/run/nfssharp-kernel-kerberos` (listening on loopback `127.0.0.1:18888`) and uses fixture-marked drop-ins (`/etc/exports.d/nfssharp-kerberos.exports`, `/etc/nfs.conf.d/nfssharp-kerberos.conf`, `/etc/systemd/system/gssproxy.service.d/nfssharp-kerberos.conf`) so host `/etc/krb5.conf` and `/etc/krb5.keytab` remain untouched. It restricts the disposable realm to AES-SHA1 enctypes (`aes256-cts-hmac-sha1-96`, `aes128-cts-hmac-sha1-96`) supported by standard Linux `rpcsec_gss_krb5` builds. On Linux kernel NFS, `sec=krb5p` rejects weaker services with `NFS3ERR_ACCES` rather than RPC `AUTH_TOOWEAK`, and `restart.sh` flushes `/proc/net/rpc/auth.rpcsec.context/flush` alongside restarting `nfs-server.service` because kernel `sunrpc` retains context cache entries across daemon restarts. The `Kerberos integration (Linux kernel)` CI job runs this fixture and uploads `kerberos-kernel-integration-results`. Non-Linux platforms, explicit credentials, and transparent context refresh remain unverified.
 
 ## CI evidence
 
@@ -28,6 +60,7 @@ The `CI` workflow publishes NFSv3 evidence separately from the normal build, uni
 | --- | --- | --- |
 | `Build, test, and pack` | Restores, builds, runs non-Docker test coverage, packs NuGet artifacts, and uploads `.trx` test results. | `test-results`, `nuget-packages` |
 | `Kerberos integration (NFS-Ganesha)` | Starts the disposable MIT Kerberos and NFS-Ganesha 4.3 container and runs tests marked `Category=KerberosIntegration`. | `kerberos-integration-results` |
+| `Kerberos integration (Linux kernel)` | Configures the isolated MIT Kerberos, `gssproxy`, and Ubuntu Linux kernel NFSv3 server and runs tests marked `Category=KerberosIntegration`. | `kerberos-kernel-integration-results` |
 | `NFSv3 integration (NFS-Ganesha)` | Starts the repository NFS-Ganesha server and runs tests marked `Category=Integration`. | `nfs-v3-integration-results` |
 | `NFSv3 integration (Linux kernel)` | Installs and configures Ubuntu's kernel NFS server, then runs the same integration tests. | `nfs-v3-kernel-integration-results` |
 

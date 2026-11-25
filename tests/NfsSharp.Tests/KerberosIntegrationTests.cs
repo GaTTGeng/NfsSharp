@@ -8,13 +8,32 @@ using NfsSharp.Protocol;
 
 namespace NfsSharp.Tests;
 
-/// <summary>Exercises RPCSEC_GSS against the isolated MIT Kerberos and NFS-Ganesha fixture.</summary>
+/// <summary>Exercises RPCSEC_GSS against an isolated MIT Kerberos and NFSv3 server fixture.</summary>
 public sealed class KerberosIntegrationTests
 {
-    private const string ServerHost = "127.0.0.1";
-    private const string ServicePrincipal = "nfs/nfs.test.local@TEST.LOCAL";
-    private const uint AliceUid = 2001;
     private const uint AuthTooWeak = 5;
+
+    private static string ServerHost => GetEnv("NFSSHARP_KERBEROS_SERVER", "127.0.0.1");
+    private static string ServicePrincipal => GetEnv("NFSSHARP_KERBEROS_SPN", "nfs/nfs.test.local@TEST.LOCAL");
+    private static string Realm => GetEnv("NFSSHARP_KERBEROS_REALM", "TEST.LOCAL");
+    private static string RwExport => GetEnv("NFSSHARP_KERBEROS_EXPORT", "/export");
+    private static string RoExport => GetEnv("NFSSHARP_KERBEROS_READONLY_EXPORT", "/readonly");
+    private static string PrivateExport => GetEnv("NFSSHARP_KERBEROS_PRIVATE_EXPORT", "/private");
+    private static uint AliceUid => uint.TryParse(Environment.GetEnvironmentVariable("NFSSHARP_KERBEROS_ALICE_UID"), out var uid) ? uid : 2001u;
+    private static string ClientKeytabPath => GetEnv("NFSSHARP_KERBEROS_CLIENT_KEYTAB", "/tmp/client.keytab");
+    private static string AliceCcachePath => GetEnv("NFSSHARP_KERBEROS_ALICE_CCACHE", "/tmp/krb5cc_alice");
+    private static string BobCcachePath => GetEnv("NFSSHARP_KERBEROS_BOB_CCACHE", "/tmp/krb5cc_bob");
+    private static string ActiveCcachePath => GetEnv("NFSSHARP_KERBEROS_ACTIVE_CCACHE", "/tmp/krb5cc_active");
+    private static string ServerKeytabPath => GetEnv("NFSSHARP_KERBEROS_SERVER_KEYTAB", "/etc/krb5.keytab");
+    private static string RestartCommand => GetEnv("NFSSHARP_KERBEROS_RESTART_CMD", "/usr/local/bin/restart-ganesha");
+    private static string? RekeyCommand => Environment.GetEnvironmentVariable("NFSSHARP_KERBEROS_REKEY_CMD");
+    private static string ExpectedWeakServiceOutcome => GetEnv("NFSSHARP_KERBEROS_EXPECTED_WEAK_SERVICE_OUTCOME", "auth-too-weak");
+
+    private static string GetEnv(string name, string fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(value) ? fallback : value;
+    }
 
     [KerberosIntegrationTheory]
     [Trait("Category", "KerberosIntegration")]
@@ -24,7 +43,7 @@ public sealed class KerberosIntegrationTests
     public async Task ConnectsAndTransfersData(RpcSecGssService service)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await using var client = await NfsV3Client.ConnectAsync(ServerHost, "/export", CreateOptions(service), timeout.Token);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, CreateOptions(service), timeout.Token);
         Assert.Equal(NfsType.Dir, (await client.GetAttributesAsync(client.RootHandle, timeout.Token)).Type);
 
         var path = $"kerberos-{Guid.NewGuid():N}";
@@ -45,7 +64,7 @@ public sealed class KerberosIntegrationTests
     public async Task ReadOnlyExportRejectsCreate(RpcSecGssService service)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await using var client = await NfsV3Client.ConnectAsync(ServerHost, "/readonly", CreateOptions(service), timeout.Token);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RoExport, CreateOptions(service), timeout.Token);
         Assert.Equal(NfsType.Dir, (await client.GetAttributesAsync(client.RootHandle, timeout.Token)).Type);
 
         await using var input = new MemoryStream([1, 2, 3]);
@@ -63,11 +82,11 @@ public sealed class KerberosIntegrationTests
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var options = new NfsClientBuilder()
-            .WithKerberos("nfs/missing.test.local@TEST.LOCAL", service)
+            .WithKerberos($"nfs/missing.test.local@{Realm}", service)
             .WithPrivilegedSourcePort(false)
             .BuildOptions();
         await Assert.ThrowsAsync<NfsException>(() =>
-            NfsV3Client.ConnectAsync(ServerHost, "/export", options, timeout.Token));
+            NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token));
     }
 
     [KerberosIntegrationTheory]
@@ -81,8 +100,8 @@ public sealed class KerberosIntegrationTests
         var path = $"alice-private-{Guid.NewGuid():N}";
         var payload = "alice-secret-data"u8.ToArray();
 
-        using var ccacheScope = CredentialCacheScope.Use("/tmp/krb5cc_alice");
-        await using var alice = await NfsV3Client.ConnectAsync(ServerHost, "/export", CreateOptions(service), timeout.Token);
+        using var ccacheScope = CredentialCacheScope.Use(AliceCcachePath);
+        await using var alice = await NfsV3Client.ConnectAsync(ServerHost, RwExport, CreateOptions(service), timeout.Token);
         try
         {
             await using var input = new MemoryStream(payload);
@@ -97,9 +116,9 @@ public sealed class KerberosIntegrationTests
             await alice.ReadFileAsync(path, aliceRead, timeout.Token);
             Assert.Equal(payload, aliceRead.ToArray());
 
-            using (CredentialCacheScope.Use("/tmp/krb5cc_bob"))
+            using (CredentialCacheScope.Use(BobCcachePath))
             {
-                await using var bob = await NfsV3Client.ConnectAsync(ServerHost, "/export", CreateOptions(service), timeout.Token);
+                await using var bob = await NfsV3Client.ConnectAsync(ServerHost, RwExport, CreateOptions(service), timeout.Token);
                 var lookup = await bob.LookupPathAsync(path, timeout.Token);
 
                 var readError = await Assert.ThrowsAsync<NfsException>(() =>
@@ -125,7 +144,7 @@ public sealed class KerberosIntegrationTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         await using (var privacyClient = await NfsV3Client.ConnectAsync(
-            ServerHost, "/private", CreateOptions(RpcSecGssService.Privacy), timeout.Token))
+            ServerHost, PrivateExport, CreateOptions(RpcSecGssService.Privacy), timeout.Token))
         {
             var path = $"private-{Guid.NewGuid():N}";
             var payload = new byte[] { 10, 20, 30, 40 };
@@ -140,10 +159,21 @@ public sealed class KerberosIntegrationTests
         foreach (var weaker in new[] { RpcSecGssService.None, RpcSecGssService.Integrity })
         {
             await using var client = await NfsV3Client.ConnectAsync(
-                ServerHost, "/private", CreateOptions(weaker, maxRetries: 0), timeout.Token);
+                ServerHost, PrivateExport, CreateOptions(weaker, maxRetries: 0), timeout.Token);
             var error = await Assert.ThrowsAsync<NfsException>(() =>
                 client.GetAttributesAsync(client.RootHandle, timeout.Token));
-            Assert.Equal(AuthTooWeak, error.RpcAuthStatus);
+            switch (ExpectedWeakServiceOutcome)
+            {
+                case "auth-too-weak":
+                    Assert.Equal(AuthTooWeak, error.RpcAuthStatus);
+                    break;
+                case "nfs-access":
+                    Assert.Equal(NfsV3Status.Access, error.Status);
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported NFSSHARP_KERBEROS_EXPECTED_WEAK_SERVICE_OUTCOME '{ExpectedWeakServiceOutcome}'.");
+            }
         }
     }
 
@@ -157,7 +187,7 @@ public sealed class KerberosIntegrationTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var proxy = KerberosRpcProxy.Start();
         var options = CreateOptions(service, portmapPort: proxy.PortmapPort, maxOutstanding: 8);
-        await using var client = await NfsV3Client.ConnectAsync(ServerHost, "/export", options, timeout.Token);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
 
         var tasks = Enumerable.Range(0, 8)
             .Select(_ => client.GetAttributesAsync(client.RootHandle, timeout.Token))
@@ -189,7 +219,7 @@ public sealed class KerberosIntegrationTests
         var options = CreateOptions(service, portmapPort: proxy.PortmapPort, maxRetries: 0);
 
         var error = await Assert.ThrowsAsync<NfsException>(() =>
-            NfsV3Client.ConnectAsync(ServerHost, "/export", options, timeout.Token));
+            NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token));
         Assert.Null(proxy.MutatorException);
         Assert.Contains("completed context verifier", error.Message);
     }
@@ -205,7 +235,7 @@ public sealed class KerberosIntegrationTests
         await using var proxy = KerberosRpcProxy.Start((replyIndex, reply) =>
             replyIndex == 2 ? FlipReplyVerifierBit(reply) : reply);
         var options = CreateOptions(service, portmapPort: proxy.PortmapPort, maxRetries: 0);
-        await using var client = await NfsV3Client.ConnectAsync(ServerHost, "/export", options, timeout.Token);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
 
         var error = await Assert.ThrowsAsync<NfsException>(() => client.GetAttributesAsync(client.RootHandle, timeout.Token));
         Assert.Null(proxy.MutatorException);
@@ -228,7 +258,7 @@ public sealed class KerberosIntegrationTests
                 ? (flipChecksum ? FlipIntegrityChecksumBit(reply) : FlipFirstBodyOpaqueBit(reply))
                 : reply);
         var options = CreateOptions(RpcSecGssService.Integrity, portmapPort: proxy.PortmapPort, maxRetries: 0);
-        await using var client = await NfsV3Client.ConnectAsync(ServerHost, "/export", options, timeout.Token);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
 
         var error = await Assert.ThrowsAsync<NfsException>(() => client.GetAttributesAsync(client.RootHandle, timeout.Token));
         Assert.Null(proxy.MutatorException);
@@ -247,7 +277,7 @@ public sealed class KerberosIntegrationTests
         await using var proxy = KerberosRpcProxy.Start((replyIndex, reply) =>
             replyIndex == 2 ? FlipFirstBodyOpaqueBit(reply) : reply);
         var options = CreateOptions(RpcSecGssService.Privacy, portmapPort: proxy.PortmapPort, maxRetries: 0);
-        await using var client = await NfsV3Client.ConnectAsync(ServerHost, "/export", options, timeout.Token);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
 
         var error = await Assert.ThrowsAsync<NfsException>(() => client.GetAttributesAsync(client.RootHandle, timeout.Token));
         Assert.Null(proxy.MutatorException);
@@ -270,11 +300,11 @@ public sealed class KerberosIntegrationTests
         try
         {
             var issuedAt = DateTimeOffset.UtcNow;
-            await RunCommandAsync("kinit", ["-l", "2s", "-k", "-t", "/tmp/client.keytab", "-c", ccachePath, "client@TEST.LOCAL"], timeout.Token);
+            await RunCommandAsync("kinit", ["-l", "2s", "-k", "-t", ClientKeytabPath, "-c", ccachePath, $"client@{Realm}"], timeout.Token);
             using var ccacheScope = CredentialCacheScope.Use(ccachePath);
 
             await using var client = await NfsV3Client.ConnectAsync(
-                ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+                ServerHost, RwExport, CreateOptions(service, maxRetries: 0), timeout.Token);
             Assert.Equal(NfsType.Dir, (await client.GetAttributesAsync(client.RootHandle, timeout.Token)).Type);
 
             NfsException? expiryError = null;
@@ -307,12 +337,12 @@ public sealed class KerberosIntegrationTests
             if (pastClockSkew > TimeSpan.Zero)
                 await Task.Delay(pastClockSkew, timeout.Token);
             await Assert.ThrowsAsync<NfsException>(() =>
-                NfsV3Client.ConnectAsync(ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token));
+                NfsV3Client.ConnectAsync(ServerHost, RwExport, CreateOptions(service, maxRetries: 0), timeout.Token));
 
             // Renewing the ticket and opening a new client rolls over cleanly.
-            await RunCommandAsync("kinit", ["-k", "-t", "/tmp/client.keytab", "-c", CredentialCacheScope.ActivePath, "client@TEST.LOCAL"], timeout.Token);
+            await RunCommandAsync("kinit", ["-k", "-t", ClientKeytabPath, "-c", ActiveCcachePath, $"client@{Realm}"], timeout.Token);
             await using var rolledOver = await NfsV3Client.ConnectAsync(
-                ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+                ServerHost, RwExport, CreateOptions(service, maxRetries: 0), timeout.Token);
             Assert.Equal(NfsType.Dir, (await rolledOver.GetAttributesAsync(rolledOver.RootHandle, timeout.Token)).Type);
         }
         finally
@@ -333,16 +363,16 @@ public sealed class KerberosIntegrationTests
         var cache = $"/tmp/krb5cc_destroy_{Guid.NewGuid():N}";
         try
         {
-            await RunCommandAsync("kinit", ["-k", "-t", "/tmp/client.keytab", "-c", cache, "client@TEST.LOCAL"], timeout.Token);
+            await RunCommandAsync("kinit", ["-k", "-t", ClientKeytabPath, "-c", cache, $"client@{Realm}"], timeout.Token);
             using var ccacheScope = CredentialCacheScope.Use(cache);
             await using var existing = await NfsV3Client.ConnectAsync(
-                ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+                ServerHost, RwExport, CreateOptions(service, maxRetries: 0), timeout.Token);
             Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
 
-            await RunCommandAsync("kdestroy", ["-c", CredentialCacheScope.ActivePath], timeout.Token);
+            await RunCommandAsync("kdestroy", ["-c", ActiveCcachePath], timeout.Token);
             Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
             await Assert.ThrowsAsync<NfsException>(() =>
-                NfsV3Client.ConnectAsync(ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token));
+                NfsV3Client.ConnectAsync(ServerHost, RwExport, CreateOptions(service, maxRetries: 0), timeout.Token));
         }
         finally
         {
@@ -363,22 +393,25 @@ public sealed class KerberosIntegrationTests
         try
         {
             await using var existing = await NfsV3Client.ConnectAsync(
-                ServerHost, "/export", CreateOptions(service), timeout.Token);
+                ServerHost, RwExport, CreateOptions(service), timeout.Token);
             Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
 
-            await RunCommandAsync(
-                "kadmin.local",
-                ["-q", $"ktadd -k /etc/krb5.keytab {ServicePrincipal}"],
-                timeout.Token);
+            if (!string.IsNullOrWhiteSpace(RekeyCommand))
+                await RunCommandAsync("bash", [RekeyCommand], timeout.Token);
+            else
+                await RunCommandAsync(
+                    "kadmin.local",
+                    ["-q", $"ktadd -k {ServerKeytabPath} {ServicePrincipal}"],
+                    timeout.Token);
 
             // An already-established context continues operating with its negotiated session key.
             Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
 
             // A fresh credential cache forces a new service ticket issued under the rotated KVNO.
-            await RunCommandAsync("kinit", ["-k", "-t", "/tmp/client.keytab", "-c", freshCcache, "client@TEST.LOCAL"], timeout.Token);
+            await RunCommandAsync("kinit", ["-k", "-t", ClientKeytabPath, "-c", freshCcache, $"client@{Realm}"], timeout.Token);
             using var ccacheScope = CredentialCacheScope.Use(freshCcache);
             await using var rekeyed = await NfsV3Client.ConnectAsync(
-                ServerHost, "/export", CreateOptions(service), timeout.Token);
+                ServerHost, RwExport, CreateOptions(service), timeout.Token);
             Assert.Equal(NfsType.Dir, (await rekeyed.GetAttributesAsync(rekeyed.RootHandle, timeout.Token)).Type);
 
             var path = $"rekey-{Guid.NewGuid():N}";
@@ -406,15 +439,15 @@ public sealed class KerberosIntegrationTests
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await using var existing = await NfsV3Client.ConnectAsync(
-            ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+            ServerHost, RwExport, CreateOptions(service, maxRetries: 0), timeout.Token);
         Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
 
-        await RunCommandAsync("bash", ["/usr/local/bin/restart-ganesha"], timeout.Token);
+        await RunCommandAsync("bash", [RestartCommand], timeout.Token);
 
         // The old client cannot be used after the server restarts; establish a new session.
         await Assert.ThrowsAsync<NfsException>(() => existing.GetAttributesAsync(existing.RootHandle, timeout.Token));
         await using var replacement = await NfsV3Client.ConnectAsync(
-            ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+            ServerHost, RwExport, CreateOptions(service, maxRetries: 0), timeout.Token);
         Assert.Equal(NfsType.Dir, (await replacement.GetAttributesAsync(replacement.RootHandle, timeout.Token)).Type);
     }
 
@@ -497,25 +530,30 @@ public sealed class KerberosIntegrationTests
 
     private sealed class CredentialCacheScope : IDisposable
     {
-        internal const string ActivePath = "/tmp/krb5cc_active";
+        private readonly string _activePath;
         private readonly byte[] _previousContent;
 
-        private CredentialCacheScope(byte[] previousContent) => _previousContent = previousContent;
+        private CredentialCacheScope(string activePath, byte[] previousContent)
+        {
+            _activePath = activePath;
+            _previousContent = previousContent;
+        }
 
         public static CredentialCacheScope Use(string sourceCcachePath)
         {
-            var previousContent = File.ReadAllBytes(ActivePath);
-            ReplaceActive(File.ReadAllBytes(sourceCcachePath));
-            return new CredentialCacheScope(previousContent);
+            var activePath = ActiveCcachePath;
+            var previousContent = File.ReadAllBytes(activePath);
+            ReplaceActive(activePath, File.ReadAllBytes(sourceCcachePath));
+            return new CredentialCacheScope(activePath, previousContent);
         }
 
-        public void Dispose() => ReplaceActive(_previousContent);
+        public void Dispose() => ReplaceActive(_activePath, _previousContent);
 
-        private static void ReplaceActive(byte[] content)
+        private static void ReplaceActive(string activePath, byte[] content)
         {
-            var temp = $"{ActivePath}.{Guid.NewGuid():N}";
+            var temp = $"{activePath}.{Guid.NewGuid():N}";
             File.WriteAllBytes(temp, content);
-            File.Move(temp, ActivePath, overwrite: true);
+            File.Move(temp, activePath, overwrite: true);
         }
     }
 
