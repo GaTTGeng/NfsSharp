@@ -6,4 +6,5 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
     krb5-kdc krb5-admin-server krb5-user \
     && rm -rf /var/lib/apt/lists/*
 COPY start.sh /usr/local/bin/kerberos-integration
+COPY restart-ganesha.sh /usr/local/bin/restart-ganesha
 ENTRYPOINT ["bash", "/usr/local/bin/kerberos-integration"]

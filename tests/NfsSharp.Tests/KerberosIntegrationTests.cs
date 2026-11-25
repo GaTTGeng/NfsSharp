@@ -368,6 +368,27 @@ public sealed class KerberosIntegrationTests
         }
     }
 
+    [KerberosIntegrationTheory]
+    [Trait("Category", "KerberosIntegration")]
+    [InlineData(RpcSecGssService.None)]
+    [InlineData(RpcSecGssService.Integrity)]
+    [InlineData(RpcSecGssService.Privacy)]
+    public async Task ServerRestartFailsExistingClientAndNewClientConnects(RpcSecGssService service)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await using var existing = await NfsV3Client.ConnectAsync(
+            ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+        Assert.Equal(NfsType.Dir, (await existing.GetAttributesAsync(existing.RootHandle, timeout.Token)).Type);
+
+        await RunCommandAsync("bash", ["/usr/local/bin/restart-ganesha"], timeout.Token);
+
+        // The old client cannot be used after the server restarts; establish a new session.
+        await Assert.ThrowsAsync<NfsException>(() => existing.GetAttributesAsync(existing.RootHandle, timeout.Token));
+        await using var replacement = await NfsV3Client.ConnectAsync(
+            ServerHost, "/export", CreateOptions(service, maxRetries: 0), timeout.Token);
+        Assert.Equal(NfsType.Dir, (await replacement.GetAttributesAsync(replacement.RootHandle, timeout.Token)).Type);
+    }
+
     private static NfsClientOptions CreateOptions(
         RpcSecGssService service,
         int portmapPort = 111,
