@@ -1038,6 +1038,85 @@ public class RpcSecGssTests
         Assert.Equal(2, rpc.PendingCallHighWaterMarkForTesting);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RpcClient_RetryDropsLateReplyAndVerifiesRetrySequence(bool useOldVerifier)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var mechanism = new FakeGssMechanism();
+        var options = new NfsClientOptions
+        {
+            GssMechanism = mechanism, GssService = RpcSecGssService.None,
+            MaxRetries = 1, RetryDelay = TimeSpan.Zero, UsePrivilegedSourcePort = false,
+        };
+        var session = CreateEstablishedSession(mechanism, RpcSecGssService.None);
+        await using var rpc = new RpcClient(new RpcTransport(IPAddress.Loopback, options), options,
+            new NfsRetryPolicy(options), session, []);
+        await rpc.ConnectAsync(((IPEndPoint)listener.LocalEndpoint).Port, cancellation.Token);
+
+        var peer = ServeAsync(listener, useOldVerifier, cancellation.Token);
+
+        var call = rpc.CallAsync(100003, 3, 1, UIntBytes(42), cancellation.Token);
+        if (useOldVerifier)
+        {
+            var exception = await Assert.ThrowsAsync<NfsException>(() => call);
+            Assert.Contains("sequence number MIC mismatch", exception.Message);
+            Assert.False(session.IsEstablished);
+        }
+        else
+            Assert.Equal(222u, (await call).UInt());
+
+        var (first, retry) = await peer;
+        Assert.NotEqual(first.xid, retry.xid);
+        Assert.Equal(first.sequence + 1, retry.sequence);
+
+        static async Task<((uint xid, uint sequence), (uint xid, uint sequence))> ServeAsync(
+            TcpListener peerListener, bool oldVerifier, CancellationToken token)
+        {
+            (uint xid, uint sequence) firstAttempt;
+            using (var firstSocket = await peerListener.AcceptSocketAsync(token))
+            await using (var firstStream = new NetworkStream(firstSocket, ownsSocket: false))
+                firstAttempt = ReadAttempt(await RpcRecordStream.ReceiveAsync(firstStream, token));
+
+            using var retrySocket = await peerListener.AcceptSocketAsync(token);
+            await using var retryStream = new NetworkStream(retrySocket, ownsSocket: false);
+            var retryAttempt = ReadAttempt(await RpcRecordStream.ReceiveAsync(retryStream, token));
+            // A delayed first reply must not complete the waiter on the replacement connection.
+            await RpcTransport.SendRecordAsync(retryStream, Reply(firstAttempt.xid, firstAttempt.sequence, 111), token);
+            await RpcTransport.SendRecordAsync(retryStream,
+                Reply(retryAttempt.xid, oldVerifier ? firstAttempt.sequence : retryAttempt.sequence, 222), token);
+            return (firstAttempt, retryAttempt);
+        }
+
+        static (uint xid, uint sequence) ReadAttempt(byte[] request)
+        {
+            var reader = new XdrReader(request);
+            var xid = reader.UInt();
+            for (var i = 0; i < 5; i++) reader.UInt();
+            Assert.Equal((uint)RpcSecGssFlavor.Gss, reader.UInt());
+            var credential = new XdrReader(reader.Opaque());
+            credential.UInt();
+            Assert.Equal((uint)RpcSecGssProc.Data, credential.UInt());
+            return (xid, credential.UInt());
+        }
+
+        static byte[] Reply(uint xid, uint sequence, uint value)
+        {
+            var reply = new XdrWriter();
+            reply.UInt(xid);
+            reply.UInt(1);
+            reply.UInt(0);
+            reply.UInt((uint)RpcSecGssFlavor.Gss);
+            reply.Opaque(FakeGssMechanism.Mac(UIntBytes(sequence), 0));
+            reply.UInt(0);
+            reply.UInt(value);
+            return reply.ToArray();
+        }
+    }
+
     [Fact]
     public void NoOpMechanism_HasDeterministicFixtureMicButNoSecurityCapability()
     {
