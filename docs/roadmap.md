@@ -4,11 +4,11 @@ NfsSharp is evolving into a dependable managed NFS SDK for .NET applications tha
 
 > This document records delivery intent and acceptance criteria, not release dates or a compatibility guarantee. GitHub milestones and issues are the source of truth for work assignment. The [compatibility matrix](nfs-compatibility.md) is the source of truth for supported behavior.
 
-## Current Focus: Start M3 Reliability and Production I/O
+## Current Focus: Reconcile M4 RPCSEC_GSS and Kerberos
 
 **M1: NFSv3 Integration Baseline** and **M2: NFSv3 Protocol Conformance** are complete. Together they established repeatable real-server integration coverage, bounded XDR and ONC RPC decoding, status-preserving protocol fixtures, explicit portmapper and mount failure behavior, and a two-server NFSv3 interoperability baseline.
 
-The next implementation milestone is **M3: Reliability and Production I/O**. It turns the M1/M2 protocol baseline into deterministic recovery behavior for timeouts, cancellation races, disconnects, server restarts, partial I/O, verifier changes, cache concurrency, and stale handles. M6 public-SDK work remains cross-cutting, while M7 compatibility research may inform support decisions without silently expanding the current compatibility contract.
+M3 work items are complete. M4 implementation and interoperability slices have merged; the remaining parent issue [#72](https://github.com/GaTTGeng/NfsSharp/issues/72) tracks the acceptance reconciliation below. M5 starts with [#93](https://github.com/GaTTGeng/NfsSharp/issues/93), followed by the v4.0 baseline in [#111](https://github.com/GaTTGeng/NfsSharp/issues/111). M6 remains cross-cutting, while M7 may inform compatibility decisions without expanding the current contract.
 
 ### M2 completion evidence
 
@@ -41,8 +41,8 @@ Completing M2 does not promote every tracked capability from partial to supporte
 | --- | --- | --- | --- |
 | [M1: NFSv3 Integration Baseline](https://github.com/GaTTGeng/NfsSharp/milestone/1) | Completed | Reproducible NFSv3 real-server baseline and evidence trail. | All M1 issues reconciled; CI NFSv3 integration job green; matrix links the covered behavior and remaining gaps. |
 | [M2: NFSv3 Protocol Conformance](https://github.com/GaTTGeng/NfsSharp/milestone/2) | Completed | RFC-grounded XDR, ONC RPC, portmapper, mount, and NFSv3 procedure semantics. | Focused fixtures cover valid, boundary, and malformed messages; primary NFSv3 flows run on NFS-Ganesha plus one additional server. |
-| [M3: Reliability and Production I/O](https://github.com/GaTTGeng/NfsSharp/milestone/3) | Current | Deterministic recovery behavior under real transport and server failures. | Fault-injection suite covers timeout, cancellation, disconnect, restart, partial I/O, cache races, and stale handles; retry contract is documented. |
-| [M4: RPCSEC_GSS and Kerberos](https://github.com/GaTTGeng/NfsSharp/milestone/4) | Planned | Interoperable AUTH_GSS authentication, integrity, and privacy. | Kerberos integration tests prove context creation, rollover, integrity, privacy, expiry, and failure cleanup on supported platforms. |
+| [M3: Reliability and Production I/O](https://github.com/GaTTGeng/NfsSharp/milestone/3) | Work items complete | Deterministic recovery behavior under real transport and server failures. | Fault-injection suite covers timeout, cancellation, disconnect, restart, partial I/O, cache races, and stale handles; retry contract is documented. |
+| [M4: RPCSEC_GSS and Kerberos](https://github.com/GaTTGeng/NfsSharp/milestone/4) | Acceptance reconciliation | Interoperable AUTH_GSS authentication, integrity, and privacy. | Kerberos integration tests prove context creation, rollover, integrity, privacy, expiry, and failure cleanup on supported platforms. |
 | [M5: NFSv4 Stabilization](https://github.com/GaTTGeng/NfsSharp/milestone/5) | Planned | A validated, versioned direct NFSv4 COMPOUND surface. | v4.0, v4.1, and v4.2 are validated independently for their supported operations, state/session lifecycle, recovery, and security; no facade promotion yet. |
 | [M6: Public SDK Hardening](https://github.com/GaTTGeng/NfsSharp/milestone/6) | Cross-cutting | A consumable, diagnosable, package-quality SDK. | Public API review, XML docs, examples, diagnostics, nullable/analyzer checks, package validation, and support policy are complete for each released surface. |
 | [M7: Compatibility Expansion Research](https://github.com/GaTTGeng/NfsSharp/milestone/7) | Research | Evidence-based expansion of support claims. | Published server/transport/framework matrix and an explicit decision for every proposed support tier. |
@@ -84,7 +84,21 @@ Completed workstreams:
 
 **Scope:** mechanism negotiation, credential acquisition and refresh, RPCSEC_GSS control/data calls, integrity and privacy wrapping, context rollover/destruction, logging redaction, and cross-platform failure behavior.
 
-**Suggested issues:** Kerberos test realm fixture; AUTH_GSS INIT/CONTINUE_INIT state machine; integrity mode; privacy mode; expiry/rekey/cleanup; negative authorization and malformed-token cases.
+The six slices of [#72](https://github.com/GaTTGeng/NfsSharp/issues/72) have merged: [#84](https://github.com/GaTTGeng/NfsSharp/issues/84) data verifiers, [#85](https://github.com/GaTTGeng/NfsSharp/issues/85) context verifiers, [#86](https://github.com/GaTTGeng/NfsSharp/issues/86) protected bodies, [#87](https://github.com/GaTTGeng/NfsSharp/issues/87) mechanism contracts, [#88](https://github.com/GaTTGeng/NfsSharp/issues/88) concurrency and recovery, and [#89](https://github.com/GaTTGeng/NfsSharp/issues/89) interoperability evidence.
+
+| #72 acceptance area | Evidence and remaining qualification |
+| --- | --- |
+| Documentation and support scope | The original request to say reply verification is incomplete described the pre-implementation state. The [API overview](api-overview.md) and [compatibility matrix](nfs-compatibility.md) describe the implemented checks and retain **Partial** status; they do not claim general Kerberos support. |
+| Context verifier | `RpcSecGssTests` covers establishment and final `seq_window` verifier validation, including invalid verifier and failure cleanup ([#85](https://github.com/GaTTGeng/NfsSharp/issues/85)). |
+| Data verifier and failure behavior | Per-attempt sequence/QOP verification, missing or wrong verifier rejection, and verification before result exposure are covered by `RpcSecGssTests` ([#84](https://github.com/GaTTGeng/NfsSharp/issues/84)). |
+| Integrity and privacy results | `RpcSecGssTests` covers protected-body MIC, sequence, confidentiality, QOP and malformed inputs ([#86](https://github.com/GaTTGeng/NfsSharp/issues/86)). |
+| Bit-flip detection | `RpcSecGssTests` and `KerberosIntegrationTests` cover verifier and protected-body tampering; the latter uses real servers and a local proxy ([PR #130](https://github.com/GaTTGeng/NfsSharp/pull/130), [PR #133](https://github.com/GaTTGeng/NfsSharp/pull/133)). |
+| Attempts, concurrency and context replacement | Fixtures cover fresh retry sequence numbers, out-of-order replies, replaced contexts and sequence-window bounds ([#88](https://github.com/GaTTGeng/NfsSharp/issues/88)). The late-reply dispatch fixture is shared RPC coverage; it is not a dedicated authenticated retry/late-reply integration test. |
+| No-op mechanism | Client configuration rejects `NoOpGssMechanism`; interoperability tests use Linux MIT GSSAPI ([#87](https://github.com/GaTTGeng/NfsSharp/issues/87), [#89](https://github.com/GaTTGeng/NfsSharp/issues/89)). |
+| Redaction | Deterministic fixtures assert redaction for mechanism, cancellation, and cleanup failure paths. This is evidence for those paths, not a proof covering every possible custom mechanism or log sink ([PR #123](https://github.com/GaTTGeng/NfsSharp/pull/123)). |
+| Real-server coverage and promotion | [PR #133](https://github.com/GaTTGeng/NfsSharp/pull/133) passed both Kerberos integration jobs and records Linux MIT GSSAPI, QOP 0, NFSv3/TCP, three service modes and two server implementations. Authentication, protection, expiry, rekey, cleanup, authorization and tampering are covered within that matrix. The matrix was promoted to **Partial**, not a general support guarantee. |
+
+The verified scope excludes non-Linux Kerberos, explicit credentials, transparent context refresh and additional server implementations. The client surfaces context rejection and requires a new client instead of transparently replaying operations. The original #72 wording about `NegotiateGssMechanism` is superseded by its documented token-exchange-only limitation and the Linux MIT GSSAPI implementation. The parent issue remains open for review of the qualifications above; no broader compatibility claim follows from closing the implementation slices.
 
 **Non-goals:** claiming Kerberos support from unit tests alone or exposing reusable credentials in logs/exceptions.
 
