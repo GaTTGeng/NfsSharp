@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-27
+
 ### Changed
 
 - Added an isolated Ubuntu 24.04 Linux kernel NFS (`nfs-kernel-server` + `gssproxy`) Kerberos integration fixture and CI job running the full 37-case RPCSEC_GSS suite across `krb5`, `krb5i`, and `krb5p`, documenting server-specific `sec=krb5p` weak-service rejection (`AUTH_TOOWEAK` on NFS-Ganesha vs `NFS3ERR_ACCES` on Linux kernel NFS) and promoting Linux MIT Kerberos RPCSEC_GSS in the compatibility matrix from `Experimental` to `Partial`.
@@ -13,7 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Expanded the experimental Kerberos/NFS-Ganesha fixture and CI evidence capture to verify principal-specific mode-`0600` authorization, privacy-only export enforcement (`AUTH_TOOWEAK`), concurrent RPCSEC_GSS calls and authenticated `RPCSEC_GSS_DESTROY` cleanup, real-server verifier and protected-body tampering through a local TCP proxy, short-lived ticket/context expiry with renewed-ticket rollover, and live service keytab KVNO rekey.
 - Extended the experimental Kerberos/NFS-Ganesha fixture to verify that a read-only export rejects file creation in all three RPCSEC_GSS service modes.
 - Created an independently owned Kerberos GSS mechanism for each mounted NFS session and dispose it with that session; custom GSS mechanisms transfer to the client session and must be supplied fresh for each session. Valid out-of-order GSS MIC and privacy tokens are accepted while replay and expired-token statuses remain rejected.
-- Added an experimental Linux MIT GSSAPI Kerberos mechanism for `WithKerberos`, backed by the process credential cache and supporting MIC and privacy operations; explicit `GssCredentials` and cross-platform support remain unavailable. A disposable MIT Kerberos/NFS-Ganesha fixture now covers basic NFSv3 operations; full interoperability evidence remains pending.
+- Added an experimental Linux MIT GSSAPI Kerberos mechanism for `WithKerberos`, backed by the process credential cache and supporting MIC and privacy operations; explicit `GssCredentials` and cross-platform support remain unavailable. Linux interoperability is covered by the NFS-Ganesha and kernel NFS Kerberos fixtures; other platforms remain unverified.
 - Added an optional RPCSEC_GSS MIC result contract that reports the QOP used and distinguishes invalid MICs from unsupported-QOP and mechanism failures; legacy mechanism interfaces remain supported.
 - Restricted `NoOpGssMechanism` to deterministic protocol fixtures by rejecting it in client configuration for every RPCSEC_GSS service. RPCSEC_GSS context and reply verification failures preserve cancellation behavior while redacting mechanism exception details.
 - Bounded concurrent RPCSEC_GSS calls by both the configured per-connection limit and the negotiated sequence window, while correlating out-of-order replies by XID and attempt record. Server `CREDPROBLEM` and `CTXPROBLEM` replies invalidate the session and surface their auth status without replaying operations; a new client connection is required to establish a replacement context.

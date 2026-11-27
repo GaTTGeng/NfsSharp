@@ -2,6 +2,8 @@
 
 NfsSharp provides managed NFS protocol and client APIs for .NET. NFSv3 over TCP is the primary target. NFSv4.0, NFSv4.1, and NFSv4.2 APIs are experimental and do not yet carry the same compatibility guarantees.
 
+This matrix describes the evidence available for the 1.4.0 release, including the Linux MIT Kerberos coverage detailed below.
+
 See the [roadmap](roadmap.md) for delivery order and the [GitHub milestones](https://github.com/GaTTGeng/NfsSharp/milestones) for live progress.
 
 ## Compatibility Contract

@@ -19,6 +19,8 @@ NfsSharp 是一个面向 .NET 的托管 NFS 客户端 SDK。它提供异步 API�
 
 大多数应用只需要安装 `NfsSharp.Client`，它会传递引用 `NfsSharp.Protocol`。
 
+1.4.0 版本为 NFSv3 增加了实验性的 Linux MIT Kerberos 支持，并通过 NFS-Ganesha 和 Linux 内核 NFS 进行了互操作验证。验证范围和版本详情请参阅[兼容性矩阵](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md)和[更新日志](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/CHANGELOG.md)。
+
 ## 环境要求
 
 - .NET 8、.NET 9 或 .NET 10。
