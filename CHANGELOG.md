@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Decode NFSv4 GETATTR access and modification times into UTC `DateTime` values, retaining 100-nanosecond precision.
 - Retire and dispose RPCSEC_GSS contexts after protection failures or terminal reconnect failures without falling back to AUTH_SYS. Redact header-MIC, mechanism factory/property, cancellation, and cleanup exception details, preserve caller cancellation, and reject nonzero QOP for legacy MIC mechanisms.
 - Prevented stale concurrent RPCSEC_GSS `svc_none` requests from being transmitted after the session is rejected.
 - Send an authenticated RPCSEC_GSS_DESTROY before closing an established NFSv3 session, and reject RPCSEC_GSS options in the experimental NFSv4 client, which currently sends AUTH_SYS.
