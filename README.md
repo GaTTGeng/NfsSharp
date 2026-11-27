@@ -20,6 +20,8 @@ The high-level `NfsClient` facade currently supports NFSv3 over TCP. A lower-lev
 
 Most applications should install `NfsSharp.Client`; it brings in `NfsSharp.Protocol` transitively.
 
+Version 1.4.0 adds experimental Linux MIT Kerberos support for NFSv3, with interoperability coverage against NFS-Ganesha and Linux kernel NFS. See the [compatibility matrix](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/docs/nfs-compatibility.md) and [changelog](https://github.com/GaTTGeng/NfsSharp/blob/HEAD/CHANGELOG.md) for the verified scope and release details.
+
 ## Requirements
 
 - .NET 8, .NET 9, or .NET 10.
