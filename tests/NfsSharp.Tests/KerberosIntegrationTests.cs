@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
+using Microsoft.Extensions.Logging;
 using NfsSharp.Client;
 using NfsSharp.Protocol;
 
@@ -451,18 +453,183 @@ public sealed class KerberosIntegrationTests
         Assert.Equal(NfsType.Dir, (await replacement.GetAttributesAsync(replacement.RootHandle, timeout.Token)).Type);
     }
 
+    [KerberosIntegrationTheory]
+    [Trait("Category", "KerberosIntegration")]
+    [InlineData(RpcSecGssService.None)]
+    [InlineData(RpcSecGssService.Integrity)]
+    [InlineData(RpcSecGssService.Privacy)]
+    public async Task RetrySafeCallDropsLateFirstAttemptReplyAndCompletesWithFreshSequence(RpcSecGssService service)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var proxy = KerberosRpcProxy.Start(retryMode: RetryProxyMode.DropFirstDataReplyAndDeliverLateOnRetry);
+        var options = CreateOptions(
+            service,
+            portmapPort: proxy.PortmapPort,
+            maxRetries: 1,
+            retryDelay: TimeSpan.Zero);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
+
+        // First GETATTR disconnects after the server replies; retry receives the late first reply before its own.
+        var attrs = await client.GetAttributesAsync(client.RootHandle, timeout.Token);
+        Assert.Equal(NfsType.Dir, attrs.Type);
+        Assert.Null(proxy.MutatorException);
+        Assert.True(proxy.LateFirstAttemptReplyDelivered);
+
+        var dataRequests = proxy.ObservedGssRequests.Where(r => r.GssProc == RpcSecGssProc.Data).ToArray();
+        Assert.Equal(2, dataRequests.Length);
+        Assert.Equal(dataRequests[0].ContextHandle, dataRequests[1].ContextHandle);
+        Assert.NotEqual(dataRequests[0].Xid, dataRequests[1].Xid);
+        Assert.Equal(dataRequests[0].SeqNum + 1, dataRequests[1].SeqNum);
+
+        // The established context stays usable after discarding the late reply.
+        Assert.Equal(NfsType.Dir, (await client.GetAttributesAsync(client.RootHandle, timeout.Token)).Type);
+    }
+
+    [KerberosIntegrationTheory]
+    [Trait("Category", "KerberosIntegration")]
+    [InlineData(RpcSecGssService.None)]
+    [InlineData(RpcSecGssService.Integrity)]
+    [InlineData(RpcSecGssService.Privacy)]
+    public async Task RetryReplayedFirstAttemptVerifierFailsClosedAndRetiresContext(RpcSecGssService service)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var proxy = KerberosRpcProxy.Start(retryMode: RetryProxyMode.DropFirstDataReplyAndReplayVerifierOnRetry);
+        var options = CreateOptions(
+            service,
+            portmapPort: proxy.PortmapPort,
+            maxRetries: 1,
+            retryDelay: TimeSpan.Zero);
+        await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
+
+        // Replaying the real first-attempt reply under the retry's XID must fail sequence MIC verification.
+        var error = await Assert.ThrowsAsync<NfsException>(() => client.GetAttributesAsync(client.RootHandle, timeout.Token));
+        Assert.Null(proxy.MutatorException);
+        Assert.True(proxy.ReplayedFirstAttemptReplyDelivered);
+        Assert.Contains("sequence number MIC mismatch", error.Message);
+
+        var dataRequests = proxy.ObservedGssRequests.Where(r => r.GssProc == RpcSecGssProc.Data).ToArray();
+        Assert.Equal(2, dataRequests.Length);
+        Assert.Equal(dataRequests[0].ContextHandle, dataRequests[1].ContextHandle);
+        Assert.NotEqual(dataRequests[0].Xid, dataRequests[1].Xid);
+        Assert.Equal(dataRequests[0].SeqNum + 1, dataRequests[1].SeqNum);
+
+        var requestsAfterFailure = proxy.ObservedNfsRequestCount;
+        await Assert.ThrowsAsync<NfsException>(() => client.GetAttributesAsync(client.RootHandle, timeout.Token));
+        Assert.Equal(requestsAfterFailure, proxy.ObservedNfsRequestCount);
+    }
+
+    [KerberosIntegrationFact]
+    [Trait("Category", "KerberosIntegration")]
+    public async Task RealServerLogsAndExceptionsRedactTokensVerifiersAndProtectedPayloads()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var logger = new CapturingLogger();
+        var diagnostics = new List<string>();
+        var capturedSecrets = new List<byte[]>();
+        var secretText = $"nfssharp-privacy-secret-{Guid.NewGuid():N}";
+        var secretBytes = Encoding.UTF8.GetBytes(secretText);
+        capturedSecrets.Add(secretBytes);
+
+        // Exercise normal privacy I/O, verifier tampering, privacy-body tampering, and handshake rejection.
+        await using (var proxy = KerberosRpcProxy.Start())
+        {
+            var options = CreateOptions(RpcSecGssService.Privacy, portmapPort: proxy.PortmapPort, logger: logger);
+            await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
+            var path = $"redact-{Guid.NewGuid():N}";
+            await using (var input = new MemoryStream(secretBytes))
+                await client.WriteFileAsync(path, input, timeout.Token);
+            await using (var output = new MemoryStream())
+            {
+                await client.ReadFileAsync(path, output, timeout.Token);
+                Assert.Equal(secretBytes, output.ToArray());
+            }
+            await client.DeleteFileAsync(path, timeout.Token);
+            await client.UnmountAsync(timeout.Token);
+
+            capturedSecrets.AddRange(proxy.ObservedSensitiveWireBlobs);
+        }
+
+        await using (var proxy = KerberosRpcProxy.Start((replyIndex, reply) =>
+            replyIndex == 2 ? FlipReplyVerifierBit(reply) : reply))
+        {
+            var options = CreateOptions(
+                RpcSecGssService.Privacy,
+                portmapPort: proxy.PortmapPort,
+                maxRetries: 0,
+                logger: logger);
+            await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
+            var ex = await Assert.ThrowsAsync<NfsException>(() => client.GetAttributesAsync(client.RootHandle, timeout.Token));
+            diagnostics.Add(ex.ToString());
+            capturedSecrets.AddRange(proxy.ObservedSensitiveWireBlobs);
+        }
+
+        await using (var proxy = KerberosRpcProxy.Start((replyIndex, reply) =>
+            replyIndex == 2 ? FlipFirstBodyOpaqueBit(reply) : reply))
+        {
+            var options = CreateOptions(
+                RpcSecGssService.Privacy,
+                portmapPort: proxy.PortmapPort,
+                maxRetries: 0,
+                logger: logger);
+            await using var client = await NfsV3Client.ConnectAsync(ServerHost, RwExport, options, timeout.Token);
+            var ex = await Assert.ThrowsAsync<NfsException>(() => client.GetAttributesAsync(client.RootHandle, timeout.Token));
+            diagnostics.Add(ex.ToString());
+            capturedSecrets.AddRange(proxy.ObservedSensitiveWireBlobs);
+        }
+
+        var unknownPrincipalError = await Assert.ThrowsAsync<NfsException>(() =>
+            NfsV3Client.ConnectAsync(
+                ServerHost,
+                RwExport,
+                CreateOptions(
+                    RpcSecGssService.Privacy,
+                    maxRetries: 0,
+                    logger: logger,
+                    servicePrincipal: $"nfs/unknown.test.local@{Realm}"),
+                timeout.Token));
+        diagnostics.Add(unknownPrincipalError.ToString());
+
+        var logMessages = logger.Snapshot();
+        Assert.NotEmpty(logMessages);
+        Assert.Contains(logMessages, m => m.Contains("RPCSEC_GSS context established", StringComparison.Ordinal));
+        Assert.Contains(logMessages, m => m.Contains("RPCSEC_GSS reply verifier accepted", StringComparison.Ordinal));
+        // Require real wire tokens/verifiers/protected bodies (>= 8 bytes) so redaction checks are non-vacuous.
+        var wireSecrets = capturedSecrets.Where(blob => blob.Length >= 8).ToArray();
+        Assert.True(wireSecrets.Length >= 4, $"Expected at least 4 sensitive wire blobs, captured {wireSecrets.Length}.");
+
+        diagnostics.AddRange(logMessages);
+        foreach (var entry in diagnostics)
+        {
+            Assert.DoesNotContain(secretText, entry, StringComparison.OrdinalIgnoreCase);
+            foreach (var blob in wireSecrets)
+            {
+                Assert.DoesNotContain(Convert.ToBase64String(blob), entry, StringComparison.Ordinal);
+                Assert.DoesNotContain(Convert.ToHexString(blob), entry, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+    }
+
     private static NfsClientOptions CreateOptions(
         RpcSecGssService service,
         int portmapPort = 111,
         int maxRetries = 2,
-        int maxOutstanding = 32) =>
-        new NfsClientBuilder()
-            .WithKerberos(ServicePrincipal, service)
+        int maxOutstanding = 32,
+        TimeSpan? retryDelay = null,
+        ILogger? logger = null,
+        string? servicePrincipal = null)
+    {
+        var builder = new NfsClientBuilder()
+            .WithKerberos(servicePrincipal ?? ServicePrincipal, service)
             .WithPrivilegedSourcePort(false)
             .WithPortmapPort(portmapPort)
             .WithMaxRetries(maxRetries)
-            .WithMaxOutstandingRpcCallsPerConnection(maxOutstanding)
-            .BuildOptions();
+            .WithMaxOutstandingRpcCallsPerConnection(maxOutstanding);
+        if (retryDelay.HasValue)
+            builder.WithRetryDelay(retryDelay.Value);
+        if (logger is not null)
+            builder.WithLogger(logger);
+        return builder.BuildOptions();
+    }
 
     private static async Task RunCommandAsync(string fileName, string[] arguments, CancellationToken ct)
     {
@@ -557,22 +724,65 @@ public sealed class KerberosIntegrationTests
         }
     }
 
+    private enum RetryProxyMode
+    {
+        None,
+        DropFirstDataReplyAndDeliverLateOnRetry,
+        DropFirstDataReplyAndReplayVerifierOnRetry
+    }
+
+    private sealed record ObservedGssRequest(uint Xid, RpcSecGssProc GssProc, uint SeqNum, byte[] ContextHandle);
+
+    private sealed class CapturingLogger : ILogger
+    {
+        private readonly ConcurrentQueue<string> _messages = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var entry = exception is null
+                ? formatter(state, exception)
+                : $"{formatter(state, exception)} {exception}";
+            _messages.Enqueue(entry);
+        }
+
+        public string[] Snapshot() => _messages.ToArray();
+    }
+
     private sealed class KerberosRpcProxy : IAsyncDisposable
     {
         private readonly TcpListener _portmapListener;
         private readonly TcpListener _nfsListener;
         private readonly Func<int, byte[], byte[]>? _replyMutator;
+        private readonly RetryProxyMode _retryMode;
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _portmapLoop;
         private readonly Task _nfsLoop;
         private readonly ConcurrentQueue<RpcSecGssProc> _observedGssProcs = new();
+        private readonly ConcurrentQueue<ObservedGssRequest> _observedGssRequests = new();
+        private readonly ConcurrentQueue<byte[]> _observedSensitiveWireBlobs = new();
+        private readonly TaskCompletionSource<byte[]> _delayedFirstDataReply =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _observedNfsRequestCount;
+        private int _dataRequestCount;
+        private long _firstDataXid = -1;
+        private long _retryDataXid = -1;
+        private int _lateFirstAttemptReplyDelivered;
+        private int _replayedFirstAttemptReplyDelivered;
         private int _replyIndex;
         private Exception? _mutatorException;
 
-        private KerberosRpcProxy(Func<int, byte[], byte[]>? replyMutator)
+        private KerberosRpcProxy(Func<int, byte[], byte[]>? replyMutator, RetryProxyMode retryMode)
         {
             _replyMutator = replyMutator;
+            _retryMode = retryMode;
             _portmapListener = new TcpListener(IPAddress.Loopback, 0);
             _nfsListener = new TcpListener(IPAddress.Loopback, 0);
             _portmapListener.Start();
@@ -587,10 +797,16 @@ public sealed class KerberosIntegrationTests
         public int NfsPort { get; }
         public int ObservedNfsRequestCount => Volatile.Read(ref _observedNfsRequestCount);
         public IReadOnlyCollection<RpcSecGssProc> ObservedGssProcs => _observedGssProcs.ToArray();
+        public IReadOnlyList<ObservedGssRequest> ObservedGssRequests => _observedGssRequests.ToArray();
+        public IReadOnlyCollection<byte[]> ObservedSensitiveWireBlobs => _observedSensitiveWireBlobs.ToArray();
+        public bool LateFirstAttemptReplyDelivered => Volatile.Read(ref _lateFirstAttemptReplyDelivered) != 0;
+        public bool ReplayedFirstAttemptReplyDelivered => Volatile.Read(ref _replayedFirstAttemptReplyDelivered) != 0;
         public Exception? MutatorException => Volatile.Read(ref _mutatorException);
 
-        public static KerberosRpcProxy Start(Func<int, byte[], byte[]>? replyMutator = null) =>
-            new(replyMutator);
+        public static KerberosRpcProxy Start(
+            Func<int, byte[], byte[]>? replyMutator = null,
+            RetryProxyMode retryMode = RetryProxyMode.None) =>
+            new(replyMutator, retryMode);
 
         private async Task RunPortmapLoopAsync(CancellationToken ct)
         {
@@ -685,6 +901,10 @@ public sealed class KerberosIntegrationTests
 
                     var c2s = PumpRequestsAsync(clientStream, upstreamStream, linked);
                     var s2c = PumpRepliesAsync(upstreamStream, clientStream, linked);
+                    await Task.WhenAny(c2s, s2c);
+                    await linked.CancelAsync();
+                    client.Close();
+                    upstream.Close();
                     await Task.WhenAll(c2s, s2c);
                 }
                 catch { }
@@ -699,7 +919,7 @@ public sealed class KerberosIntegrationTests
                 {
                     var request = await RpcRecordStream.ReceiveAsync(source, linked.Token);
                     Interlocked.Increment(ref _observedNfsRequestCount);
-                    RecordGssProc(request);
+                    RecordGssRequest(request);
                     await RpcTransport.SendRecordAsync(destination, request, linked.Token);
                 }
             }
@@ -716,6 +936,37 @@ public sealed class KerberosIntegrationTests
                 while (!linked.Token.IsCancellationRequested)
                 {
                     var reply = await RpcRecordStream.ReceiveAsync(source, linked.Token);
+                    RecordReplyWireBlobs(reply);
+                    if (_retryMode != RetryProxyMode.None && reply.Length >= 4)
+                    {
+                        var replyXid = (long)BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(0, 4));
+                        if (replyXid == Volatile.Read(ref _firstDataXid))
+                        {
+                            // Hold the real first-attempt reply and sever the client socket to trigger a retry.
+                            _delayedFirstDataReply.TrySetResult(reply);
+                            await linked.CancelAsync();
+                            return;
+                        }
+
+                        if (replyXid == Volatile.Read(ref _retryDataXid))
+                        {
+                            var delayed = await _delayedFirstDataReply.Task.WaitAsync(linked.Token);
+                            if (_retryMode == RetryProxyMode.DropFirstDataReplyAndDeliverLateOnRetry)
+                            {
+                                await RpcTransport.SendRecordAsync(destination, delayed, linked.Token);
+                                Volatile.Write(ref _lateFirstAttemptReplyDelivered, 1);
+                                await RpcTransport.SendRecordAsync(destination, reply, linked.Token);
+                                continue;
+                            }
+
+                            var replayed = delayed.ToArray();
+                            BinaryPrimitives.WriteUInt32BigEndian(replayed.AsSpan(0, 4), (uint)replyXid);
+                            await RpcTransport.SendRecordAsync(destination, replayed, linked.Token);
+                            Volatile.Write(ref _replayedFirstAttemptReplyDelivered, 1);
+                            continue;
+                        }
+                    }
+
                     var index = Interlocked.Increment(ref _replyIndex);
                     if (_replyMutator is not null)
                     {
@@ -738,12 +989,12 @@ public sealed class KerberosIntegrationTests
             }
         }
 
-        private void RecordGssProc(byte[] request)
+        private void RecordGssRequest(byte[] request)
         {
             try
             {
                 var reader = new XdrReader(request);
-                _ = reader.UInt(); // xid
+                var xid = reader.UInt(); // xid
                 _ = reader.UInt(); // msg_type
                 _ = reader.UInt(); // rpcvers
                 _ = reader.UInt(); // prog
@@ -757,9 +1008,76 @@ public sealed class KerberosIntegrationTests
                 var gssCred = new XdrReader(credBody);
                 _ = gssCred.UInt(); // version
                 var gssProc = (RpcSecGssProc)gssCred.UInt();
+                var seqNum = gssCred.UInt();
+                var service = (RpcSecGssService)gssCred.UInt();
+                var contextHandle = gssCred.Opaque();
                 _observedGssProcs.Enqueue(gssProc);
+                _observedGssRequests.Enqueue(new ObservedGssRequest(xid, gssProc, seqNum, contextHandle));
+
+                if (contextHandle.Length >= 8)
+                    _observedSensitiveWireBlobs.Enqueue(contextHandle);
+
+                _ = reader.UInt(); // verf flavor
+                var verfBody = reader.Opaque();
+                if (verfBody.Length >= 8)
+                    _observedSensitiveWireBlobs.Enqueue(verfBody);
+
+                if (gssProc is RpcSecGssProc.Init or RpcSecGssProc.ContinueInit)
+                {
+                    var initToken = reader.Opaque();
+                    if (initToken.Length >= 8)
+                        _observedSensitiveWireBlobs.Enqueue(initToken);
+                }
+                else if (gssProc == RpcSecGssProc.Data)
+                {
+                    if (service == RpcSecGssService.Privacy)
+                    {
+                        var wrappedBody = reader.Opaque();
+                        if (wrappedBody.Length >= 8)
+                            _observedSensitiveWireBlobs.Enqueue(wrappedBody);
+                    }
+
+                    if (_retryMode != RetryProxyMode.None)
+                    {
+                        var dataIndex = Interlocked.Increment(ref _dataRequestCount);
+                        if (dataIndex == 1)
+                            Volatile.Write(ref _firstDataXid, xid);
+                        else if (dataIndex == 2)
+                            Volatile.Write(ref _retryDataXid, xid);
+                    }
+                }
             }
             catch { }
+        }
+
+        private void RecordReplyWireBlobs(byte[] reply)
+        {
+            if (reply.Length < 24)
+                return;
+
+            var replyStat = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(8, 4));
+            var verifierFlavor = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(12, 4));
+            var verifierLength = (int)BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(16, 4));
+            if (replyStat != 0 ||
+                verifierFlavor != (uint)RpcSecGssFlavor.Gss ||
+                verifierLength < 0 ||
+                verifierLength > reply.Length - 20)
+                return;
+
+            if (verifierLength >= 8)
+                _observedSensitiveWireBlobs.Enqueue(reply.AsSpan(20, verifierLength).ToArray());
+
+            var bodyOffset = GetAcceptedReplyBodyOffset(reply);
+            if (bodyOffset < 24 || bodyOffset > reply.Length - 4)
+                return;
+
+            var acceptStat = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(bodyOffset - 4, 4));
+            if (acceptStat != 0)
+                return;
+
+            var opaqueLength = (int)BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(bodyOffset, 4));
+            if (opaqueLength >= 16 && opaqueLength <= reply.Length - bodyOffset - 4)
+                _observedSensitiveWireBlobs.Enqueue(reply.AsSpan(bodyOffset + 4, opaqueLength).ToArray());
         }
 
         public async ValueTask DisposeAsync()
