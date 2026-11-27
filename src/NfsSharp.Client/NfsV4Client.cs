@@ -663,8 +663,16 @@ public sealed class NfsV4Client : IAsyncDisposable
             attr = attr with { Change = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.Size))
             attr = attr with { Size = attrReader.ULong() };
+        if (bitmap.HasAttr(NfsV4Attr.LeaseTime))
+            attr = attr with { LeaseTime = attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.Fileid))
             attr = attr with { Fileid = attrReader.ULong() };
+        if (bitmap.HasAttr(NfsV4Attr.Maxfilesize))
+            attr = attr with { Maxfilesize = attrReader.ULong() };
+        if (bitmap.HasAttr(NfsV4Attr.Maxread))
+            attr = attr with { Maxread = attrReader.UInt() };
+        if (bitmap.HasAttr(NfsV4Attr.Maxwrite))
+            attr = attr with { Maxwrite = attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.Mode))
             attr = attr with { Mode = attrReader.UInt() };
         if (bitmap.HasAttr(NfsV4Attr.Numinlinks))
@@ -681,16 +689,22 @@ public sealed class NfsV4Client : IAsyncDisposable
             attr = attr with { SpaceTotal = attrReader.ULong() };
         if (bitmap.HasAttr(NfsV4Attr.SpaceUsed))
             attr = attr with { SpaceUsed = attrReader.ULong() };
-        if (bitmap.HasAttr(NfsV4Attr.Maxfilesize))
-            attr = attr with { Maxfilesize = attrReader.ULong() };
-        if (bitmap.HasAttr(NfsV4Attr.Maxread))
-            attr = attr with { Maxread = attrReader.UInt() };
-        if (bitmap.HasAttr(NfsV4Attr.Maxwrite))
-            attr = attr with { Maxwrite = attrReader.UInt() };
-        if (bitmap.HasAttr(NfsV4Attr.LeaseTime))
-            attr = attr with { LeaseTime = attrReader.UInt() };
+        if (bitmap.HasAttr(NfsV4Attr.TimeAccess))
+            attr = attr with { TimeAccess = DecodeNfsTime(attrReader) };
+        if (bitmap.HasAttr(NfsV4Attr.TimeModify))
+            attr = attr with { TimeModify = DecodeNfsTime(attrReader) };
 
         return attr;
+    }
+
+    private static DateTime DecodeNfsTime(XdrReader reader)
+    {
+        // RFC 7530 nfstime4 is signed seconds followed by unsigned nanoseconds.
+        var seconds = unchecked((long)reader.ULong());
+        var nanoseconds = reader.UInt();
+        if (nanoseconds >= 1_000_000_000)
+            throw new NfsException("Invalid NFSv4 timestamp nanoseconds.");
+        return DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime.AddTicks(nanoseconds / 100);
     }
 
     /// <summary>Decode a single READDIR page; the eof flag is currently ignored, so listings are not paged further.</summary>

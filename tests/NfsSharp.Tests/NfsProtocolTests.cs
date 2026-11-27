@@ -2588,6 +2588,52 @@ public class NfsModelsTests
         Assert.Equal(fileHandle, response.Results[1].Data!.Opaque());
     }
 
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public void NfsV4Client_DecodeFattr_ReadsRequestedTimesInAttributeOrder(bool access, bool modify)
+    {
+        var attributes = new List<uint> { NfsV4Attr.Size, NfsV4Attr.OwnerGroup };
+        if (access) attributes.Add(NfsV4Attr.TimeAccess);
+        if (modify) attributes.Add(NfsV4Attr.TimeModify);
+        var values = new XdrWriter();
+        values.ULong(123);
+        values.Str("group");
+        if (access) { values.ULong(unchecked((ulong)-1L)); values.UInt(123456789); }
+        if (modify) { values.ULong(1700000000); values.UInt(987654321); }
+        var wire = new XdrWriter();
+        NfsV4Bitmap.Of(attributes.ToArray()).Encode(wire);
+        wire.Opaque(values.ToArray());
+
+        var method = typeof(NfsV4Client).GetMethod("DecodeFattr", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var result = (NfsV4Fattr)method.Invoke(CreateNfsV4Client(), [new XdrReader(wire.ToArray())])!;
+
+        Assert.Equal(123ul, result.Size);
+        Assert.Equal("group", result.OwnerGroup);
+        Assert.Equal(access ? DateTime.UnixEpoch.AddSeconds(-1).AddTicks(1234567) : null, result.TimeAccess);
+        Assert.Equal(modify ? DateTime.UnixEpoch.AddSeconds(1700000000).AddTicks(9876543) : null, result.TimeModify);
+    }
+
+    [Fact]
+    public void NfsV4Client_DecodeFattr_RejectsInvalidTimeNanoseconds()
+    {
+        var values = new XdrWriter();
+        values.ULong(0);
+        values.UInt(1_000_000_000);
+        var wire = new XdrWriter();
+        NfsV4Bitmap.Of(NfsV4Attr.TimeAccess).Encode(wire);
+        wire.Opaque(values.ToArray());
+        var method = typeof(NfsV4Client).GetMethod("DecodeFattr", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var error = Assert.Throws<TargetInvocationException>(() =>
+            method.Invoke(CreateNfsV4Client(), [new XdrReader(wire.ToArray())]));
+        Assert.IsType<NfsException>(error.InnerException);
+    }
+
     [Fact]
     public async Task NfsV4Client_RejectsGssOptionsBeforeResolvingServer()
     {

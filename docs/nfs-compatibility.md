@@ -72,7 +72,7 @@ An implemented method without real-server verification remains partial or experi
 
 `NfsV4Client` exposes direct COMPOUND-oriented APIs and selected convenience operations. These APIs are experimental because the current automated suite does not validate server interoperability, state recovery, lease behavior, replay handling, callbacks, or a broad security matrix.
 
-The protocol test suite covers local NFSv4 encoding and decoding primitives, including `bitmap4` mask-word construction, `stateid4` fixed-field encoding, COMPOUND response ordering and payload capture, OPEN variants, NFSv4.2 COPY and CLONE layouts, and SECINFO handling. This coverage prevents several malformed request and response-handling cases but is not a server compatibility guarantee.
+The protocol test suite covers local NFSv4 encoding and decoding primitives, including `bitmap4` mask-word construction, `stateid4` fixed-field encoding, COMPOUND response ordering and payload capture, GETATTR access and modification times (converted to UTC `DateTime` with 100-nanosecond precision), OPEN variants, NFSv4.2 COPY and CLONE layouts, and SECINFO handling. Attribute coverage remains experimental pending the broader wire and real-server evidence tracked by [#111](https://github.com/GaTTGeng/NfsSharp/issues/111). This coverage is not a server compatibility guarantee.
 
 The high-level `NfsClient` facade intentionally remains NFSv3-only until NFSv4 lifecycle and recovery guarantees are strong enough to define a stable abstraction.
 
